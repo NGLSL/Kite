@@ -73,8 +73,9 @@ src/
 
 ## 6. 阶段与质量
 
-- 只做当前 Phase 需要的；拼音/Alias/Fuzzy/SQLite/托盘/插件属后续
-- 搜索 Bug 修完把 Query 加进回归（PRD §63）
+- 只做当前 Phase 需要的；用户 Alias 持久化 / 历史 / SQLite / 托盘 / 插件属后续
+- 搜索回归：`cd src-tauri; cargo test`；修 bug 往 `search/mod.rs` 的 `assert_top` 加用例
+- Phase 2：拼音索引时预计算；分数集中在 `search/ranker.rs`；同分短名优先
 - 失败先读真实错误再最小修复
 
 ## 7. 本机环境（勿重复安装）

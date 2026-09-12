@@ -1,7 +1,5 @@
 //! 内置 Alias。原则：少而准，不为冷门词扩容。
 
-use crate::search::ranker::SCORE_BUILTIN_ALIAS_EXACT;
-
 /// 是否为内置 Alias（Query 已 normalize）。
 pub fn is_builtin_alias(query_norm: &str) -> bool {
     BUILTIN_EXACT.iter().any(|a| *a == query_norm)
