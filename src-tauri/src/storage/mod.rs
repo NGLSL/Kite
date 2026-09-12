@@ -16,8 +16,9 @@ pub struct UsageStats {
     pub last_used_at: i64,
 }
 
-/// Query→App 配对统计。
+/// Query→App 配对统计。`last_used_at` 预留调试与后续策略。
 #[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
 pub struct QueryPairStats {
     pub count: i64,
     pub last_used_at: i64,

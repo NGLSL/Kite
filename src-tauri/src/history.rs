@@ -9,26 +9,25 @@ use crate::storage::{QueryPairStats, UsageStats};
 /// 历史总加分上限。须 < (SCORE_NAME_EXACT - SCORE_PREFIX) = 200。
 pub const HISTORY_BOOST_MAX: i32 = 160;
 
-const QUERY_PAIR_CAP: i32 = 90;
 const FREQUENCY_CAP: i32 = 50;
 const RECENCY_CAP: i32 = 40;
 
-/// 计算历史加分（已 clamp 到 HISTORY_BOOST_MAX）。
-pub fn history_boost(query: &str, usage: &UsageStats, pair: &QueryPairStats, now: i64) -> i32 {
+/// 计算历史加分（已 clamp 到 HISTORY_BOOST_MAX）。`_query` 预留调试。
+pub fn history_boost(_query: &str, usage: &UsageStats, pair: &QueryPairStats, now: i64) -> i32 {
     let q = query_pair_score(pair);
     let f = frequency_score(usage.launch_count);
     let r = recency_score(usage.last_used_at, now);
     (q + f + r).min(HISTORY_BOOST_MAX)
 }
 
-/// Query→App 配对越稳越高；对数增长，封顶。
+/// Query→App 配对越稳越高；对数增长，单独封顶 90。
 fn query_pair_score(pair: &QueryPairStats) -> i32 {
     if pair.count <= 0 {
         return 0;
     }
     // 1→20, 3→38, 10→60, 30→~85
     let s = 20.0 + 15.0 * (pair.count as f64).ln();
-    s.round() as i32
+    (s.round() as i32).min(90)
 }
 
 fn frequency_score(count: i64) -> i32 {
