@@ -10,8 +10,11 @@ pub mod url;
 
 use crate::model::{AppItem, SearchResult};
 
-/// 默认返回条数。
+/// 默认返回条数（首页）。
 pub const TOP_N: usize = 10;
+
+/// 排序结果缓存/返回上限；滚动加载最多翻到这里。
+pub const MAX_RESULTS: usize = 200;
 
 /// 索引用名称规范化（供 AppItem 预计算）。
 pub fn normalize_for_index(name: &str) -> String {
@@ -25,13 +28,19 @@ pub fn pinyin_of(text: &str) -> (String, String) {
 
 /// 入口：空 Query 给默认列表，否则多路召回 + 排序。
 /// `user_alias_targets`：用户 Alias 命中的应用名（小写）。
-pub fn search(apps: &[AppItem], query: &str, user_alias_targets: &[String]) -> Vec<SearchResult> {
+/// `max_results`：返回条数上限（滚动加载时调用方逐步放大；截断在 IPC 边界做）。
+pub fn search(
+    apps: &[AppItem],
+    query: &str,
+    user_alias_targets: &[String],
+    max_results: usize,
+) -> Vec<SearchResult> {
     let q = normalizer::normalize_query(query);
     if q.is_empty() {
         // 无历史时退回索引顺序；有历史请调用方走 order_by_recent
         return apps
             .iter()
-            .take(TOP_N)
+            .take(max_results)
             .map(|item| SearchResult {
                 item: item.clone(),
                 score: 0,
@@ -41,7 +50,7 @@ pub fn search(apps: &[AppItem], query: &str, user_alias_targets: &[String]) -> V
     }
 
     let hits = matcher::collect_candidates(apps, &q, user_alias_targets);
-    ranker::rank_and_truncate(hits, TOP_N)
+    ranker::rank_and_truncate(hits, max_results)
 }
 
 /// 空 Query 默认列表：最近使用优先，不足再按索引顺序补满。
@@ -112,8 +121,12 @@ mod tests {
             item("企业微信"),
             item("IntelliJ IDEA"),
             item("Notepad"),
+            item("网易云音乐"),
+            item("Steam"),
+            item("计算器"),
+            item("Windows Terminal"),
         ];
-        let hits = search(&apps, query, &[]);
+        let hits = search(&apps, query, &[], TOP_N);
         assert!(
             !hits.is_empty(),
             "no hits for {query}"
@@ -156,6 +169,21 @@ mod tests {
     #[test]
     fn alias_idea() {
         assert_top("idea", "IntelliJ IDEA");
+    }
+
+    #[test]
+    fn alias_new_builtin_spots() {
+        // 各领域抽查：扩充内置 Alias 后仍要排第一
+        assert_top("wyy", "网易云音乐");
+        assert_top("steam", "Steam");
+        assert_top("calc", "计算器");
+        assert_top("wt", "Windows Terminal");
+    }
+
+    #[test]
+    fn alias_vs_still_finds_vscode_first_available() {
+        // "vs" 片段覆盖 VS 与 VS Code；两者都在时短名 Visual Studio 在前
+        assert_top("vs", "Visual Studio");
     }
 
     #[test]
@@ -225,5 +253,25 @@ mod tests {
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].item.name, "A");
         assert_eq!(hits[1].item.name, "B");
+    }
+
+    #[test]
+    fn max_results_caps_output() {
+        let apps: Vec<_> = (0..20).map(|i| item(&format!("App{i:02}"))).collect();
+        assert_eq!(search(&apps, "app", &[], 3).len(), 3);
+        assert_eq!(search(&apps, "app", &[], 100).len(), 20);
+    }
+
+    #[test]
+    fn pages_are_consistent_prefixes() {
+        // 滚动加载契约：前 K 条与一次取更多时的前 K 条完全一致
+        let apps: Vec<_> = (0..15).map(|i| item(&format!("App{i:02}"))).collect();
+        let full = search(&apps, "app", &[], 15);
+        let first = search(&apps, "app", &[], 5);
+        assert_eq!(full.len(), 15);
+        assert_eq!(first.len(), 5);
+        for (i, hit) in first.iter().enumerate() {
+            assert_eq!(hit.item.id, full[i].item.id, "第 {i} 页不一致");
+        }
     }
 }

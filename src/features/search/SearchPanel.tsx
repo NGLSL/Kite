@@ -21,6 +21,7 @@ export function SearchPanel() {
     moveActive,
     searchFiles,
     setSearchFiles,
+    loadMore,
   } = useSearch();
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -86,6 +87,17 @@ export function SearchPanel() {
     el?.scrollIntoView({ block: "nearest" });
   }, [active, results]);
 
+  // 滚动加载：距底部不足约一行时追加下一页
+  const onResultsScroll = useCallback(
+    (e: React.UIEvent<HTMLDivElement>) => {
+      const el = e.currentTarget;
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 56) {
+        void loadMore();
+      }
+    },
+    [loadMore],
+  );
+
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       // Alt+1..9 直接启动对应结果
@@ -139,7 +151,6 @@ export function SearchPanel() {
               inputRef={inputRef}
               searchFiles={searchFiles}
               onToggleFiles={() => setSearchFiles((v) => !v)}
-              onFocusSearch={focusSearch}
             />
             <StatusRegion scanning={scanning} empty={empty} error={error} />
             <ResultList
@@ -149,6 +160,7 @@ export function SearchPanel() {
               listRef={listRef}
               onSelect={setActive}
               onLaunch={(item) => void launch(item)}
+              onScroll={onResultsScroll}
             />
             <div className="footer-bar">
               <span>

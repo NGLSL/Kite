@@ -1,0 +1,40 @@
+# 发布：推 v* 标签（或手动触发）时构建 NSIS/MSI 安装包并发布 GitHub Release。
+# 版本检查功能依赖这里的 release（tag 形如 v0.2.0）。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Kite ${{ github.ref_name }}"
+          releaseBody: "Windows 安装包：NSIS（推荐）与 MSI。需要 Everything 已在后台运行才能使用文件搜索。"
+          releaseDraft: false
+          prerelease: false

@@ -53,7 +53,7 @@ export function ResultItem({ item, index, active, query, onSelect, onLaunch }: P
           {secondaryLabel(item)}
         </div>
       </div>
-      <div className="item-hint">Alt+{index + 1}</div>
+      <div className="item-hint">{index < 9 ? `Alt+${index + 1}` : ""}</div>
     </div>
   );
 }

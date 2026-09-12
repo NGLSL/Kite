@@ -111,9 +111,9 @@ fn budget_exhausted(budget: Option<Duration>, t0: Instant) -> bool {
     budget.is_some_and(|b| t0.elapsed() >= b)
 }
 
-/// 只给缺少 icon 的条目补图标（可多次调用）。
-pub fn fill_missing_icons(index: &mut AppIndex, icon_dir: &Path) {
-    let pending: Vec<(String, Option<String>)> = index
+/// 收集缺少图标的条目 (id, 提取源)。调用方短暂持锁后即可释放。
+pub fn missing_icon_targets(index: &AppIndex) -> Vec<(String, Option<String>)> {
+    index
         .apps
         .iter()
         .filter(|a| a.icon.is_none())
@@ -125,23 +125,25 @@ pub fn fill_missing_icons(index: &mut AppIndex, icon_dir: &Path) {
                 .or_else(|| Some(a.target.clone()));
             (a.id.clone(), src)
         })
-        .collect();
-    if pending.is_empty() {
-        return;
-    }
-    fill_icons_parallel(&mut index.apps, icon_dir, &pending);
+        .collect()
 }
 
-fn fill_icons_parallel(apps: &mut [AppItem], icon_dir: &Path, pending: &[(String, Option<String>)]) {
+/// 并行提取图标，返回 id → PNG 路径；提取过程不持任何锁，调用方拿结果后短暂持锁合并。
+pub fn extract_icons_parallel(
+    pending: &[(String, Option<String>)],
+    icon_dir: &Path,
+) -> HashMap<String, Option<String>> {
     use std::sync::Arc;
     let results = Arc::new(Mutex::new(HashMap::<String, Option<String>>::new()));
+    if pending.is_empty() {
+        return HashMap::new();
+    }
     let chunk = pending.len().div_ceil(8).max(1);
-    let icon_dir = icon_dir.to_path_buf();
 
     std::thread::scope(|s| {
         for part in pending.chunks(chunk) {
             let part: Vec<(String, Option<String>)> = part.to_vec();
-            let icon_dir = icon_dir.clone();
+            let icon_dir = icon_dir.to_path_buf();
             let results = Arc::clone(&results);
             s.spawn(move || {
                 for (id, src) in &part {
@@ -154,15 +156,7 @@ fn fill_icons_parallel(apps: &mut [AppItem], icon_dir: &Path, pending: &[(String
         }
     });
 
-    let snapshot: HashMap<String, Option<String>> =
-        results.lock().map(|g| g.clone()).unwrap_or_default();
-    for app in apps.iter_mut() {
-        if app.icon.is_none() {
-            if let Some(p) = snapshot.get(&app.id) {
-                app.icon = p.clone();
-            }
-        }
-    }
+    results.lock().map(|g| g.clone()).unwrap_or_default()
 }
 
 fn collect_from_dir(

@@ -4,6 +4,9 @@
 //! - 历史总加分有上限，不得让 Prefix 压过 Name Exact
 //! - 不做纯 LRU
 
+use std::collections::HashMap;
+
+use crate::model::SearchResult;
 use crate::storage::{QueryPairStats, UsageStats};
 
 /// 历史总加分上限。须 < (SCORE_NAME_EXACT - SCORE_PREFIX) = 200。
@@ -11,6 +14,26 @@ pub const HISTORY_BOOST_MAX: i32 = 160;
 
 const FREQUENCY_CAP: i32 = 50;
 const RECENCY_CAP: i32 = 40;
+
+/// 把批量取回的历史加到排序结果上（Match 仍是主信号）。
+/// `usage`/`pairs` 缺行按默认值（0 加分）。
+pub fn apply_boosts(
+    hits: &mut [SearchResult],
+    usage: HashMap<String, UsageStats>,
+    pairs: HashMap<String, QueryPairStats>,
+    query_norm: &str,
+    now: i64,
+) {
+    for hit in hits {
+        let u = usage.get(&hit.item.id).cloned().unwrap_or_default();
+        let p = pairs.get(&hit.item.id).cloned().unwrap_or_default();
+        let boost = history_boost(query_norm, &u, &p, now);
+        hit.score += boost;
+        if boost > 0 {
+            hit.matched_by = format!("{}+history", hit.matched_by);
+        }
+    }
+}
 
 /// 计算历史加分（已 clamp 到 HISTORY_BOOST_MAX）。`_query` 预留调试。
 pub fn history_boost(_query: &str, usage: &UsageStats, pair: &QueryPairStats, now: i64) -> i32 {
@@ -58,6 +81,39 @@ fn recency_score(last_used_at: i64, now: i64) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::AppItem;
+
+    fn hit(id: &str) -> SearchResult {
+        SearchResult {
+            item: AppItem::scanned(id.into(), id.into(), format!("C:\\{id}.exe"), None, None, "t"),
+            score: 100,
+            matched_by: "test".into(),
+        }
+    }
+
+    #[test]
+    fn apply_boosts_missing_rows_are_zero() {
+        let mut hits = vec![hit("a"), hit("b")];
+        apply_boosts(&mut hits, HashMap::new(), HashMap::new(), "q", 1);
+        assert_eq!(hits[0].score, 100, "无历史记录 → 不加分");
+        assert_eq!(hits[0].matched_by, "test");
+    }
+
+    #[test]
+    fn apply_boosts_marks_history() {
+        let mut hits = vec![hit("a")];
+        let mut usage = HashMap::new();
+        usage.insert(
+            "a".to_string(),
+            UsageStats {
+                launch_count: 10,
+                last_used_at: 1_000,
+            },
+        );
+        apply_boosts(&mut hits, usage, HashMap::new(), "q", 2_000);
+        assert!(hits[0].score > 100);
+        assert!(hits[0].matched_by.ends_with("+history"));
+    }
 
     #[test]
     fn boost_capped() {

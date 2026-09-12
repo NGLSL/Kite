@@ -32,10 +32,6 @@ pub fn info(msg: &str) {
     }
 }
 
-pub fn path() -> Option<PathBuf> {
-    LOG_PATH.lock().ok().and_then(|g| g.clone())
-}
-
 pub fn default_path_under(dir: &Path) -> PathBuf {
     dir.join("kite.log")
 }

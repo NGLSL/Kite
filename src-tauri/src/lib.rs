@@ -81,6 +81,11 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     log::init(log::default_path_under(&data_dir));
     log::info(&format!("setup start, data_dir={data_dir:?}"));
 
+    // 捆绑资源（Everything64.dll / open.wav）统一定位入口
+    if let Ok(rd) = app.path().resource_dir() {
+        system::resources::init(rd);
+    }
+
     let db_path = state::history_db_path(app.handle());
     let history_db = storage::HistoryDb::open(&db_path)
         .map_err(|e| format!("open history db: {e}"))?;

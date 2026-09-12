@@ -82,10 +82,7 @@ pub fn apply_template(template: &str, encoded_query: &str) -> String {
     if template.contains("%s") {
         return template.replace("%s", encoded_query);
     }
-    // 退化：直接拼在 query=
-    if template.ends_with('=') || template.ends_with('&') {
-        return format!("{template}{encoded_query}");
-    }
+    // 退化：直接拼在末尾
     format!("{template}{encoded_query}")
 }
 

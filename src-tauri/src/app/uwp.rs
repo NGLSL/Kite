@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 use std::os::windows::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::PROPERTYKEY;
@@ -185,7 +185,7 @@ fn display_name(item: &IShellItem) -> Option<String> {
     }
 }
 
-/// LaunchyQt 风格：安装目录里按 scale 后缀找 Tile logo PNG。
+/// LaunchyQt 风格：安装目录里找 Tile logo；同 stem 多个资产时选分辨率最高的。
 fn resolve_uwp_icon(install_path: &str, logo_rel: &str) -> Option<String> {
     if install_path.is_empty() || logo_rel.is_empty() {
         return None;
@@ -195,46 +195,58 @@ fn resolve_uwp_icon(install_path: &str, logo_rel: &str) -> Option<String> {
     let full = base.join(&rel);
     let parent = full.parent()?;
     let stem = full.file_stem()?.to_string_lossy().to_string();
-    let ext = full.extension().map(|e| e.to_string_lossy().to_string())?;
-
-    const SCALES: &[&str] = &[
-        ".scale-200",
-        ".scale-100",
-        "",
-        ".scale-300",
-        ".scale-400",
-        ".targetsize-48",
-        ".targetsize-24",
-        ".targetsize-16",
-        ".targetsize-256",
-    ];
-    for s in SCALES {
-        let name = format!("{stem}{s}.{ext}");
-        let p = parent.join(name);
-        if p.is_file() {
-            return Some(p.to_string_lossy().to_string());
-        }
-    }
 
     let rd = std::fs::read_dir(parent).ok()?;
-    let mut best: Option<(usize, PathBuf)> = None;
-    for e in rd.flatten() {
-        let path = e.path();
-        if path
-            .extension()
-            .map(|x| x.eq_ignore_ascii_case("png"))
-            .unwrap_or(false)
-        {
-            let fname = path.file_name().map(|x| x.to_string_lossy().to_string())?;
-            if fname.starts_with(&stem) {
-                let len = fname.len();
-                if best.as_ref().map(|(l, _)| len < *l).unwrap_or(true) {
-                    best = Some((len, path));
+    let candidates: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .map(|x| x.eq_ignore_ascii_case("png"))
+                    .unwrap_or(false)
+                && p.file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .map(|s| s.starts_with(&stem))
+                    .unwrap_or(false)
+        })
+        .collect();
+    pick_asset(&candidates).map(|p| p.to_string_lossy().to_string())
+}
+
+/// 从同 stem 的资产变体里挑最佳：分辨率最高 → 非高对比度 → 文件名短（变体后缀少）。
+/// 纯函数便于测试；scale-N/targetsize-N 解析为名义像素。
+fn pick_asset(candidates: &[PathBuf]) -> Option<&PathBuf> {
+    fn score(p: &Path) -> (u32, u8, usize) {
+        let name = p
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        // scale-200 → 200；targetsize-256 → 256；无标注按 100
+        let mut px = 100u32;
+        for tag in name.split('.') {
+            if let Some(n) = tag.strip_prefix("scale-") {
+                if let Ok(v) = n.parse::<u32>() {
+                    px = px.max(v);
+                }
+            } else if let Some(n) = tag.strip_prefix("targetsize-") {
+                if let Ok(v) = n.parse::<u32>() {
+                    px = px.max(v);
                 }
             }
         }
+        // contrast-black/white 是无障碍变体，仅在别无选择时使用
+        let contrast = u8::from(name.contains("contrast-"));
+        (px, contrast, name.len())
     }
-    best.map(|(_, p)| p.to_string_lossy().to_string())
+    candidates.iter().max_by(|a, b| {
+        let (pa, ca, la) = score(a);
+        let (pb, cb, lb) = score(b);
+        // 标准外观优先于无障碍变体,再取分辨率最高,同分取名字短的
+        cb.cmp(&ca)
+            .then_with(|| pa.cmp(&pb))
+            .then_with(|| lb.cmp(&la))
+    })
 }
 
 /// 启动 shell:AppsFolder / 普通路径 / UWP AUMID。
@@ -297,5 +309,77 @@ mod tests {
                 .strip_prefix("shell:AppsFolder\\"),
             Some("Microsoft.WindowsStore_8wekyb3d8bbwe!App")
         );
+    }
+
+    fn names(paths: &[&str]) -> Vec<PathBuf> {
+        paths.iter().map(PathBuf::from).collect()
+    }
+
+    fn picked(paths: &[&str]) -> Option<String> {
+        pick_asset(&names(paths)).map(|p| p.to_string_lossy().to_string())
+    }
+
+    #[test]
+    fn picks_highest_scale() {
+        assert_eq!(
+            picked(&["Logo.scale-100.png", "Logo.scale-200.png", "Logo.scale-400.png"]).as_deref(),
+            Some("Logo.scale-400.png")
+        );
+    }
+
+    #[test]
+    fn picks_largest_targetsize() {
+        assert_eq!(
+            picked(&[
+                "Logo.targetsize-16.png",
+                "Logo.targetsize-24.png",
+                "Logo.targetsize-256.png"
+            ])
+            .as_deref(),
+            Some("Logo.targetsize-256.png")
+        );
+    }
+
+    #[test]
+    fn skips_contrast_variant_when_alternative_exists() {
+        assert_eq!(
+            picked(&[
+                "Logo.contrast-black_scale-100.png",
+                "Logo.contrast-white_scale-400.png",
+                "Logo.scale-100.png"
+            ])
+            .as_deref(),
+            Some("Logo.scale-100.png")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_contrast_when_only_variant() {
+        assert_eq!(
+            picked(&["Logo.contrast-black.png"]).as_deref(),
+            Some("Logo.contrast-black.png")
+        );
+    }
+
+    #[test]
+    fn plain_logo_wins_over_unplated_tie() {
+        // 同为 scale-100：altform-unplated 名字更长,退居其次
+        assert_eq!(
+            picked(&["Logo.altform-unplated_scale-100.png", "Logo.scale-100.png"]).as_deref(),
+            Some("Logo.scale-100.png")
+        );
+    }
+
+    #[test]
+    fn scale_beats_targetsize_of_same_number() {
+        assert_eq!(
+            picked(&["Logo.targetsize-44.png", "Logo.scale-200.png"]).as_deref(),
+            Some("Logo.scale-200.png")
+        );
+    }
+
+    #[test]
+    fn empty_candidates() {
+        assert!(pick_asset(&[]).is_none());
     }
 }

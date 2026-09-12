@@ -21,6 +21,9 @@ pub struct AppItem {
     /// 索引时预计算：规范化名称（小写、去首尾空白）。
     #[serde(skip)]
     pub normalized_name: String,
+    /// 索引时预计算：规范化显示名（搜索热路径直接用，避免每键重复规范化）。
+    #[serde(skip)]
+    pub normalized_display: String,
     /// 索引时预计算：全拼（无空格），如 weixinkaifazhegongju。
     #[serde(skip)]
     pub pinyin: String,
@@ -50,6 +53,7 @@ impl AppItem {
             icon_src: None,
             source: source.into(),
             normalized_name: String::new(),
+            normalized_display: String::new(),
             pinyin: String::new(),
             pinyin_initials: String::new(),
         }
@@ -58,6 +62,7 @@ impl AppItem {
     /// 在扫描完成后补齐拼音字段（不要在搜索热路径里做转换）。
     pub fn attach_search_fields(&mut self) {
         self.normalized_name = crate::search::normalize_for_index(&self.name);
+        self.normalized_display = crate::search::normalize_for_index(&self.display_name);
         let (full, initials) = crate::search::pinyin_of(&self.display_name);
         self.pinyin = full;
         self.pinyin_initials = initials;

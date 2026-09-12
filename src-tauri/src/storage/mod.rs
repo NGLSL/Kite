@@ -3,23 +3,24 @@
 
 pub mod settings;
 
+use std::collections::HashMap;
 use std::path::Path;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, params_from_iter, Connection};
 
 pub struct HistoryDb {
     conn: Connection,
 }
 
 /// 一条应用的历史加权原料。
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct UsageStats {
     pub launch_count: i64,
     pub last_used_at: i64,
 }
 
 /// Query→App 配对统计。`last_used_at` 预留调试与后续策略。
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub struct QueryPairStats {
     pub count: i64,
@@ -87,22 +88,30 @@ impl HistoryDb {
         Ok(())
     }
 
-    pub fn usage(&self, item_id: &str) -> rusqlite::Result<UsageStats> {
-        self.conn
-            .query_row(
-                "SELECT launch_count, last_used_at FROM usage_history WHERE item_id = ?1",
-                params![item_id],
-                |row| {
-                    Ok(UsageStats {
-                        launch_count: row.get(0)?,
-                        last_used_at: row.get(1)?,
-                    })
+    /// 一次查询拿回多条 usage；搜索热路径按 id 批量取，避免每条结果两次 SQL。
+    pub fn usage_snapshot(&self, ids: &[String]) -> HashMap<String, UsageStats> {
+        if ids.is_empty() {
+            return HashMap::new();
+        }
+        let sql = format!(
+            "SELECT item_id, launch_count, last_used_at FROM usage_history
+             WHERE item_id IN ({})",
+            placeholders(ids.len())
+        );
+        let Ok(mut stmt) = self.conn.prepare(&sql) else {
+            return HashMap::new();
+        };
+        stmt.query_map(params_from_iter(ids.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                UsageStats {
+                    launch_count: row.get(1)?,
+                    last_used_at: row.get(2)?,
                 },
-            )
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(UsageStats::default()),
-                other => Err(other),
-            })
+            ))
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
     }
 
     /// 最近启动的应用 id，按 last_used_at 降序。
@@ -119,24 +128,39 @@ impl HistoryDb {
         Ok(ids)
     }
 
-    pub fn query_pair(&self, query_norm: &str, item_id: &str) -> rusqlite::Result<QueryPairStats> {
-        self.conn
-            .query_row(
-                "SELECT count, last_used_at FROM query_history
-                 WHERE query = ?1 AND item_id = ?2",
-                params![query_norm, item_id],
-                |row| {
-                    Ok(QueryPairStats {
-                        count: row.get(0)?,
-                        last_used_at: row.get(1)?,
-                    })
+    /// 批量取 Query→App 配对；缺行即无历史（不进结果表）。
+    pub fn query_pair_snapshot(&self, query_norm: &str, ids: &[String]) -> HashMap<String, QueryPairStats> {
+        if ids.is_empty() || query_norm.is_empty() {
+            return HashMap::new();
+        }
+        let sql = format!(
+            "SELECT item_id, count, last_used_at FROM query_history
+             WHERE query = ?1 AND item_id IN ({})",
+            placeholders(ids.len())
+        );
+        let Ok(mut stmt) = self.conn.prepare(&sql) else {
+            return HashMap::new();
+        };
+        let joined = std::iter::once(query_norm.to_string())
+            .chain(ids.iter().cloned())
+            .collect::<Vec<_>>();
+        stmt.query_map(params_from_iter(joined.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                QueryPairStats {
+                    count: row.get(1)?,
+                    last_used_at: row.get(2)?,
                 },
-            )
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(QueryPairStats::default()),
-                other => Err(other),
-            })
+            ))
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
     }
+}
+
+/// 生成 `?,?,?` 占位符。
+fn placeholders(n: usize) -> String {
+    vec!["?"; n].join(",")
 }
 
 /// 秒级时间戳。
@@ -214,5 +238,66 @@ mod tests {
             db.search_url_template().as_deref(),
             Some("https://www.google.com/search?q={searchTerms}")
         );
+    }
+
+    #[test]
+    fn usage_snapshot_matches_recorded_values() {
+        let mut db = temp_db();
+        db.record_launch("app-a", "a", 100).unwrap();
+        db.record_launch("app-a", "a", 150).unwrap();
+        db.record_launch("app-b", "a", 200).unwrap();
+        // app-c 没有记录,应缺席
+        let ids = vec!["app-a".into(), "app-b".into(), "app-c".into()];
+        let snap = db.usage_snapshot(&ids);
+        assert_eq!(snap.len(), 2);
+        assert_eq!(
+            snap["app-a"],
+            UsageStats {
+                launch_count: 2,
+                last_used_at: 150
+            }
+        );
+        assert_eq!(
+            snap["app-b"],
+            UsageStats {
+                launch_count: 1,
+                last_used_at: 200
+            }
+        );
+        assert!(!snap.contains_key("app-c"));
+
+        let pairs = db.query_pair_snapshot("a", &ids);
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(
+            pairs["app-a"],
+            QueryPairStats {
+                count: 2,
+                last_used_at: 150
+            }
+        );
+        assert_eq!(
+            pairs["app-b"],
+            QueryPairStats {
+                count: 1,
+                last_used_at: 200
+            }
+        );
+        assert!(!pairs.contains_key("app-c"));
+    }
+
+    #[test]
+    fn snapshots_empty_inputs() {
+        let db = temp_db();
+        assert!(db.usage_snapshot(&[]).is_empty());
+        assert!(db.query_pair_snapshot("a", &[]).is_empty());
+        assert!(db.query_pair_snapshot("", &["app-a".into()]).is_empty());
+    }
+
+    #[test]
+    fn usage_snapshot_ignores_missing_rows() {
+        let mut db = temp_db();
+        db.record_launch("only", "", 1).unwrap();
+        let ids: Vec<String> = (0..50).map(|i| format!("ghost-{i}")).collect();
+        assert!(db.usage_snapshot(&ids).is_empty(), "全缺行时返回空表");
     }
 }

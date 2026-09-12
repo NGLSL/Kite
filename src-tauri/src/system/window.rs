@@ -30,6 +30,8 @@ pub fn set_settings_mode(app: &AppHandle, settings: bool) {
 }
 
 pub fn show_and_focus(app: &AppHandle) {
+    // 唤起即响（快捷键/托盘统一走这里；音效异步不阻塞显示）
+    crate::system::sound::play_open();
     let Some(win) = main_window(app) else {
         return;
     };

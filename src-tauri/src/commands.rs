@@ -1,25 +1,31 @@
 //! React 与 Rust 的 IPC 面。业务逻辑放在同级模块，本文件只做转发。
 
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::model::{AppItem, SearchResult};
 use crate::state::{rebuild_index, AppState};
 use crate::storage::settings::{Settings, UserAlias};
 use crate::{app, history, search, storage, system};
 
+/// 文件搜索单次查询上限（滚动加载在缓存内翻页）。
+const FILES_MAX: usize = 20;
+
 #[tauri::command]
 pub fn search_apps(
     query: String,
     include_files: Option<bool>,
+    limit: Option<usize>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Vec<SearchResult>, String> {
+    let files = include_files.unwrap_or(false);
+    let limit = limit.unwrap_or(search::TOP_N).clamp(1, search::MAX_RESULTS);
     let q_norm = search::normalize_for_index(&query);
-    // 克隆后尽快释放锁，避免搜索/历史 IO 堵住 UI
-    let apps: Vec<_> = {
-        let index = state.index.lock().map_err(|e| e.to_string())?;
-        index.apps.clone()
-    };
+
+    // 滚动加载：同 Query 直接从完整排序缓存切片，不重搜、不重复查 Everything
+    if let Some(page) = state.cache_get(&q_norm, files, limit) {
+        return Ok(page);
+    }
 
     // 空 Query：打开启动器时展示最近使用
     if q_norm.is_empty() {
@@ -27,9 +33,16 @@ pub fn search_apps(
             .history
             .lock()
             .ok()
-            .and_then(|h| h.recent_ids(search::TOP_N).ok())
+            .and_then(|h| h.recent_ids(search::MAX_RESULTS).ok())
             .unwrap_or_default();
-        return Ok(search::order_by_recent(&apps, &recent, search::TOP_N));
+        // 索引只读：锁内直接搜，避免每个按键全量克隆索引
+        let hits = {
+            let index = state.index.lock().map_err(|e| e.to_string())?;
+            search::order_by_recent(&index.apps, &recent, search::MAX_RESULTS)
+        };
+        state.cache_put(q_norm, files, hits.clone());
+        let end = limit.min(hits.len());
+        return Ok(hits[..end].to_vec());
     }
 
     let user_targets: Vec<String> = state
@@ -43,7 +56,10 @@ pub fn search_apps(
         })
         .unwrap_or_default();
 
-    let mut hits = search::search(&apps, &query, &user_targets);
+    let mut hits = {
+        let index = state.index.lock().map_err(|e| e.to_string())?;
+        search::search(&index.apps, &query, &user_targets, search::MAX_RESULTS)
+    };
 
     let icon_dir = crate::state::icon_dir(&app);
     let preferred = state
@@ -73,14 +89,15 @@ pub fn search_apps(
         hits = merged;
     }
 
-    // Everything 仅在用户打开「搜文件」时调用，绝不默认拉起
-    if include_files.unwrap_or(false) && q_norm.len() >= 2 {
-        let max_files = 5usize;
-        for fh in system::everything::search_files(&query, max_files) {
+    // Everything 仅在用户打开「搜文件」时调用；走 SDK IPC，绝不拉起 Everything 主窗口。
+    // 文件条数固定按上限取：完整排序结果进缓存后，滚动加载才可能翻到更多文件。
+    if files && q_norm.len() >= 2 {
+        for fh in system::everything::search_files(&query, FILES_MAX) {
             let name = fh.name.clone();
             let id = format!("file:{}", fh.path.to_lowercase());
             let mut item = AppItem::scanned(id, name, fh.path, None, None, "everything");
             item.attach_search_fields();
+            item.icon = system::icons::cache_type_icon(&icon_dir, &fh.name, fh.is_folder);
             hits.push(SearchResult {
                 item,
                 score: 400,
@@ -89,23 +106,18 @@ pub fn search_apps(
         }
     }
 
-    // 历史加权（Match 仍是主信号）
-    if !q_norm.is_empty() {
-        if let Ok(hdb) = state.history.lock() {
-            let now = storage::now_ts();
-            for hit in &mut hits {
-                let usage = hdb.usage(&hit.item.id).unwrap_or_default();
-                let pair = hdb.query_pair(&q_norm, &hit.item.id).unwrap_or_default();
-                let boost = history::history_boost(&q_norm, &usage, &pair, now);
-                hit.score += boost;
-                if boost > 0 {
-                    hit.matched_by = format!("{}+history", hit.matched_by);
-                }
-            }
-        }
-    }
+    // 历史加权（Match 仍是主信号）：批量取历史后统一应用
+    let ids: Vec<String> = hits.iter().map(|h| h.item.id.clone()).collect();
+    let (usage_map, pair_map) = match state.history.lock() {
+        Ok(hdb) => (
+            hdb.usage_snapshot(&ids),
+            hdb.query_pair_snapshot(&q_norm, &ids),
+        ),
+        Err(_) => Default::default(),
+    };
+    history::apply_boosts(&mut hits, usage_map, pair_map, &q_norm, storage::now_ts());
 
-    hits = search::rerank(hits, search::TOP_N);
+    hits = search::rerank(hits, search::MAX_RESULTS);
 
     // 非网址：有命中时第 5 位固定「用浏览器搜索」；无命中则列出各浏览器搜索
     if !is_url && !query.trim().is_empty() {
@@ -120,7 +132,6 @@ pub fn search_apps(
                 search_template.as_deref(),
             ) {
                 hits = app::web::insert_at_slot(hits, web, app::web::WEB_SEARCH_SLOT);
-                hits.truncate(search::TOP_N);
             }
         } else {
             hits = app::web::build_search_hits(
@@ -129,7 +140,7 @@ pub fn search_apps(
                 &icon_dir,
                 search_template.as_deref(),
             );
-            hits = search::rerank(hits, search::TOP_N);
+            hits = search::rerank(hits, search::MAX_RESULTS);
         }
     }
 
@@ -144,7 +155,9 @@ pub fn search_apps(
         }
     }
 
-    Ok(hits)
+    state.cache_put(q_norm, files, hits.clone());
+    let end = limit.min(hits.len());
+    Ok(hits[..end].to_vec())
 }
 
 #[tauri::command]
@@ -167,6 +180,11 @@ pub fn launch_app(
         system::window::set_settings_mode(&app, true);
         return Ok(());
     }
+
+    // 启动器常驻后台，先刷新进程环境再拉起子进程（详见 system::env）
+    system::env::refresh_process_env();
+    // 历史已记录：清搜索缓存，同 Query 下次搜索会带上新的历史加权
+    state.cache_clear();
 
     // 浏览器打开网址 / 网页搜索
     if let Some((kind, browser_id, payload)) = app::web::parse_id(&id) {

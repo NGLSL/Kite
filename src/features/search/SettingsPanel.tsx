@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Settings, UserAlias } from "../../types/ipc";
 import { startWindowDrag } from "../../shared/windowDrag";
+import { NavIcon, Row, Toggle } from "./SettingsUI";
+import { AboutSection } from "./AboutSection";
 
 type Props = {
   onClose: () => void;
@@ -42,54 +44,6 @@ function keyFromEvent(e: KeyboardEvent): string | null {
   }
   if (/^F([1-9]|1[0-2])$/.test(k)) return k;
   return null;
-}
-
-function NavIcon({ d }: { d: string }) {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-      <path d={d} stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function Row({
-  icon,
-  title,
-  hint,
-  children,
-}: {
-  icon?: string;
-  title: string;
-  hint?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flow-row">
-      <div className="flow-row-icon">{icon ? <NavIcon d={icon} /> : null}</div>
-      <div className="flow-row-text">
-        <div className="flow-row-title">{title}</div>
-        {hint && <div className="flow-row-hint">{hint}</div>}
-      </div>
-      <div className="flow-row-ctrl">{children}</div>
-    </div>
-  );
-}
-
-function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <div className="flow-toggle-wrap">
-      <span className="flow-toggle-label">{checked ? "启用" : "禁用"}</span>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        className={`switch ${checked ? "on" : ""}`}
-        onClick={() => onChange(!checked)}
-      >
-        <span className="switch-knob" />
-      </button>
-    </div>
-  );
 }
 
 export function SettingsPanel({ onClose, onRescanned }: Props) {
@@ -378,16 +332,7 @@ export function SettingsPanel({ onClose, onRescanned }: Props) {
             </div>
           )}
 
-          {section === "about" && (
-            <div className="flow-card">
-              <Row icon="M12 8h.01M11 12h1v4h1" title="Kite" hint="轻量 Windows 启动器">
-                <span className="about-ver">v0.1.0</span>
-              </Row>
-              <Row icon="M4 7h16M4 12h16M4 17h10" title="技术栈" hint="Tauri 2 · React 19 · Rust">
-                <span />
-              </Row>
-            </div>
-          )}
+          {section === "about" && <AboutSection />}
         </div>
       </main>
 

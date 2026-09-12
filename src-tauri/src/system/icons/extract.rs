@@ -4,29 +4,113 @@
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
-use image::RgbaImage;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SelectObject,
     BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
 };
+use windows::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
+};
 use windows::Win32::UI::Shell::{
     ExtractIconExW, SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON,
+    SHGFI_USEFILEATTRIBUTES,
 };
-use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON};
+use windows::Win32::UI::WindowsAndMessaging::{
+    DestroyIcon, GetIconInfo, LoadImageW, HICON, IMAGE_ICON, LR_LOADFROMFILE,
+};
 
-/// 从 .exe / .ico / .lnk 目标路径提取 PNG；任一步失败返回 None。
-pub fn extract_icon_from_file(path: &Path) -> Option<Vec<u8>> {
-    unsafe { extract_icon_from_file_win32(path) }
+/// 图标源类型；决定提取策略（mod.rs 分流）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    /// PNG/JPG 等图片文件：内容即图标（UWP logo）。
+    Image,
+    /// .ico：可请求 256×256 大图。
+    Ico,
+    /// exe/dll/lnk 等：走 shell 提取。
+    Shell,
 }
 
-unsafe fn extract_icon_from_file_win32(path: &Path) -> Option<Vec<u8>> {
-    let wide: Vec<u16> = path
-        .as_os_str()
+pub fn classify(path: &Path) -> SourceKind {
+    match path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .as_deref()
+    {
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp") => SourceKind::Image,
+        Some("ico") => SourceKind::Ico,
+        _ => SourceKind::Shell,
+    }
+}
+
+/// shell 提取链：SHGetFileInfo 大图标 → ExtractIconEx 主图标 → 小图标。
+pub fn extract_shell_icon(path: &Path) -> Option<Vec<u8>> {
+    unsafe { extract_shell_icon_win32(path) }
+}
+
+/// .ico 专用：按 256×256 请求（多数 ico 内含大尺寸资源）。
+pub fn extract_ico_large(path: &Path) -> Option<Vec<u8>> {
+    unsafe {
+        let wide = wide_path(path);
+        let h = LoadImageW(
+            None,
+            windows::core::PCWSTR(wide.as_ptr()),
+            IMAGE_ICON,
+            256,
+            256,
+            LR_LOADFROMFILE,
+        )
+        .ok()?;
+        let hicon = HICON(h.0);
+        let png = hicon_to_png(hicon);
+        let _ = DestroyIcon(hicon);
+        png
+    }
+}
+
+/// 扩展名 → 系统关联图标（不触碰真实文件）；is_dir 时给文件夹图标。
+pub fn extract_ext_icon(ext: &str, is_dir: bool) -> Option<Vec<u8>> {
+    unsafe {
+        let name = if is_dir {
+            "folder".to_string()
+        } else {
+            format!("x.{ext}")
+        };
+        let wide: Vec<u16> = std::ffi::OsStr::new(&name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let attrs: FILE_FLAGS_AND_ATTRIBUTES = if is_dir {
+            FILE_ATTRIBUTE_DIRECTORY
+        } else {
+            FILE_ATTRIBUTE_NORMAL
+        };
+        let mut shfi = std::mem::zeroed::<SHFILEINFOW>();
+        let ok = SHGetFileInfoW(
+            windows::core::PCWSTR(wide.as_ptr()),
+            attrs,
+            Some(&mut shfi),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES,
+        );
+        if ok == 0 || shfi.hIcon.is_invalid() {
+            return None;
+        }
+        let png = hicon_to_png(shfi.hIcon);
+        let _ = DestroyIcon(shfi.hIcon);
+        png
+    }
+}
+
+fn wide_path(path: &Path) -> Vec<u16> {
+    path.as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
-        .collect();
-    let pcw = windows::core::PCWSTR(wide.as_ptr());
+        .collect()
+}
+
+unsafe fn extract_shell_icon_win32(path: &Path) -> Option<Vec<u8>> {
+    let pcw = windows::core::PCWSTR(wide_path(path).as_ptr());
 
     // 1) Shell 大图标（多数 exe/ico 可用）
     let mut shfi = std::mem::zeroed::<SHFILEINFOW>();
@@ -67,7 +151,7 @@ unsafe fn extract_icon_from_file_win32(path: &Path) -> Option<Vec<u8>> {
     None
 }
 
-unsafe fn hicon_to_png(hicon: HICON) -> Option<Vec<u8>> {
+pub(crate) unsafe fn hicon_to_png(hicon: HICON) -> Option<Vec<u8>> {
     let mut info = std::mem::zeroed();
     if GetIconInfo(hicon, &mut info).is_err() {
         return None;
@@ -163,51 +247,23 @@ unsafe fn hicon_to_png(hicon: HICON) -> Option<Vec<u8>> {
         }
     }
 
-    let img = RgbaImage::from_raw(width as u32, height as u32, pixels)?;
-    let img = crop_and_fill(&img);
-
-    let mut buf = std::io::Cursor::new(Vec::new());
-    img.write_to(&mut buf, image::ImageFormat::Png).ok()?;
-    Some(buf.into_inner())
+    let img = image::RgbaImage::from_raw(width as u32, height as u32, pixels)?;
+    let img = super::crop_and_fill(&img);
+    super::encode_png(&img)
 }
 
-/// 裁掉透明边，再居中放到正方形画布，避免列表里显得过小。
-fn crop_and_fill(img: &RgbaImage) -> RgbaImage {
-    let (w, h) = img.dimensions();
-    let mut min_x = w;
-    let mut max_x = 0u32;
-    let mut min_y = h;
-    let mut max_y = 0u32;
-    for y in 0..h {
-        for x in 0..w {
-            let p = img.get_pixel(x, y);
-            if p.0[3] > 8 {
-                min_x = min_x.min(x);
-                max_x = max_x.max(x);
-                min_y = min_y.min(y);
-                max_y = max_y.max(y);
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_by_extension() {
+        assert_eq!(classify(Path::new("C:\\a\\Logo.scale-200.PNG")), SourceKind::Image);
+        assert_eq!(classify(Path::new("C:\\a\\x.jpg")), SourceKind::Image);
+        assert_eq!(classify(Path::new("C:\\a\\x.webp")), SourceKind::Image);
+        assert_eq!(classify(Path::new("C:\\a\\app.ico")), SourceKind::Ico);
+        assert_eq!(classify(Path::new("C:\\a\\app.EXE")), SourceKind::Shell);
+        assert_eq!(classify(Path::new("C:\\a\\shell32.dll")), SourceKind::Shell);
+        assert_eq!(classify(Path::new("no-ext")), SourceKind::Shell);
     }
-    if min_x > max_x || min_y > max_y {
-        // 全透明，退化为原图缩放
-        return image::imageops::resize(img, 64, 64, image::imageops::FilterType::Triangle);
-    }
-
-    let cw = max_x - min_x + 1;
-    let ch = max_y - min_y + 1;
-    let crop = image::imageops::crop_imm(img, min_x, min_y, cw, ch).to_image();
-
-    let side = 64u32;
-    let inner = ((side as f32) * 0.9).round() as u32;
-    let scale = (inner as f32 / cw.max(ch) as f32).min(1.0);
-    let nw = ((cw as f32) * scale).round().max(1.0) as u32;
-    let nh = ((ch as f32) * scale).round().max(1.0) as u32;
-    let resized = image::imageops::resize(&crop, nw, nh, image::imageops::FilterType::Triangle);
-
-    let mut canvas = RgbaImage::from_pixel(side, side, image::Rgba([0, 0, 0, 0]));
-    let ox = (side.saturating_sub(nw)) / 2;
-    let oy = (side.saturating_sub(nh)) / 2;
-    image::imageops::overlay(&mut canvas, &resized, ox as i64, oy as i64);
-    canvas
 }

@@ -8,7 +8,6 @@ type Props = {
   inputRef: RefObject<HTMLInputElement | null>;
   searchFiles: boolean;
   onToggleFiles: () => void;
-  onFocusSearch?: () => void;
 };
 
 export function SearchInput({

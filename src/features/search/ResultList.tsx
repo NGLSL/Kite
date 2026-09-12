@@ -9,11 +9,21 @@ type Props = {
   listRef: RefObject<HTMLDivElement | null>;
   onSelect: (index: number) => void;
   onLaunch: (item: SearchResult) => void;
+  /** 结果容器滚动到底部时触发（滚动加载）。 */
+  onScroll?: (e: React.UIEvent<HTMLDivElement>) => void;
 };
 
-export function ResultList({ results, active, query, listRef, onSelect, onLaunch }: Props) {
+export function ResultList({
+  results,
+  active,
+  query,
+  listRef,
+  onSelect,
+  onLaunch,
+  onScroll,
+}: Props) {
   return (
-    <div className="results" ref={listRef} role="listbox">
+    <div className="results" ref={listRef} role="listbox" onScroll={onScroll}>
       {results.map((item, i) => (
         <ResultItem
           key={item.id}

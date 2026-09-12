@@ -1,4 +1,4 @@
-/** 搜索 IPC 与防抖 Query 状态。默认不搜文件。 */
+/** 搜索 IPC 与防抖 Query 状态。默认不搜文件；结果滚动加载（Rust 按条数切片返回）。 */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -7,6 +7,21 @@ import type { SearchResult } from "../../types/ipc";
 
 const DEBOUNCE_MS = 40;
 const DEBOUNCE_FILES_MS = 220;
+/** 与 search.css 对齐：结果行 min-height 52 + gap 2 */
+const ROW_PX = 54;
+/** 输入行 + 底栏 + 留白的估算高度 */
+const CHROME_PX = 110;
+/** 每次滚动到底部追加的条数 */
+const PAGE_STEP = 10;
+/** 首屏条数上下限 */
+const MIN_COUNT = 6;
+const MAX_COUNT = 30;
+
+/** 按软件窗口高度动态计算首屏加载条数（可见行数 + 少量预载） */
+function initialCount(): number {
+  const rows = Math.ceil(Math.max(window.innerHeight - CHROME_PX, ROW_PX) / ROW_PX);
+  return Math.min(MAX_COUNT, Math.max(MIN_COUNT, rows + 2));
+}
 
 export function useSearch() {
   const [query, setQuery] = useState("");
@@ -21,18 +36,50 @@ export function useSearch() {
   queryRef.current = query;
   filesRef.current = searchFiles;
 
+  // 滚动加载：已请求条数 / 结果镜像 / 在途标记
+  const requestedRef = useRef(initialCount());
+  const resultsRef = useRef<SearchResult[]>([]);
+  const loadingMoreRef = useRef(false);
+
   const runSearch = useCallback(async (q: string, files: boolean) => {
     try {
+      const want = initialCount(); // 新查询重置为首屏条数
+      requestedRef.current = want;
       const hits = await invoke<SearchResult[]>("search_apps", {
         query: q,
         includeFiles: files,
+        limit: want,
       });
+      resultsRef.current = hits;
       setResults(hits);
       setActive(0);
       setError(null);
     } catch (e) {
       setError(String(e));
       setResults([]);
+    }
+  }, []);
+
+  /** 滚动到底部时请求更多。到底（上次返回不足）或在途则忽略；
+   *  只替换列表不动 active——前缀稳定，已渲染行复用，滚动位置保持。 */
+  const loadMore = useCallback(async () => {
+    if (loadingMoreRef.current) return;
+    if (resultsRef.current.length < requestedRef.current) return;
+    loadingMoreRef.current = true;
+    const want = requestedRef.current + PAGE_STEP;
+    try {
+      const hits = await invoke<SearchResult[]>("search_apps", {
+        query: queryRef.current,
+        includeFiles: filesRef.current,
+        limit: want,
+      });
+      requestedRef.current = want;
+      resultsRef.current = hits;
+      setResults(hits);
+    } catch {
+      /* 静默：保留当前结果，下次滚动再试 */
+    } finally {
+      loadingMoreRef.current = false;
     }
   }, []);
 
@@ -137,5 +184,6 @@ export function useSearch() {
     moveActive,
     searchFiles,
     setSearchFiles,
+    loadMore,
   };
 }
