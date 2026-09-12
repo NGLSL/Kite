@@ -14,6 +14,8 @@ export function useSearch() {
   const [error, setError] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const debounceRef = useRef<number | undefined>(undefined);
+  const queryRef = useRef("");
+  queryRef.current = query;
 
   const runSearch = useCallback(async (q: string) => {
     try {
@@ -45,13 +47,22 @@ export function useSearch() {
       setQuery("");
       setActive(0);
     });
-    const unReady = listen("kite://index-ready", () => setScanning(false));
+    const unReady = listen("kite://index-ready", () => {
+      setScanning(false);
+      // 索引已就绪，立刻刷一次结果
+      void runSearch(queryRef.current);
+    });
+    const unIcons = listen("kite://icons-ready", () => {
+      // 图标补全后刷新，让列表显示图标
+      void runSearch(queryRef.current);
+    });
     return () => {
       unFocus.then((f) => f());
       unCleared.then((f) => f());
       unReady.then((f) => f());
+      unIcons.then((f) => f());
     };
-  }, []);
+  }, [runSearch]);
 
   const launch = useCallback(
     async (item: SearchResult | undefined) => {

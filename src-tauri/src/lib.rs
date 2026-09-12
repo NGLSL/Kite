@@ -9,7 +9,7 @@ mod state;
 mod storage;
 mod system;
 
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 use state::AppState;
@@ -83,13 +83,12 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // 扫描放工作线程，避免拖慢窗口显示
+    // 扫描放工作线程；首屏只等快速索引，图标后台补
     let handle = app.handle().clone();
-    std::thread::spawn(move || match state::rebuild_index(&handle) {
-        Ok(n) => {
-            let _ = handle.emit("kite://index-ready", n);
+    std::thread::spawn(move || {
+        if let Err(e) = state::rebuild_index(&handle) {
+            eprintln!("scan failed: {e}");
         }
-        Err(e) => eprintln!("scan failed: {e}"),
     });
 
     let alt_space = Shortcut::new(Some(Modifiers::ALT), Code::Space);

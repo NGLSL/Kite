@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::model::AppIndex;
 use crate::storage::HistoryDb;
@@ -37,13 +37,24 @@ pub fn history_db_path(app: &AppHandle) -> PathBuf {
         .join("kite-history.db")
 }
 
-/// 重建内存应用索引；可在工作线程调用。
+/// 两阶段重建：
+/// 1) 快速建索引（无图标）并立刻可搜索
+/// 2) 后台并行补图标后再写回
 pub fn rebuild_index(app: &AppHandle) -> Result<usize, String> {
     let dir = icon_dir(app);
-    let index = crate::app::scan_apps(&dir);
+    let mut index = crate::app::scan_apps(&dir, true);
     let count = index.apps.len();
     if let Some(state) = app.try_state::<AppState>() {
         *state.index.lock().map_err(|e| e.to_string())? = index;
     }
+    let _ = app.emit("kite://index-ready", count);
+
+    // 从共享索引补图标，避免二次全盘扫描
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(mut guard) = state.index.lock() {
+            crate::app::fill_missing_icons(&mut guard, &dir);
+        }
+    }
+    let _ = app.emit("kite://icons-ready", count);
     Ok(count)
 }

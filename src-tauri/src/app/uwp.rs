@@ -69,6 +69,20 @@ pub fn collect_uwp(source: &str, out: &mut Vec<(AppItem, Option<String>)>) {
             .replace('.', " ")
             .trim()
             .to_string();
+        // 跳过系统框架包，避免列表被噪声淹没
+        let lower = display.to_lowercase();
+        const SKIP: &[&str] = &[
+            "microsoft.windows",
+            "microsoft.ui",
+            "microsoft.net",
+            "microsoft.vclibs",
+            "microsoft.desktopappinstaller",
+            "windows.",
+        ];
+        if SKIP.iter().any(|p| lower.starts_with(p)) {
+            index += 1;
+            continue;
+        }
         if display.is_empty() || !seen.insert(display.to_lowercase()) {
             index += 1;
             continue;
