@@ -20,9 +20,15 @@ cd src-tauri; cargo check; cd ..
 - 前端：`features/search/` UI · `shared/` 复用 · `types/ipc.ts` 与 Rust 对齐 · `App.tsx` 仅组合
 - 文件规模、注释、禁止重复实现 → **`docs/DEVELOPMENT.md` §2–4**
 
-## Skills
+## Skills（后续任务必须遵守）
 
-在 `.agents/skills/`。按 DEVELOPMENT.md §5 的场景选用，不要默认全跑。
+技能在 **`.agents/skills/`**，场景表见 **`docs/DEVELOPMENT.md` §5**。
+
+- 含糊需求先 `grilling` / 对照 PRD 用 `grill-with-docs`
+- 模块边界用 `domain-modeling` / `codebase-design`；难 Bug 用 `diagnosing-bugs`
+- 功能合入前视改动用 `code-review`；跨会话大需求先议清再 `to-spec`
+- **不要默认全跑**；简单小改直接实现
+
 
 ## 硬约束
 
