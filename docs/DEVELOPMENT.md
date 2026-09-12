@@ -106,3 +106,5 @@ cd src-tauri; cargo check; cd ..
 4. 链接失败查 MSVC，不装 MinGW
 5. 图标提取失败返回 `None`，不得拖垮扫描
 6. **旧 `kite.exe` 未退出时再 `tauri dev` 会报 `HotKey already registered`** — 先结束进程再启动
+7. **`target/` 膨胀**：dev profile 已配置 `debug=1` + 依赖不出调试信息（见 Cargo.toml），
+   PDB 从 ~100MB/个 降到 ~10MB/个；反复重编译后旧哈希产物仍会累积，磁盘紧张时 `cargo clean`

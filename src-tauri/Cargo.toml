@@ -34,3 +34,12 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+# Windows MSVC 默认 debug=2：每个构建产物生成 ~100MB PDB，且旧哈希不自动回收，
+# target/debug 会累积到 10GB+。只保留行号表（断点/调用栈仍有文件与行号），
+# 依赖库不出调试信息——日常调试足够，体积降一个数量级。
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+debug = false
