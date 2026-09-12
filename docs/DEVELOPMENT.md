@@ -15,12 +15,16 @@ IPC：`React invoke → commands.rs → app/search/system`。禁止把全量应�
 
 **禁止平铺堆叠。** 新代码进已有职责目录；根上只保留装配文件。
 
+领域词汇：`docs/CONTEXT.md`（勿放仓库根）。ADR：`docs/adr/`。
+
 ```
 src-tauri/src/
   lib.rs / main.rs / model.rs / state.rs / commands.rs
   app/launcher.rs
   app/scanner/{mod,lnk,registry,util}.rs
   search/{mod,matcher}.rs
+  history.rs
+  storage/            # SQLite 历史库
   system/window.rs
   system/icons/{mod,extract}.rs
 

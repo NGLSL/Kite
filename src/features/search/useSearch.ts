@@ -53,14 +53,18 @@ export function useSearch() {
     };
   }, []);
 
-  const launch = useCallback(async (item: SearchResult | undefined) => {
-    if (!item) return;
-    try {
-      await invoke("launch_app", { id: item.id });
-    } catch (e) {
-      setError(String(e));
-    }
-  }, []);
+  const launch = useCallback(
+    async (item: SearchResult | undefined) => {
+      if (!item) return;
+      try {
+        // query 一并传给 Rust，用于 Query History 配对记忆
+        await invoke("launch_app", { id: item.id, query });
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [query],
+  );
 
   const moveActive = useCallback(
     (delta: number) => {

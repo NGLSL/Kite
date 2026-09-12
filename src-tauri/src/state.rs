@@ -4,16 +4,19 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
 use crate::model::AppIndex;
+use crate::storage::HistoryDb;
 
 /// Tauri 管理的共享应用状态。
 pub struct AppState {
     pub index: Mutex<AppIndex>,
+    pub history: Mutex<HistoryDb>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(history: HistoryDb) -> Self {
         Self {
             index: Mutex::new(AppIndex::empty()),
+            history: Mutex::new(history),
         }
     }
 }
@@ -24,6 +27,14 @@ pub fn icon_dir(app: &AppHandle) -> PathBuf {
         .app_cache_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("icons")
+}
+
+/// 历史库路径（应用数据目录）。
+pub fn history_db_path(app: &AppHandle) -> PathBuf {
+    app.path()
+        .app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("kite-history.db")
 }
 
 /// 重建内存应用索引；可在工作线程调用。

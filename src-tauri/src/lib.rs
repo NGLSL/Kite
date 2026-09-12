@@ -2,9 +2,11 @@
 
 mod app;
 mod commands;
+mod history;
 mod model;
 mod search;
 mod state;
+mod storage;
 mod system;
 
 use tauri::{Emitter, Manager};
@@ -37,7 +39,10 @@ pub fn run() {
 }
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    app.manage(AppState::new());
+    let db_path = state::history_db_path(app.handle());
+    let history_db = storage::HistoryDb::open(&db_path)
+        .map_err(|e| format!("open history db: {e}"))?;
+    app.manage(AppState::new(history_db));
 
     // 扫描放工作线程，避免拖慢窗口显示
     let handle = app.handle().clone();

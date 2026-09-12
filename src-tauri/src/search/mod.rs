@@ -41,6 +41,11 @@ pub fn search(apps: &[AppItem], query: &str) -> Vec<SearchResult> {
     ranker::rank_and_truncate(hits, TOP_N)
 }
 
+/// 历史加分后重新排序截断（commands 在改分后调用）。
+pub fn rerank(hits: Vec<SearchResult>, top_n: usize) -> Vec<SearchResult> {
+    ranker::rank_and_truncate(hits, top_n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +147,15 @@ mod tests {
     fn query_history_style_protection_via_alias() {
         // chrome 本身应精确命中 Google Chrome，而不是 Remote Desktop
         assert_top("chrome", "Google Chrome");
+    }
+
+    #[test]
+    fn history_boost_cannot_beat_exact_gap() {
+        // Name Exact(1000) + 历史上限(160) 仍应高于 Prefix(800) + 同样历史上限
+        let exact = crate::search::ranker::SCORE_NAME_EXACT
+            + crate::history::HISTORY_BOOST_MAX;
+        let prefix = crate::search::ranker::SCORE_PREFIX
+            + crate::history::HISTORY_BOOST_MAX;
+        assert!(exact > prefix);
     }
 }
