@@ -1,17 +1,30 @@
-//! 搜索管线：规范化 Query、匹配、排序、截断。
+//! 搜索管线：规范化 → 多路召回 → 统一评分 → Top N。
 
+mod alias;
+mod fuzzy;
 mod matcher;
+mod normalizer;
+mod pinyin;
+mod ranker;
 
 use crate::model::{AppItem, SearchResult};
 
+/// 默认返回条数。
 pub const TOP_N: usize = 10;
 
-/// Phase 1 分数。集中定义，禁止散落到各 matcher。
-pub const SCORE_EXACT: i32 = 1000;
-pub const SCORE_PREFIX: i32 = 800;
+/// 索引用名称规范化（供 AppItem 预计算）。
+pub fn normalize_for_index(name: &str) -> String {
+    normalizer::normalize_name(name)
+}
 
+/// 索引用拼音预计算：返回 (全拼无空格, 首字母)。
+pub fn pinyin_of(text: &str) -> (String, String) {
+    pinyin::precompute(text)
+}
+
+/// 入口：空 Query 给默认列表，否则多路召回 + 排序。
 pub fn search(apps: &[AppItem], query: &str) -> Vec<SearchResult> {
-    let q = matcher::normalize_query(query);
+    let q = normalizer::normalize_query(query);
     if q.is_empty() {
         return apps
             .iter()
@@ -24,27 +37,8 @@ pub fn search(apps: &[AppItem], query: &str) -> Vec<SearchResult> {
             .collect();
     }
 
-    let mut hits: Vec<SearchResult> = apps
-        .iter()
-        .filter_map(|item| {
-            let (score, matched_by) = matcher::match_item(item, &q)?;
-            Some(SearchResult {
-                item: item.clone(),
-                score,
-                matched_by: matched_by.to_string(),
-            })
-        })
-        .collect();
-
-    // 分数优先；同分短名优先；再按名称字典序保证稳定。
-    hits.sort_by(|a, b| {
-        b.score
-            .cmp(&a.score)
-            .then_with(|| a.item.name.len().cmp(&b.item.name.len()))
-            .then_with(|| a.item.name.to_lowercase().cmp(&b.item.name.to_lowercase()))
-    });
-    hits.truncate(TOP_N);
-    hits
+    let hits = matcher::collect_candidates(apps, &q);
+    ranker::rank_and_truncate(hits, TOP_N)
 }
 
 #[cfg(test)]
@@ -52,30 +46,101 @@ mod tests {
     use super::*;
 
     fn item(name: &str) -> AppItem {
-        AppItem {
-            id: name.to_string(),
-            name: name.to_string(),
-            display_name: name.to_string(),
-            target: format!("C:\\fake\\{name}.exe"),
-            args: None,
-            working_dir: None,
-            icon: None,
-            source: "test".into(),
-        }
+        let mut it = AppItem::scanned(
+            name.to_string(),
+            name.to_string(),
+            format!("C:\\fake\\{name}.exe"),
+            None,
+            None,
+            "test",
+        );
+        it.attach_search_fields();
+        it
+    }
+
+    /// 回归用例：Query → 期望排第一的应用名。修 bug 时往这里加。
+    fn assert_top(query: &str, expected: &str) {
+        let apps = vec![
+            item("Google Chrome"),
+            item("Chrome Remote Desktop"),
+            item("Visual Studio Code"),
+            item("Visual Studio"),
+            item("微信"),
+            item("微信开发者工具"),
+            item("企业微信"),
+            item("IntelliJ IDEA"),
+            item("Notepad"),
+        ];
+        let hits = search(&apps, query);
+        assert!(
+            !hits.is_empty(),
+            "no hits for {query}"
+        );
+        assert_eq!(
+            hits[0].item.name, expected,
+            "query={query} top={} expected={expected}",
+            hits[0].item.name
+        );
     }
 
     #[test]
     fn exact_beats_prefix() {
-        let apps = vec![item("Google Chrome"), item("Chrome Remote Desktop")];
-        let hits = search(&apps, "chrome");
-        assert_eq!(hits[0].item.name, "Google Chrome");
+        assert_top("chrome", "Google Chrome");
     }
 
     #[test]
     fn prefix_matches() {
-        let apps = vec![item("Visual Studio Code"), item("Notepad")];
-        let hits = search(&apps, "vis");
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].matched_by, "prefix");
+        // 同为 prefix 时短名优先（Phase 2 无历史；想要 VS Code 用 vsc/vscode）
+        assert_top("vis", "Visual Studio");
+    }
+
+    #[test]
+    fn chinese_exact() {
+        assert_top("微信", "微信");
+    }
+
+    #[test]
+    fn alias_vscode() {
+        assert_top("vsc", "Visual Studio Code");
+        assert_top("vscode", "Visual Studio Code");
+    }
+
+    #[test]
+    fn alias_wechat() {
+        assert_top("wx", "微信");
+        assert_top("weixin", "微信");
+    }
+
+    #[test]
+    fn alias_idea() {
+        assert_top("idea", "IntelliJ IDEA");
+    }
+
+    #[test]
+    fn pinyin_full() {
+        assert_top("weixin", "微信");
+    }
+
+    #[test]
+    fn pinyin_initials() {
+        assert_top("wx", "微信");
+        assert_top("wxkf", "微信开发者工具");
+    }
+
+    #[test]
+    fn substring() {
+        assert_top("studio", "Visual Studio");
+    }
+
+    #[test]
+    fn fuzzy_typo() {
+        assert_top("chorme", "Google Chrome");
+        assert_top("crome", "Google Chrome");
+    }
+
+    #[test]
+    fn query_history_style_protection_via_alias() {
+        // chrome 本身应精确命中 Google Chrome，而不是 Remote Desktop
+        assert_top("chrome", "Google Chrome");
     }
 }

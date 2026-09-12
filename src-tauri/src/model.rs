@@ -15,6 +15,49 @@ pub struct AppItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     pub source: String,
+    /// 索引时预计算：规范化名称（小写、去首尾空白）。
+    #[serde(skip)]
+    pub normalized_name: String,
+    /// 索引时预计算：全拼（无空格），如 weixinkaifazhegongju。
+    #[serde(skip)]
+    pub pinyin: String,
+    /// 索引时预计算：拼音首字母，如 wxkfzgj。
+    #[serde(skip)]
+    pub pinyin_initials: String,
+}
+
+impl AppItem {
+    /// 扫描阶段构造；拼音字段在 `attach_search_fields` 时填充。
+    pub fn scanned(
+        id: String,
+        name: String,
+        target: String,
+        args: Option<String>,
+        working_dir: Option<String>,
+        source: impl Into<String>,
+    ) -> Self {
+        Self {
+            id,
+            display_name: name.clone(),
+            name,
+            target,
+            args,
+            working_dir,
+            icon: None,
+            source: source.into(),
+            normalized_name: String::new(),
+            pinyin: String::new(),
+            pinyin_initials: String::new(),
+        }
+    }
+
+    /// 在扫描完成后补齐拼音字段（不要在搜索热路径里做转换）。
+    pub fn attach_search_fields(&mut self) {
+        self.normalized_name = crate::search::normalize_for_index(&self.name);
+        let (full, initials) = crate::search::pinyin_of(&self.display_name);
+        self.pinyin = full;
+        self.pinyin_initials = initials;
+    }
 }
 
 /// 返回给前端的一条排序后的搜索结果。

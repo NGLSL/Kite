@@ -49,19 +49,19 @@ fn collect_hive(hive: HKEY, subkey: &str, source: &str, out: &mut Vec<RawItem>) 
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| sub.trim_end_matches(".exe").to_string());
-            let item = AppItem {
-                id: hash_id(&[&normalize_path_key(&target), source]),
-                name: name.clone(),
-                display_name: name,
-                target: target.clone(),
-                args: None,
-                working_dir: Path::new(&target)
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string()),
-                icon: None,
-                source: source.to_string(),
-            };
-            out.push((item, Some(target)));
+            let working_dir = Path::new(&target)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string());
+            let icon_src = Some(target.clone());
+            let item = AppItem::scanned(
+                hash_id(&[&normalize_path_key(&target), source]),
+                name,
+                target,
+                None,
+                working_dir,
+                source,
+            );
+            out.push((item, icon_src));
         }
         index += 1;
     }

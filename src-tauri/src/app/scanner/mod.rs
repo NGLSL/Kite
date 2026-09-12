@@ -36,6 +36,8 @@ pub fn scan_apps(icon_dir: &Path) -> AppIndex {
     let mut apps = Vec::with_capacity(items.len());
     for (mut item, icon_src) in items {
         item.icon = icons::cache_icon(icon_dir, &item.id, icon_src.as_deref());
+        // 索引阶段预计算规范化名与拼音，搜索热路径只做字符串比较
+        item.attach_search_fields();
         apps.push(item);
     }
 
@@ -71,36 +73,22 @@ fn collect_from_dir(root: &Path, source: &str, out: &mut Vec<RawItem>) {
         if ext == "lnk" {
             if let Some((target, args, working_dir, icon_src)) = lnk::resolve_lnk(path) {
                 let name = app_display_name(&file_name);
-                let item = AppItem {
-                    id: hash_id(&[
-                        &normalize_path_key(&target),
-                        args.as_deref().unwrap_or(""),
-                        source,
-                    ]),
-                    name: name.clone(),
-                    display_name: name,
-                    target,
-                    args,
-                    working_dir,
-                    icon: None,
-                    source: source.to_string(),
-                };
+                let id = hash_id(&[
+                    &normalize_path_key(&target),
+                    args.as_deref().unwrap_or(""),
+                    source,
+                ]);
+                let item = AppItem::scanned(id, name, target, args, working_dir, source);
                 out.push((item, icon_src));
             }
         } else if ext == "exe" {
             let target = path.to_string_lossy().to_string();
             let name = app_display_name(&file_name);
-            let item = AppItem {
-                id: hash_id(&[&normalize_path_key(&target), source]),
-                name: name.clone(),
-                display_name: name,
-                target: target.clone(),
-                args: None,
-                working_dir: path.parent().map(|p| p.to_string_lossy().to_string()),
-                icon: None,
-                source: source.to_string(),
-            };
-            out.push((item, Some(target)));
+            let id = hash_id(&[&normalize_path_key(&target), source]);
+            let working_dir = path.parent().map(|p| p.to_string_lossy().to_string());
+            let icon_src = Some(target.clone());
+            let item = AppItem::scanned(id, name, target, None, working_dir, source);
+            out.push((item, icon_src));
         }
     }
 }
