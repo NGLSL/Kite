@@ -84,6 +84,27 @@
   background: color-mix(in srgb, var(--text) 8%, transparent);
 }
 
+.files-toggle {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.files-toggle.on {
+  color: var(--mark);
+  border-color: var(--mark);
+  background: color-mix(in srgb, var(--mark) 12%, transparent);
+}
+
+.files-toggle:hover {
+  color: var(--text);
+}
+
 .divider {
   height: 1px;
   background: var(--border);
