@@ -93,6 +93,16 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let alt_space = Shortcut::new(Some(Modifiers::ALT), Code::Space);
-    app.global_shortcut().register(alt_space)?;
+    // 已被其它程序或旧实例占用时不要让整个应用崩掉
+    match app.global_shortcut().register(alt_space) {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("Alt+Space 注册失败（可能被占用）: {e}；可从托盘打开 Kite");
+            let _ = app.global_shortcut().unregister(alt_space);
+            if app.global_shortcut().register(alt_space).is_err() {
+                eprintln!("Alt+Space 仍不可用，请释放全局热键后重试");
+            }
+        }
+    }
     Ok(())
 }

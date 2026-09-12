@@ -101,7 +101,8 @@ cd src-tauri; cargo check; cd ..
 ## 8. 易踩坑
 
 1. `vite.config.ts` 保持 `server.host = "127.0.0.1"`
-2. Windows 脚本用 `npm.cmd`
+2. Windows 脚本用 `npm.cmd`；VS Code 若找不到 `cargo`，用 `npm run tauri:dev` 或整窗重启
 3. esbuild 被拦：`npm approve-scripts esbuild`
 4. 链接失败查 MSVC，不装 MinGW
 5. 图标提取失败返回 `None`，不得拖垮扫描
+6. **旧 `kite.exe` 未退出时再 `tauri dev` 会报 `HotKey already registered`** — 先结束进程再启动
