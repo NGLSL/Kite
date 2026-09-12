@@ -1,4 +1,4 @@
-/** 搜索 IPC 与防抖 Query 状态。 */
+/** 搜索 IPC 与防抖 Query 状态。默认不搜文件。 */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { SearchResult } from "../../types/ipc";
 
 const DEBOUNCE_MS = 40;
+const DEBOUNCE_FILES_MS = 220;
 
 export function useSearch() {
   const [query, setQuery] = useState("");
@@ -13,13 +14,19 @@ export function useSearch() {
   const [active, setActive] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [searchFiles, setSearchFiles] = useState(false);
   const debounceRef = useRef<number | undefined>(undefined);
   const queryRef = useRef("");
+  const filesRef = useRef(false);
   queryRef.current = query;
+  filesRef.current = searchFiles;
 
-  const runSearch = useCallback(async (q: string) => {
+  const runSearch = useCallback(async (q: string, files: boolean) => {
     try {
-      const hits = await invoke<SearchResult[]>("search_apps", { query: q });
+      const hits = await invoke<SearchResult[]>("search_apps", {
+        query: q,
+        includeFiles: files,
+      });
       setResults(hits);
       setActive(0);
       setError(null);
@@ -31,11 +38,12 @@ export function useSearch() {
 
   useEffect(() => {
     window.clearTimeout(debounceRef.current);
+    const delay = searchFiles ? DEBOUNCE_FILES_MS : DEBOUNCE_MS;
     debounceRef.current = window.setTimeout(() => {
-      void runSearch(query);
-    }, DEBOUNCE_MS);
+      void runSearch(query, searchFiles);
+    }, delay);
     return () => window.clearTimeout(debounceRef.current);
-  }, [query, runSearch]);
+  }, [query, searchFiles, runSearch]);
 
   useEffect(() => {
     setScanning(true);
@@ -49,12 +57,10 @@ export function useSearch() {
     });
     const unReady = listen("kite://index-ready", () => {
       setScanning(false);
-      // 索引已就绪，立刻刷一次结果
-      void runSearch(queryRef.current);
+      void runSearch(queryRef.current, filesRef.current);
     });
     const unIcons = listen("kite://icons-ready", () => {
-      // 图标补全后刷新，让列表显示图标
-      void runSearch(queryRef.current);
+      void runSearch(queryRef.current, filesRef.current);
     });
     return () => {
       unFocus.then((f) => f());
@@ -68,7 +74,6 @@ export function useSearch() {
     async (item: SearchResult | undefined) => {
       if (!item) return;
       try {
-        // query 一并传给 Rust，用于 Query History 配对记忆
         await invoke("launch_app", { id: item.id, query });
       } catch (e) {
         setError(String(e));
@@ -97,5 +102,7 @@ export function useSearch() {
     scanning,
     launch,
     moveActive,
+    searchFiles,
+    setSearchFiles,
   };
 }

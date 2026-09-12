@@ -8,9 +8,17 @@ use crate::storage::settings::{Settings, UserAlias};
 use crate::{app, history, search, storage, system};
 
 #[tauri::command]
-pub fn search_apps(query: String, state: State<'_, AppState>) -> Result<Vec<SearchResult>, String> {
+pub fn search_apps(
+    query: String,
+    include_files: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<Vec<SearchResult>, String> {
     let q_norm = search::normalize_for_index(&query);
-    let index = state.index.lock().map_err(|e| e.to_string())?;
+    // 克隆后尽快释放锁，避免搜索/历史 IO 堵住 UI
+    let apps: Vec<_> = {
+        let index = state.index.lock().map_err(|e| e.to_string())?;
+        index.apps.clone()
+    };
 
     let user_targets: Vec<String> = state
         .history
@@ -23,13 +31,12 @@ pub fn search_apps(query: String, state: State<'_, AppState>) -> Result<Vec<Sear
         })
         .unwrap_or_default();
 
-    let mut hits = search::search(&index.apps, &query, &user_targets);
+    let mut hits = search::search(&apps, &query, &user_targets);
 
-    // Everything 文件搜索：应用结果排前，文件补尾
-    if !q_norm.is_empty() {
+    // Everything 仅在用户打开「搜文件」时调用，绝不默认拉起
+    if include_files.unwrap_or(false) && q_norm.len() >= 2 {
         let max_files = 5usize;
-        let file_hits = system::everything::search_files(&query, max_files);
-        for fh in file_hits {
+        for fh in system::everything::search_files(&query, max_files) {
             let name = fh.name.clone();
             let id = format!("file:{}", fh.path.to_lowercase());
             let mut item = AppItem::scanned(id, name, fh.path, None, None, "everything");
@@ -55,11 +62,9 @@ pub fn search_apps(query: String, state: State<'_, AppState>) -> Result<Vec<Sear
                     hit.matched_by = format!("{}+history", hit.matched_by);
                 }
             }
-            hits = search::rerank(hits, search::TOP_N);
         }
-    } else {
-        hits = search::rerank(hits, search::TOP_N);
     }
+    hits = search::rerank(hits, search::TOP_N);
 
     Ok(hits)
 }

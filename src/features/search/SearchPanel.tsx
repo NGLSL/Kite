@@ -9,8 +9,19 @@ import { SettingsPanel } from "./SettingsPanel";
 import "./search.css";
 
 export function SearchPanel() {
-  const { query, setQuery, results, active, setActive, error, scanning, launch, moveActive } =
-    useSearch();
+  const {
+    query,
+    setQuery,
+    results,
+    active,
+    setActive,
+    error,
+    scanning,
+    launch,
+    moveActive,
+    searchFiles,
+    setSearchFiles,
+  } = useSearch();
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const [showSettings, setShowSettings] = useState(false);
@@ -87,6 +98,8 @@ export function SearchPanel() {
               onQueryChange={setQuery}
               onKeyDown={onKeyDown}
               inputRef={inputRef}
+              searchFiles={searchFiles}
+              onToggleFiles={() => setSearchFiles((v) => !v)}
               onFocusSearch={focusSearch}
             />
             <div className="divider" />

@@ -5,10 +5,19 @@ type Props = {
   onQueryChange: (q: string) => void;
   onKeyDown: (e: React.KeyboardEvent) => void;
   inputRef: RefObject<HTMLInputElement | null>;
+  searchFiles: boolean;
+  onToggleFiles: () => void;
   onFocusSearch?: () => void;
 };
 
-export function SearchInput({ query, onQueryChange, onKeyDown, inputRef }: Props) {
+export function SearchInput({
+  query,
+  onQueryChange,
+  onKeyDown,
+  inputRef,
+  searchFiles,
+  onToggleFiles,
+}: Props) {
   return (
     <div className="search-row">
       <svg className="search-icon" viewBox="0 0 24 24" aria-hidden>
@@ -21,11 +30,20 @@ export function SearchInput({ query, onQueryChange, onKeyDown, inputRef }: Props
         value={query}
         onChange={(e) => onQueryChange(e.currentTarget.value)}
         onKeyDown={onKeyDown}
-        placeholder="Search..."
+        placeholder={searchFiles ? "搜应用 + Everything 文件…" : "Search..."}
         spellCheck={false}
         autoComplete="off"
         aria-label="Search applications"
       />
+      <button
+        type="button"
+        className={`files-toggle ${searchFiles ? "on" : ""}`}
+        onClick={onToggleFiles}
+        title="用 Everything 搜索文件（默认关闭）"
+        aria-pressed={searchFiles}
+      >
+        文件
+      </button>
       {query && (
         <button
           className="clear-btn"
