@@ -3,13 +3,14 @@
 mod app;
 mod commands;
 mod history;
+mod log;
 mod model;
 mod search;
 mod state;
 mod storage;
 mod system;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 use state::AppState;
@@ -50,6 +51,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::search_apps,
+            commands::index_count,
             commands::launch_app,
             commands::rescan_apps,
             commands::toggle_window,
@@ -64,13 +66,24 @@ pub fn run() {
 }
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let _ = std::fs::create_dir_all(&data_dir);
+    log::init(log::default_path_under(&data_dir));
+    log::info(&format!("setup start, data_dir={data_dir:?}"));
+
     let db_path = state::history_db_path(app.handle());
     let history_db = storage::HistoryDb::open(&db_path)
         .map_err(|e| format!("open history db: {e}"))?;
     app.manage(AppState::new(history_db));
+    log::info("state managed");
 
     if let Err(e) = system::tray::setup(app.handle()) {
-        eprintln!("tray setup failed: {e}");
+        log::info(&format!("tray setup failed: {e}"));
+    } else {
+        log::info("tray ok");
     }
 
     // 启动时若设置了开机启动，保持注册表同步
@@ -86,22 +99,36 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // 扫描放工作线程；首屏只等快速索引，图标后台补
     let handle = app.handle().clone();
     std::thread::spawn(move || {
-        if let Err(e) = state::rebuild_index(&handle) {
-            eprintln!("scan failed: {e}");
+        log::info("scan thread spawned");
+        match state::rebuild_index(&handle) {
+            Ok(n) => log::info(&format!("scan thread done, n={n}")),
+            Err(e) => log::info(&format!("scan failed: {e}")),
+        }
+    });
+    // 前端可能错过一次性事件：稍后再广播一次
+    let handle2 = app.handle().clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        if let Some(state) = handle2.try_state::<AppState>() {
+            if let Ok(idx) = state.index.lock() {
+                let n = idx.apps.len();
+                let _ = handle2.emit("kite://index-ready", n);
+                log::info(&format!("re-emit index-ready n={n}"));
+            }
         }
     });
 
     let alt_space = Shortcut::new(Some(Modifiers::ALT), Code::Space);
-    // 已被其它程序或旧实例占用时不要让整个应用崩掉
     match app.global_shortcut().register(alt_space) {
-        Ok(()) => {}
+        Ok(()) => log::info("Alt+Space registered"),
         Err(e) => {
-            eprintln!("Alt+Space 注册失败（可能被占用）: {e}；可从托盘打开 Kite");
+            log::info(&format!("Alt+Space 注册失败: {e}"));
             let _ = app.global_shortcut().unregister(alt_space);
             if app.global_shortcut().register(alt_space).is_err() {
-                eprintln!("Alt+Space 仍不可用，请释放全局热键后重试");
+                log::info("Alt+Space 仍不可用");
             }
         }
     }
+    log::info("setup done");
     Ok(())
 }

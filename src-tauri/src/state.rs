@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -37,34 +38,77 @@ pub fn history_db_path(app: &AppHandle) -> PathBuf {
         .join("kite-history.db")
 }
 
-/// 两阶段重建：
-/// 1) 快速建索引（无图标）并立刻可搜索
-/// 2) 后台并行补图标后再写回
+/// 两阶段重建：先快速索引可搜索，再后台补图标（补图标时不持锁）。
 pub fn rebuild_index(app: &AppHandle) -> Result<usize, String> {
     let t0 = std::time::Instant::now();
     let dir = icon_dir(app);
-    eprintln!("[kite:scan] rebuild start, icon_dir={:?}", dir);
-    let mut index = crate::app::scan_apps(&dir, true);
+    crate::log::info(&format!("rebuild start, icon_dir={dir:?}"));
+
+    let index = crate::app::scan_apps(&dir, true);
     let count = index.apps.len();
     if let Some(state) = app.try_state::<AppState>() {
         *state.index.lock().map_err(|e| e.to_string())? = index;
     }
     let _ = app.emit("kite://index-ready", count);
-    eprintln!("[kite:scan] index-ready emitted count={count} in {:?}", t0.elapsed());
+    crate::log::info(&format!(
+        "index-ready count={count} in {:?}",
+        t0.elapsed()
+    ));
+
+    let pending: Vec<(String, Option<String>)> = {
+        let state = app
+            .try_state::<AppState>()
+            .ok_or_else(|| "no state".to_string())?;
+        let index = state.index.lock().map_err(|e| e.to_string())?;
+        index
+            .apps
+            .iter()
+            .filter(|a| a.icon.is_none())
+            .map(|a| (a.id.clone(), Some(a.target.clone())))
+            .collect()
+    };
 
     let t1 = std::time::Instant::now();
+    let shared: Arc<Mutex<HashMap<String, Option<String>>>> = Arc::new(Mutex::new(HashMap::new()));
+    if !pending.is_empty() {
+        let chunk = pending.len().div_ceil(8).max(1);
+        std::thread::scope(|s| {
+            for part in pending.chunks(chunk) {
+                let part = part.to_vec();
+                let dir = dir.clone();
+                let shared = Arc::clone(&shared);
+                s.spawn(move || {
+                    for (id, src) in &part {
+                        let path = crate::system::icons::cache_icon(&dir, id, src.as_deref());
+                        if let Ok(mut g) = shared.lock() {
+                            g.insert(id.clone(), path);
+                        }
+                    }
+                });
+            }
+        });
+    }
+
     if let Some(state) = app.try_state::<AppState>() {
         if let Ok(mut guard) = state.index.lock() {
-            crate::app::fill_missing_icons(&mut guard, &dir);
-            eprintln!(
-                "[kite:scan] icons filled: {}/{} in {:?}",
+            if let Ok(map) = shared.lock() {
+                for item in guard.apps.iter_mut() {
+                    if item.icon.is_none() {
+                        if let Some(p) = map.get(&item.id) {
+                            item.icon = p.clone();
+                        }
+                    }
+                }
+            }
+            crate::log::info(&format!(
+                "icons filled {}/{} in {:?}",
                 guard.apps.iter().filter(|a| a.icon.is_some()).count(),
                 guard.apps.len(),
                 t1.elapsed()
-            );
+            ));
         }
     }
     let _ = app.emit("kite://icons-ready", count);
-    eprintln!("[kite:scan] rebuild total {:?}", t0.elapsed());
+    crate::log::info(&format!("rebuild total {:?}", t0.elapsed()));
     Ok(count)
 }

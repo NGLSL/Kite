@@ -13,7 +13,7 @@ export function useSearch() {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [active, setActive] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const [scanning, setScanning] = useState(false);
+  const [scanning, setScanning] = useState(true);
   const [searchFiles, setSearchFiles] = useState(false);
   const debounceRef = useRef<number | undefined>(undefined);
   const queryRef = useRef("");
@@ -45,8 +45,39 @@ export function useSearch() {
     return () => window.clearTimeout(debounceRef.current);
   }, [query, searchFiles, runSearch]);
 
+  // 事件 + 轮询双保险：避免 index-ready 在监听前就发完
   useEffect(() => {
-    setScanning(true);
+    let cancelled = false;
+
+    const syncFromIndex = async () => {
+      try {
+        const n = await invoke<number>("index_count");
+        if (cancelled) return;
+        if (n > 0) {
+          setScanning(false);
+          await runSearch(queryRef.current, filesRef.current);
+          return true;
+        }
+      } catch {
+        /* index_count 未就绪时忽略 */
+      }
+      return false;
+    };
+
+    const poll = async () => {
+      for (let i = 0; i < 40 && !cancelled; i++) {
+        const ok = await syncFromIndex();
+        if (ok) return;
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      if (!cancelled) {
+        // 仍无索引则停止扫描态，显示空结果，避免一直卡住
+        setScanning(false);
+      }
+    };
+
+    void poll();
+
     const unFocus = listen("kite://focus-search", () => {
       setQuery("");
       setActive(0);
@@ -62,7 +93,9 @@ export function useSearch() {
     const unIcons = listen("kite://icons-ready", () => {
       void runSearch(queryRef.current, filesRef.current);
     });
+
     return () => {
+      cancelled = true;
       unFocus.then((f) => f());
       unCleared.then((f) => f());
       unReady.then((f) => f());

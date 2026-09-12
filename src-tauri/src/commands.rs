@@ -70,6 +70,12 @@ pub fn search_apps(
 }
 
 #[tauri::command]
+pub fn index_count(state: State<'_, AppState>) -> Result<usize, String> {
+    let index = state.index.lock().map_err(|e| e.to_string())?;
+    Ok(index.apps.len())
+}
+
+#[tauri::command]
 pub fn launch_app(
     id: String,
     query: String,

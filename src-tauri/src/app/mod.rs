@@ -5,4 +5,4 @@ pub mod scanner;
 pub mod uwp;
 
 pub use launcher::launch;
-pub use scanner::{fill_missing_icons, scan_apps};
+pub use scanner::scan_apps;

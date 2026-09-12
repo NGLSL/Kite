@@ -125,13 +125,51 @@ unsafe fn hicon_to_png(hicon: HICON) -> Option<Vec<u8>> {
     }
 
     let img = RgbaImage::from_raw(width as u32, height as u32, pixels)?;
-    let img = if img.width() > 128 {
-        image::imageops::resize(&img, 64, 64, image::imageops::FilterType::Triangle)
-    } else {
-        img
-    };
+    let img = crop_and_fill(&img);
 
     let mut buf = std::io::Cursor::new(Vec::new());
     img.write_to(&mut buf, image::ImageFormat::Png).ok()?;
     Some(buf.into_inner())
+}
+
+/// 裁掉透明边，再居中放到正方形画布，避免列表里显得过小。
+fn crop_and_fill(img: &RgbaImage) -> RgbaImage {
+    let (w, h) = img.dimensions();
+    let mut min_x = w;
+    let mut max_x = 0u32;
+    let mut min_y = h;
+    let mut max_y = 0u32;
+    for y in 0..h {
+        for x in 0..w {
+            let p = img.get_pixel(x, y);
+            if p.0[3] > 8 {
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    if min_x > max_x || min_y > max_y {
+        // 全透明，退化为原图缩放
+        return image::imageops::resize(img, 64, 64, image::imageops::FilterType::Triangle);
+    }
+
+    let cw = max_x - min_x + 1;
+    let ch = max_y - min_y + 1;
+    let crop = image::imageops::crop_imm(img, min_x, min_y, cw, ch).to_image();
+
+    // 目标 64，图标占约 90%
+    let side = 64u32;
+    let inner = ((side as f32) * 0.9).round() as u32;
+    let scale = (inner as f32 / cw.max(ch) as f32).min(1.0);
+    let nw = ((cw as f32) * scale).round().max(1.0) as u32;
+    let nh = ((ch as f32) * scale).round().max(1.0) as u32;
+    let resized = image::imageops::resize(&crop, nw, nh, image::imageops::FilterType::Triangle);
+
+    let mut canvas = RgbaImage::from_pixel(side, side, image::Rgba([0, 0, 0, 0]));
+    let ox = (side.saturating_sub(nw)) / 2;
+    let oy = (side.saturating_sub(nh)) / 2;
+    image::imageops::overlay(&mut canvas, &resized, ox as i64, oy as i64);
+    canvas
 }
