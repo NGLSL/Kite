@@ -195,3 +195,107 @@
   color: var(--danger);
   font-size: 12px;
 }
+
+/* 设置 */
+.settings {
+  padding: 14px 16px 18px;
+  overflow: auto;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.settings-head h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.settings .row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.settings input[type="number"] {
+  width: 72px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+
+.settings-note {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin: 8px 0 14px;
+}
+
+.settings-section {
+  font-weight: 600;
+  margin: 10px 0 6px;
+}
+
+.alias-form {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.alias-form input {
+  flex: 1;
+  min-width: 120px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+
+.alias-form button,
+.rescan-btn,
+.alias-list button {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.alias-list {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0;
+}
+
+.alias-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.alias-list button {
+  margin-left: auto;
+  font-size: 12px;
+}
+
+.rescan-btn {
+  margin-top: 10px;
+  width: 100%;
+}
+
+.settings-msg {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}

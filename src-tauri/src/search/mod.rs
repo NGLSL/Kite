@@ -23,7 +23,8 @@ pub fn pinyin_of(text: &str) -> (String, String) {
 }
 
 /// 入口：空 Query 给默认列表，否则多路召回 + 排序。
-pub fn search(apps: &[AppItem], query: &str) -> Vec<SearchResult> {
+/// `user_alias_targets`：用户 Alias 命中的应用名（小写）。
+pub fn search(apps: &[AppItem], query: &str, user_alias_targets: &[String]) -> Vec<SearchResult> {
     let q = normalizer::normalize_query(query);
     if q.is_empty() {
         return apps
@@ -37,7 +38,7 @@ pub fn search(apps: &[AppItem], query: &str) -> Vec<SearchResult> {
             .collect();
     }
 
-    let hits = matcher::collect_candidates(apps, &q);
+    let hits = matcher::collect_candidates(apps, &q, user_alias_targets);
     ranker::rank_and_truncate(hits, TOP_N)
 }
 
@@ -76,7 +77,7 @@ mod tests {
             item("IntelliJ IDEA"),
             item("Notepad"),
         ];
-        let hits = search(&apps, query);
+        let hits = search(&apps, query, &[]);
         assert!(
             !hits.is_empty(),
             "no hits for {query}"

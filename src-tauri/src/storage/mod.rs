@@ -1,6 +1,8 @@
 //! SQLite 历史库：启动频次、最近使用、Query→App 配对。
 //! 手写 SQL，无 ORM。连接可被 `Mutex` 串行使用。
 
+pub mod settings;
+
 use std::path::Path;
 
 use rusqlite::{params, Connection};
@@ -48,7 +50,17 @@ impl HistoryDb {
             );
             "#,
         )?;
-        Ok(Self { conn })
+        let mut db = Self { conn };
+        db.ensure_schema()?;
+        Ok(db)
+    }
+
+    pub(crate) fn raw_conn(&self) -> &Connection {
+        &self.conn
+    }
+
+    pub(crate) fn raw_conn_mut(&mut self) -> &mut Connection {
+        &mut self.conn
     }
 
     /// 记录一次启动；`query_norm` 为空则只记 Usage，不记 Query History。

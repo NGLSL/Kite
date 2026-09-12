@@ -3,6 +3,8 @@ use std::process::{Command, Stdio};
 
 use crate::model::AppItem;
 
+use super::uwp;
+
 /// 启动索引中的应用。禁止把用户输入拼进 shell 字符串。
 pub fn launch(item: &AppItem) -> Result<(), String> {
     let target = &item.target;
@@ -10,9 +12,23 @@ pub fn launch(item: &AppItem) -> Result<(), String> {
         return Err("empty target".into());
     }
 
+    // Store / shell 路径
+    if target.starts_with("shell:") {
+        return uwp::launch_shell_path(target);
+    }
+
+    // 文件/文件夹（Everything 结果）
     let path = Path::new(target);
+    if path.is_dir() {
+        return opener_open(target);
+    }
     if !path.exists() {
         return Err(format!("target not found: {target}"));
+    }
+
+    // 文件用系统关联打开
+    if !is_executable(path) {
+        return opener_open(target);
     }
 
     let mut cmd = Command::new(target);
@@ -36,4 +52,15 @@ pub fn launch(item: &AppItem) -> Result<(), String> {
 
     cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
     Ok(())
+}
+
+fn is_executable(p: &Path) -> bool {
+    p.extension()
+        .map(|e| e.to_string_lossy().eq_ignore_ascii_case("exe"))
+        .unwrap_or(false)
+}
+
+fn opener_open(path: &str) -> Result<(), String> {
+    // 使用 tauri-plugin-opener 会更稳；此处用 ShellExecute 同源能力
+    super::uwp::launch_shell_path(path)
 }

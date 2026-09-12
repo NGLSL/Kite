@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useSearch } from "./useSearch";
 import { SearchInput } from "./SearchInput";
 import { ResultList } from "./ResultList";
 import { StatusRegion } from "./StatusRegion";
+import { SettingsPanel } from "./SettingsPanel";
 import "./search.css";
 
 export function SearchPanel() {
@@ -11,6 +13,7 @@ export function SearchPanel() {
     useSearch();
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const [showSettings, setShowSettings] = useState(false);
 
   const focusSearch = useCallback(() => {
     inputRef.current?.focus();
@@ -18,8 +21,15 @@ export function SearchPanel() {
   }, []);
 
   useEffect(() => {
-    focusSearch();
-  }, [focusSearch]);
+    if (!showSettings) focusSearch();
+  }, [showSettings, focusSearch]);
+
+  useEffect(() => {
+    const un = listen("kite://open-settings", () => setShowSettings(true));
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
 
   useEffect(() => {
     const el = listRef.current?.querySelector<HTMLElement>(`[data-index="${active}"]`);
@@ -28,6 +38,13 @@ export function SearchPanel() {
 
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      // Alt+1..9 直接启动对应结果
+      if (e.altKey && e.key >= "1" && e.key <= "9") {
+        e.preventDefault();
+        const idx = Number(e.key) - 1;
+        if (idx < results.length) void launch(results[idx]);
+        return;
+      }
       if (e.key === "ArrowDown") {
         e.preventDefault();
         moveActive(1);
@@ -39,38 +56,51 @@ export function SearchPanel() {
         void launch(results[active]);
       } else if (e.key === "Escape") {
         e.preventDefault();
+        if (showSettings) {
+          setShowSettings(false);
+          return;
+        }
         setQuery("");
         void invoke("toggle_window");
       }
     },
-    [active, launch, moveActive, results, setQuery],
+    [active, launch, moveActive, results, setQuery, showSettings],
   );
 
   const empty = useMemo(
-    () => query.trim().length > 0 && results.length === 0,
-    [query, results],
+    () => !showSettings && query.trim().length > 0 && results.length === 0,
+    [query, results, showSettings],
   );
 
   return (
     <div className="shell">
       <div className="panel">
-        <SearchInput
-          query={query}
-          onQueryChange={setQuery}
-          onKeyDown={onKeyDown}
-          inputRef={inputRef}
-          onFocusSearch={focusSearch}
-        />
-        <div className="divider" />
-        <StatusRegion scanning={scanning} empty={empty} error={error} />
-        <ResultList
-          results={results}
-          active={active}
-          query={query}
-          listRef={listRef}
-          onSelect={setActive}
-          onLaunch={(item) => void launch(item)}
-        />
+        {showSettings ? (
+          <SettingsPanel
+            onClose={() => setShowSettings(false)}
+            onRescanned={() => void invoke("rescan_apps")}
+          />
+        ) : (
+          <>
+            <SearchInput
+              query={query}
+              onQueryChange={setQuery}
+              onKeyDown={onKeyDown}
+              inputRef={inputRef}
+              onFocusSearch={focusSearch}
+            />
+            <div className="divider" />
+            <StatusRegion scanning={scanning} empty={empty} error={error} />
+            <ResultList
+              results={results}
+              active={active}
+              query={query}
+              listRef={listRef}
+              onSelect={setActive}
+              onLaunch={(item) => void launch(item)}
+            />
+          </>
+        )}
       </div>
     </div>
   );

@@ -15,3 +15,15 @@ export type SearchResult = AppItem & {
   score: number;
   matched_by: string;
 };
+
+export type Settings = {
+  hide_on_blur: boolean;
+  autostart: boolean;
+  max_results: number;
+  hotkey_label: string;
+};
+
+export type UserAlias = {
+  alias: string;
+  target_name: string;
+};

@@ -2,7 +2,7 @@
 
 mod lnk;
 mod registry;
-mod util;
+pub(crate) mod util;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -31,6 +31,7 @@ pub fn scan_apps(icon_dir: &Path) -> AppIndex {
     collect_from_dir(&user_desktop, "desktop", &mut raw);
     collect_from_dir(&public_desktop, "desktop", &mut raw);
     registry::collect_app_paths("app-paths", &mut raw);
+    crate::app::uwp::collect_uwp("uwp", &mut raw);
 
     let items = dedupe(raw);
     let mut apps = Vec::with_capacity(items.len());

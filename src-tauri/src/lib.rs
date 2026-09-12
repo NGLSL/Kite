@@ -28,11 +28,36 @@ pub fn run() {
                 .build(),
         )
         .setup(setup)
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Focused(false) = event {
+                if window.label() != "main" {
+                    return;
+                }
+                let hide = window
+                    .app_handle()
+                    .try_state::<AppState>()
+                    .map(|s| {
+                        s.history
+                            .lock()
+                            .map(|h| h.load_settings().hide_on_blur)
+                            .unwrap_or(true)
+                    })
+                    .unwrap_or(true);
+                if hide {
+                    let _ = window.hide();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::search_apps,
             commands::launch_app,
             commands::rescan_apps,
-            commands::toggle_window
+            commands::toggle_window,
+            commands::get_settings,
+            commands::save_settings,
+            commands::list_user_aliases,
+            commands::set_user_alias,
+            commands::remove_user_alias
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -43,6 +68,20 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let history_db = storage::HistoryDb::open(&db_path)
         .map_err(|e| format!("open history db: {e}"))?;
     app.manage(AppState::new(history_db));
+
+    if let Err(e) = system::tray::setup(app.handle()) {
+        eprintln!("tray setup failed: {e}");
+    }
+
+    // 启动时若设置了开机启动，保持注册表同步
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(hdb) = state.history.lock() {
+            let s = hdb.load_settings();
+            if s.autostart {
+                let _ = system::autostart::set_autostart(true);
+            }
+        }
+    }
 
     // 扫描放工作线程，避免拖慢窗口显示
     let handle = app.handle().clone();

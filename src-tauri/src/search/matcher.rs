@@ -5,28 +5,32 @@ use crate::search::alias;
 use crate::search::fuzzy::fuzzy_match;
 use crate::search::ranker::{
     SCORE_BUILTIN_ALIAS_EXACT, SCORE_NAME_EXACT, SCORE_PINYIN_EXACT, SCORE_PINYIN_INITIAL,
-    SCORE_PREFIX, SCORE_SUBSTRING,
+    SCORE_PREFIX, SCORE_SUBSTRING, SCORE_USER_ALIAS_EXACT,
 };
 
-fn take_best(best: Option<(i32, &'static str)>, score: i32, kind: &'static str) -> Option<(i32, &'static str)> {
+fn take_best(
+    best: Option<(i32, &'static str)>,
+    score: i32,
+    kind: &'static str,
+) -> Option<(i32, &'static str)> {
     Some(match best {
         Some((bs, bk)) if bs >= score => (bs, bk),
         _ => (score, kind),
     })
 }
 
-/// 对全部应用做多路匹配，返回未排序候选。
-pub fn collect_candidates(apps: &[AppItem], q: &str) -> Vec<SearchResult> {
+/// `user_targets`：用户 Alias 指向的应用名（已小写）。
+pub fn collect_candidates(apps: &[AppItem], q: &str, user_targets: &[String]) -> Vec<SearchResult> {
     let mut out = Vec::new();
     for item in apps {
-        if let Some(hit) = match_item(item, q) {
+        if let Some(hit) = match_item(item, q, user_targets) {
             out.push(hit);
         }
     }
     out
 }
 
-fn match_item(item: &AppItem, q: &str) -> Option<SearchResult> {
+fn match_item(item: &AppItem, q: &str, user_targets: &[String]) -> Option<SearchResult> {
     let name = if item.normalized_name.is_empty() {
         crate::search::normalizer::normalize_name(&item.name)
     } else {
@@ -36,7 +40,15 @@ fn match_item(item: &AppItem, q: &str) -> Option<SearchResult> {
 
     let mut best: Option<(i32, &'static str)> = None;
 
-    // 1) 内置 Alias：点名目标应用
+    // 0) 用户 Alias（优先级最高）
+    let hit_user = user_targets
+        .iter()
+        .any(|t| name == *t || name.contains(t.as_str()) || display.contains(t.as_str()));
+    if hit_user {
+        best = take_best(best, SCORE_USER_ALIAS_EXACT, "user-alias-exact");
+    }
+
+    // 1) 内置 Alias
     if alias::is_builtin_alias(q)
         && (alias::alias_targets_name(q, &name) || alias::alias_targets_name(q, &display))
     {
@@ -54,7 +66,7 @@ fn match_item(item: &AppItem, q: &str) -> Option<SearchResult> {
         }
     }
 
-    // 3) 拼音全拼 / 首字母（索引时已预计算）
+    // 3) 拼音
     if !item.pinyin.is_empty() {
         if item.pinyin == q {
             best = take_best(best, SCORE_PINYIN_EXACT, "pinyin-exact");
@@ -70,8 +82,7 @@ fn match_item(item: &AppItem, q: &str) -> Option<SearchResult> {
         }
     }
 
-    // 4) Fuzzy 仅在无其它命中时兜底；对全名和每个词分别尝试
-    //    （chorme → chrome，而全名是 "google chrome"）
+    // 4) Fuzzy 兜底
     if best.is_none() {
         if let Some((score, _)) = fuzzy_name_or_tokens(q, &name).or_else(|| fuzzy_name_or_tokens(q, &display)) {
             best = take_best(best, score, "fuzzy");

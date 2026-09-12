@@ -2,6 +2,7 @@
 
 mod launcher;
 pub mod scanner;
+pub mod uwp;
 
 pub use launcher::launch;
 pub use scanner::scan_apps;

@@ -34,8 +34,8 @@ cd src-tauri; cargo check; cd ..
 
 - 搜索逻辑只在 Rust；IPC 只回 Top N
 - 启动只执行索引 target，禁止拼用户输入进 shell
-- Phase 1–2 完成；Phase 3 已含：SQLite 历史库、Usage/Frequency/Recency、Query History、历史加权（上限保护 Exact）  
-  仍不做：托盘、设置页、插件、文件搜索
-- 搜索回归：`cd src-tauri; cargo test`；修 bug 往 `search/mod.rs` 的 `assert_top` 加用例
-- 领域词汇：`docs/CONTEXT.md`（勿放根目录）
+- Phase 1–3 完成；Phase 4 与 Everything 已接入：托盘、开机启动、失焦隐藏、设置、用户 Alias、UWP、文件搜索  
+  **仍不做**：插件、AI、OCR、云同步、跨平台
+- 搜索回归：`cd src-tauri; cargo test`
+- 领域词汇：`docs/CONTEXT.md` · ADR：`docs/adr/`
 - `vite.config.ts` 保持 `host: 127.0.0.1`；失败先读真实错误
