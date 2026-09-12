@@ -1,22 +1,18 @@
+//! 搜索管线：规范化 Query、匹配、排序、截断。
+
+mod matcher;
+
 use crate::model::{AppItem, SearchResult};
 
 pub const TOP_N: usize = 10;
 
-const SCORE_EXACT: i32 = 1000;
-const SCORE_PREFIX: i32 = 800;
-
-fn normalize_query(q: &str) -> String {
-    q.trim().to_lowercase()
-}
-
-fn normalize_name(n: &str) -> String {
-    n.trim().to_lowercase()
-}
+/// Phase 1 分数。集中定义，禁止散落到各 matcher。
+pub const SCORE_EXACT: i32 = 1000;
+pub const SCORE_PREFIX: i32 = 800;
 
 pub fn search(apps: &[AppItem], query: &str) -> Vec<SearchResult> {
-    let q = normalize_query(query);
+    let q = matcher::normalize_query(query);
     if q.is_empty() {
-        // Default list: first apps alphabetically (already sorted in index)
         return apps
             .iter()
             .take(TOP_N)
@@ -28,38 +24,19 @@ pub fn search(apps: &[AppItem], query: &str) -> Vec<SearchResult> {
             .collect();
     }
 
-    let mut hits: Vec<SearchResult> = Vec::new();
-    for item in apps {
-        let name = normalize_name(&item.name);
-        let display = normalize_name(&item.display_name);
-
-        let mut best: Option<(i32, &str)> = None;
-        for candidate in [&name, &display] {
-            if candidate == &q {
-                let s = SCORE_EXACT;
-                best = Some(match best {
-                    Some((bs, _)) if bs >= s => (bs, "exact"),
-                    _ => (s, "exact"),
-                });
-            } else if candidate.starts_with(&q) {
-                let s = SCORE_PREFIX;
-                best = Some(match best {
-                    Some((bs, bm)) if bs >= s => (bs, bm),
-                    _ => (s, "prefix"),
-                });
-            }
-        }
-
-        if let Some((score, matched_by)) = best {
-            hits.push(SearchResult {
+    let mut hits: Vec<SearchResult> = apps
+        .iter()
+        .filter_map(|item| {
+            let (score, matched_by) = matcher::match_item(item, &q)?;
+            Some(SearchResult {
                 item: item.clone(),
                 score,
                 matched_by: matched_by.to_string(),
-            });
-        }
-    }
+            })
+        })
+        .collect();
 
-    // Higher score first; then shorter name; then alpha for stability.
+    // 分数优先；同分短名优先；再按名称字典序保证稳定。
     hits.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
@@ -91,7 +68,7 @@ mod tests {
     fn exact_beats_prefix() {
         let apps = vec![item("Google Chrome"), item("Chrome Remote Desktop")];
         let hits = search(&apps, "chrome");
-        assert_eq!(hits[0].name_if(), "Google Chrome".to_string());
+        assert_eq!(hits[0].item.name, "Google Chrome");
     }
 
     #[test]
@@ -100,11 +77,5 @@ mod tests {
         let hits = search(&apps, "vis");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].matched_by, "prefix");
-    }
-
-    impl SearchResult {
-        fn name_if(&self) -> String {
-            self.item.name.clone()
-        }
     }
 }

@@ -1,3 +1,5 @@
+/** IPC 类型：字段名与 Rust serde（snake_case）保持一致。 */
+
 export type AppItem = {
   id: string;
   name: string;

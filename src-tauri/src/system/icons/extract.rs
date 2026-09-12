@@ -1,8 +1,9 @@
+//! 底层 Win32 图标提取。unsafe GDI/Shell 代码集中隔离在本文件。
+
 use std::os::windows::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use image::RgbaImage;
-use sha2::{Digest, Sha256};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SelectObject,
@@ -11,13 +12,50 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::Shell::{ExtractIconExW, SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON};
 use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON};
 
-fn hash_file_name(id: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(id.as_bytes());
-    h.finalize()[..8].iter().map(|b| format!("{b:02x}")).collect()
+/// 从 .exe / .ico 路径提取 PNG；任一步失败返回 None。
+pub fn extract_icon_from_file(path: &Path) -> Option<Vec<u8>> {
+    unsafe { extract_icon_from_file_win32(path) }
 }
 
-/// Convert an HICON to PNG bytes.
+unsafe fn extract_icon_from_file_win32(path: &Path) -> Option<Vec<u8>> {
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut shfi = std::mem::zeroed::<SHFILEINFOW>();
+    let ok = SHGetFileInfoW(
+        windows::core::PCWSTR(wide.as_ptr()),
+        Default::default(),
+        Some(&mut shfi),
+        std::mem::size_of::<SHFILEINFOW>() as u32,
+        SHGFI_ICON,
+    );
+    if ok != 0 && !shfi.hIcon.is_invalid() {
+        let png = hicon_to_png(shfi.hIcon);
+        let _ = DestroyIcon(shfi.hIcon);
+        if png.is_some() {
+            return png;
+        }
+    }
+
+    let mut large = [HICON::default(); 1];
+    let n = ExtractIconExW(
+        windows::core::PCWSTR(wide.as_ptr()),
+        0,
+        Some(large.as_mut_ptr()),
+        None,
+        1,
+    );
+    if n > 0 && !large[0].is_invalid() {
+        let png = hicon_to_png(large[0]);
+        let _ = DestroyIcon(large[0]);
+        return png;
+    }
+    None
+}
+
 unsafe fn hicon_to_png(hicon: HICON) -> Option<Vec<u8>> {
     let mut info = std::mem::zeroed();
     if GetIconInfo(hicon, &mut info).is_err() {
@@ -61,8 +99,7 @@ unsafe fn hicon_to_png(hicon: HICON) -> Option<Vec<u8>> {
         ..Default::default()
     };
 
-    let stride = (width * 4) as usize;
-    let mut pixels = vec![0u8; stride * height as usize];
+    let mut pixels = vec![0u8; (width * 4) as usize * height as usize];
     let selected = SelectObject(mem_dc, HGDIOBJ(color_bmp.0));
     let got = GetDIBits(
         mem_dc,
@@ -97,61 +134,4 @@ unsafe fn hicon_to_png(hicon: HICON) -> Option<Vec<u8>> {
     let mut buf = std::io::Cursor::new(Vec::new());
     img.write_to(&mut buf, image::ImageFormat::Png).ok()?;
     Some(buf.into_inner())
-}
-
-unsafe fn extract_icon_from_file(path: &Path) -> Option<Vec<u8>> {
-    let wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-
-    let mut shfi = std::mem::zeroed::<SHFILEINFOW>();
-    let ok = SHGetFileInfoW(
-        windows::core::PCWSTR(wide.as_ptr()),
-        Default::default(),
-        Some(&mut shfi),
-        std::mem::size_of::<SHFILEINFOW>() as u32,
-        SHGFI_ICON,
-    );
-    if ok != 0 && !shfi.hIcon.is_invalid() {
-        let png = hicon_to_png(shfi.hIcon);
-        let _ = DestroyIcon(shfi.hIcon);
-        if png.is_some() {
-            return png;
-        }
-    }
-
-    let mut large = [HICON::default(); 1];
-    let n = ExtractIconExW(
-        windows::core::PCWSTR(wide.as_ptr()),
-        0,
-        Some(large.as_mut_ptr()),
-        None,
-        1,
-    );
-    if n > 0 && !large[0].is_invalid() {
-        let png = hicon_to_png(large[0]);
-        let _ = DestroyIcon(large[0]);
-        return png;
-    }
-    None
-}
-
-/// Cache an icon PNG under `icon_dir` and return its absolute path.
-/// Failures return None so search is never blocked by icon issues.
-pub fn cache_icon(icon_dir: &Path, id: &str, icon_src: Option<&str>) -> Option<String> {
-    let src = icon_src?;
-    let src_path = PathBuf::from(src);
-    if !src_path.exists() {
-        return None;
-    }
-    std::fs::create_dir_all(icon_dir).ok()?;
-    let out = icon_dir.join(format!("{}.png", hash_file_name(id)));
-    if out.exists() {
-        return Some(out.to_string_lossy().to_string());
-    }
-    let png = unsafe { extract_icon_from_file(&src_path) }?;
-    std::fs::write(&out, &png).ok()?;
-    Some(out.to_string_lossy().to_string())
 }

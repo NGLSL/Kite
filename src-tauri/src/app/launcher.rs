@@ -3,6 +3,7 @@ use std::process::{Command, Stdio};
 
 use crate::model::AppItem;
 
+/// 启动索引中的应用。禁止把用户输入拼进 shell 字符串。
 pub fn launch(item: &AppItem) -> Result<(), String> {
     let target = &item.target;
     if target.is_empty() {
@@ -16,7 +17,6 @@ pub fn launch(item: &AppItem) -> Result<(), String> {
 
     let mut cmd = Command::new(target);
     if let Some(args) = &item.args {
-        // Split on whitespace — Phase 1 does not pass user query into shell.
         for a in args.split_whitespace() {
             cmd.arg(a);
         }

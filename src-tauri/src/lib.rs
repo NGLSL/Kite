@@ -1,68 +1,16 @@
-use std::path::PathBuf;
-use std::sync::Mutex;
+//! Kite 启动入口：只做模块装配，业务不写在本文件。
 
-use tauri::{AppHandle, Emitter, Manager, State};
+mod app;
+mod commands;
+mod model;
+mod search;
+mod state;
+mod system;
+
+use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-mod icons;
-mod launcher;
-mod model;
-mod scanner;
-mod search;
-mod window;
-
-use model::SearchResult;
-use scanner::AppIndex;
-
-pub struct AppState {
-    index: Mutex<AppIndex>,
-}
-
-fn icon_dir(app: &AppHandle) -> PathBuf {
-    app.path()
-        .app_cache_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("icons")
-}
-
-fn rebuild_index(app: &AppHandle) -> Result<usize, String> {
-    let dir = icon_dir(app);
-    let index = scanner::scan_apps(&dir);
-    let count = index.apps.len();
-    if let Some(state) = app.try_state::<AppState>() {
-        *state.index.lock().map_err(|e| e.to_string())? = index;
-    }
-    Ok(count)
-}
-
-#[tauri::command]
-fn search_apps(query: String, state: State<'_, AppState>) -> Result<Vec<SearchResult>, String> {
-    let index = state.index.lock().map_err(|e| e.to_string())?;
-    Ok(search::search(&index.apps, &query))
-}
-
-#[tauri::command]
-fn launch_app(id: String, app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let index = state.index.lock().map_err(|e| e.to_string())?;
-    let item = index
-        .apps
-        .iter()
-        .find(|a| a.id == id)
-        .ok_or_else(|| "app not found".to_string())?;
-    launcher::launch(item)?;
-    window::hide(&app);
-    Ok(())
-}
-
-#[tauri::command]
-fn rescan_apps(app: AppHandle) -> Result<usize, String> {
-    rebuild_index(&app)
-}
-
-#[tauri::command]
-fn toggle_window(app: AppHandle) {
-    window::toggle(&app);
-}
+use state::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -72,39 +20,35 @@ pub fn run() {
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
                     if event.state == ShortcutState::Pressed {
-                        window::toggle(app);
+                        system::window::toggle(app);
                     }
                 })
                 .build(),
         )
-        .setup(|app| {
-            let handle = app.handle().clone();
-            app.manage(AppState {
-                index: Mutex::new(AppIndex::empty()),
-            });
-
-            // Initial scan off the main thread so startup stays snappy
-            let scan_handle = handle.clone();
-            std::thread::spawn(move || match rebuild_index(&scan_handle) {
-                Ok(n) => {
-                    let _ = scan_handle.emit("kite://index-ready", n);
-                }
-                Err(e) => {
-                    eprintln!("scan failed: {e}");
-                }
-            });
-
-            let alt_space = Shortcut::new(Some(Modifiers::ALT), Code::Space);
-            app.global_shortcut().register(alt_space)?;
-
-            Ok(())
-        })
+        .setup(setup)
         .invoke_handler(tauri::generate_handler![
-            search_apps,
-            launch_app,
-            rescan_apps,
-            toggle_window
+            commands::search_apps,
+            commands::launch_app,
+            commands::rescan_apps,
+            commands::toggle_window
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    app.manage(AppState::new());
+
+    // 扫描放工作线程，避免拖慢窗口显示
+    let handle = app.handle().clone();
+    std::thread::spawn(move || match state::rebuild_index(&handle) {
+        Ok(n) => {
+            let _ = handle.emit("kite://index-ready", n);
+        }
+        Err(e) => eprintln!("scan failed: {e}"),
+    });
+
+    let alt_space = Shortcut::new(Some(Modifiers::ALT), Code::Space);
+    app.global_shortcut().register(alt_space)?;
+    Ok(())
 }
