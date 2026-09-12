@@ -41,20 +41,30 @@ pub fn history_db_path(app: &AppHandle) -> PathBuf {
 /// 1) 快速建索引（无图标）并立刻可搜索
 /// 2) 后台并行补图标后再写回
 pub fn rebuild_index(app: &AppHandle) -> Result<usize, String> {
+    let t0 = std::time::Instant::now();
     let dir = icon_dir(app);
+    eprintln!("[kite:scan] rebuild start, icon_dir={:?}", dir);
     let mut index = crate::app::scan_apps(&dir, true);
     let count = index.apps.len();
     if let Some(state) = app.try_state::<AppState>() {
         *state.index.lock().map_err(|e| e.to_string())? = index;
     }
     let _ = app.emit("kite://index-ready", count);
+    eprintln!("[kite:scan] index-ready emitted count={count} in {:?}", t0.elapsed());
 
-    // 从共享索引补图标，避免二次全盘扫描
+    let t1 = std::time::Instant::now();
     if let Some(state) = app.try_state::<AppState>() {
         if let Ok(mut guard) = state.index.lock() {
             crate::app::fill_missing_icons(&mut guard, &dir);
+            eprintln!(
+                "[kite:scan] icons filled: {}/{} in {:?}",
+                guard.apps.iter().filter(|a| a.icon.is_some()).count(),
+                guard.apps.len(),
+                t1.elapsed()
+            );
         }
     }
     let _ = app.emit("kite://icons-ready", count);
+    eprintln!("[kite:scan] rebuild total {:?}", t0.elapsed());
     Ok(count)
 }

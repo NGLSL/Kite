@@ -19,6 +19,7 @@ type RawItem = (AppItem, Option<String>);
 
 /// 完整扫描。`fast` 为 true 时只建列表、不提图标（首屏用）。
 pub fn scan_apps(icon_dir: &Path, fast: bool) -> AppIndex {
+    let t0 = std::time::Instant::now();
     let mut raw: Vec<RawItem> = Vec::new();
 
     let user_start = dirs::data_dir()
@@ -28,26 +29,56 @@ pub fn scan_apps(icon_dir: &Path, fast: bool) -> AppIndex {
     let user_desktop = dirs::desktop_dir().unwrap_or_default();
     let public_desktop = PathBuf::from(r"C:\Users\Public\Desktop");
 
+    let mark = |label: &str, raw: &Vec<RawItem>, t: std::time::Instant| {
+        eprintln!("[kite:scan] {label}: +{} items in {:?}", raw.len(), t.elapsed());
+    };
+
+    let t = std::time::Instant::now();
     collect_from_dir(&user_start, "start-menu", &mut raw);
+    mark("user-start", &raw, t);
+
+    let t = std::time::Instant::now();
     collect_from_dir(&common_start, "start-menu", &mut raw);
+    mark("common-start", &raw, t);
+
+    let t = std::time::Instant::now();
     collect_from_dir(&user_desktop, "desktop", &mut raw);
     collect_from_dir(&public_desktop, "desktop", &mut raw);
+    mark("desktop", &raw, t);
+
+    let t = std::time::Instant::now();
     registry::collect_app_paths("app-paths", &mut raw);
+    mark("app-paths", &raw, t);
+
+    let t = std::time::Instant::now();
     crate::app::uwp::collect_uwp("uwp", &mut raw);
+    mark("uwp", &raw, t);
 
+    let t = std::time::Instant::now();
     let items = dedupe(raw);
-    let mut apps = Vec::with_capacity(items.len());
+    eprintln!("[kite:scan] dedupe -> {} apps in {:?}", items.len(), t.elapsed());
 
+    let mut apps = Vec::with_capacity(items.len());
+    let t = std::time::Instant::now();
+    let mut py = std::time::Duration::ZERO;
     for (mut item, icon_src) in items {
+        let tp = std::time::Instant::now();
         item.attach_search_fields();
+        py += tp.elapsed();
         if !fast {
             item.icon = icons::cache_icon(icon_dir, &item.id, icon_src.as_deref());
         } else {
-            // 快速路径：记下来源，稍后 fill_missing_icons 用 target 补图标
             let _ = icon_src;
         }
         apps.push(item);
     }
+    eprintln!(
+        "[kite:scan] fields/icons (fast={fast}): {} apps in {:?} (pinyin {:?})",
+        apps.len(),
+        t.elapsed(),
+        py
+    );
+    eprintln!("[kite:scan] total {:?} -> index", t0.elapsed());
 
     AppIndex { apps }
 }
