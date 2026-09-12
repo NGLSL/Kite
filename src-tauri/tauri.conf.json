@@ -18,7 +18,9 @@
         "height": 420,
         "resizable": false,
         "decorations": false,
-        "transparent": true,
+        "transparent": false,
+        "shadow": true,
+        "backgroundColor": "#ffffff",
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "center": true,
@@ -38,6 +40,7 @@
     "active": true,
     "targets": ["msi", "nsis"],
     "icon": [
+      "icons/16x16.png",
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",

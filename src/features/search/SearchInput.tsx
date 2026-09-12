@@ -1,4 +1,5 @@
 import type { RefObject } from "react";
+import { startWindowDrag } from "../../shared/windowDrag";
 
 type Props = {
   query: string;
@@ -19,8 +20,8 @@ export function SearchInput({
   onToggleFiles,
 }: Props) {
   return (
-    <div className="search-row">
-      <svg className="search-icon" viewBox="0 0 24 24" aria-hidden>
+    <div className="search-row" data-tauri-drag-region onMouseDown={startWindowDrag}>
+      <svg className="search-icon" viewBox="0 0 24 24" aria-hidden data-tauri-drag-region>
         <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" strokeWidth="1.8" />
         <path d="M20 20l-3.5-3.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
       </svg>
@@ -30,7 +31,7 @@ export function SearchInput({
         value={query}
         onChange={(e) => onQueryChange(e.currentTarget.value)}
         onKeyDown={onKeyDown}
-        placeholder={searchFiles ? "搜应用 + Everything 文件…" : "Search..."}
+        placeholder={searchFiles ? "搜索应用 + 文件…" : "搜索应用、网址，或直接输入关键词"}
         spellCheck={false}
         autoComplete="off"
         aria-label="Search applications"

@@ -20,6 +20,7 @@ export type Settings = {
   hide_on_blur: boolean;
   autostart: boolean;
   max_results: number;
+  hotkey: string;
   hotkey_label: string;
 };
 

@@ -7,6 +7,13 @@ use tauri::{AppHandle, Emitter};
 use crate::state;
 use crate::system::window;
 
+/// 托盘专用满幅图标：避免 default_window_icon 带透明边导致显示偏小。
+/// 32×32 与 Windows 托盘 200% DPI 逻辑尺寸对齐，系统会按需缩到 16。
+fn tray_image() -> tauri::image::Image<'static> {
+    const PNG: &[u8] = include_bytes!("../../icons/32x32.png");
+    tauri::image::Image::from_bytes(PNG).expect("tray icon png")
+}
+
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "打开 Kite", true, None::<&str>)?;
     let rescan = MenuItem::with_id(app, "rescan", "重新扫描应用", true, None::<&str>)?;
@@ -14,13 +21,8 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &settings, &rescan, &quit])?;
 
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .expect("app icon missing from bundle");
-
     TrayIconBuilder::with_id("main-tray")
-        .icon(icon)
+        .icon(tray_image())
         .menu(&menu)
         .show_menu_on_left_click(false)
         .tooltip("Kite")

@@ -14,6 +14,9 @@ pub struct AppItem {
     /// 已缓存 PNG 图标的绝对路径；提取失败为 None。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// 图标提取源（lnk icon_location 或 exe 路径），不发给前端。
+    #[serde(skip)]
+    pub icon_src: Option<String>,
     pub source: String,
     /// 索引时预计算：规范化名称（小写、去首尾空白）。
     #[serde(skip)]
@@ -44,6 +47,7 @@ impl AppItem {
             args,
             working_dir,
             icon: None,
+            icon_src: None,
             source: source.into(),
             normalized_name: String::new(),
             pinyin: String::new(),

@@ -25,22 +25,61 @@ export function SearchPanel() {
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [hotkeyLabel, setHotkeyLabel] = useState("Alt+Space");
 
   const focusSearch = useCallback(() => {
-    inputRef.current?.focus();
-    inputRef.current?.select();
+    const el = inputRef.current;
+    if (!el) return;
+    // WebView2 偶发丢焦点：窗口显示后下一帧再抢一次
+    el.focus({ preventScroll: true });
+    el.select();
   }, []);
 
   useEffect(() => {
-    if (!showSettings) focusSearch();
-  }, [showSettings, focusSearch]);
-
-  useEffect(() => {
-    const un = listen("kite://open-settings", () => setShowSettings(true));
+    void invoke<{ hotkey_label: string }>("get_settings")
+      .then((s) => setHotkeyLabel(s.hotkey_label))
+      .catch(() => undefined);
+    const un = listen("kite://settings-changed", () => {
+      void invoke<{ hotkey_label: string }>("get_settings")
+        .then((s) => setHotkeyLabel(s.hotkey_label))
+        .catch(() => undefined);
+    });
     return () => {
       un.then((f) => f());
     };
   }, []);
+
+  // 打开/关闭设置时同步窗口尺寸与「设置中」标记（禁止失焦隐藏）
+  const applyUiMode = useCallback((settings: boolean) => {
+    void invoke("set_ui_mode", { settings }).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (!showSettings) focusSearch();
+    applyUiMode(showSettings);
+  }, [showSettings, focusSearch, applyUiMode]);
+
+  useEffect(() => {
+    const unSettings = listen("kite://open-settings", () => {
+      setShowSettings(true);
+      applyUiMode(true);
+    });
+    const unCleared = listen("kite://cleared", () => {
+      setShowSettings(false);
+      applyUiMode(false);
+    });
+    // Alt+Space 显示窗口后必须把焦点交回输入框
+    const unFocus = listen("kite://focus-search", () => {
+      requestAnimationFrame(() => focusSearch());
+      window.setTimeout(focusSearch, 30);
+      window.setTimeout(focusSearch, 80);
+    });
+    return () => {
+      unSettings.then((f) => f());
+      unCleared.then((f) => f());
+      unFocus.then((f) => f());
+    };
+  }, [focusSearch, applyUiMode]);
 
   useEffect(() => {
     const el = listRef.current?.querySelector<HTMLElement>(`[data-index="${active}"]`);
@@ -102,7 +141,6 @@ export function SearchPanel() {
               onToggleFiles={() => setSearchFiles((v) => !v)}
               onFocusSearch={focusSearch}
             />
-            <div className="divider" />
             <StatusRegion scanning={scanning} empty={empty} error={error} />
             <ResultList
               results={results}
@@ -112,6 +150,19 @@ export function SearchPanel() {
               onSelect={setActive}
               onLaunch={(item) => void launch(item)}
             />
+            <div className="footer-bar">
+              <span>
+                <kbd>↑↓</kbd>选择
+              </span>
+              <span>
+                <kbd>Enter</kbd>打开
+              </span>
+              <span>
+                <kbd>Esc</kbd>关闭
+              </span>
+              <span className="footer-spacer" />
+              <span className="footer-brand">{hotkeyLabel}</span>
+            </div>
           </>
         )}
       </div>

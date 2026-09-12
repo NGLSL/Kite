@@ -6,6 +6,7 @@ mod matcher;
 mod normalizer;
 mod pinyin;
 mod ranker;
+pub mod url;
 
 use crate::model::{AppItem, SearchResult};
 
@@ -27,6 +28,7 @@ pub fn pinyin_of(text: &str) -> (String, String) {
 pub fn search(apps: &[AppItem], query: &str, user_alias_targets: &[String]) -> Vec<SearchResult> {
     let q = normalizer::normalize_query(query);
     if q.is_empty() {
+        // 无历史时退回索引顺序；有历史请调用方走 order_by_recent
         return apps
             .iter()
             .take(TOP_N)
@@ -40,6 +42,40 @@ pub fn search(apps: &[AppItem], query: &str, user_alias_targets: &[String]) -> V
 
     let hits = matcher::collect_candidates(apps, &q, user_alias_targets);
     ranker::rank_and_truncate(hits, TOP_N)
+}
+
+/// 空 Query 默认列表：最近使用优先，不足再按索引顺序补满。
+pub fn order_by_recent(apps: &[AppItem], recent_ids: &[String], top_n: usize) -> Vec<SearchResult> {
+    let mut hits: Vec<SearchResult> = Vec::with_capacity(top_n.min(apps.len()));
+    for id in recent_ids {
+        if hits.len() >= top_n {
+            break;
+        }
+        if hits.iter().any(|h| h.item.id == *id) {
+            continue;
+        }
+        if let Some(item) = apps.iter().find(|a| a.id == *id) {
+            hits.push(SearchResult {
+                item: item.clone(),
+                score: 1,
+                matched_by: "recent".into(),
+            });
+        }
+    }
+    for item in apps {
+        if hits.len() >= top_n {
+            break;
+        }
+        if hits.iter().any(|h| h.item.id == item.id) {
+            continue;
+        }
+        hits.push(SearchResult {
+            item: item.clone(),
+            score: 0,
+            matched_by: "default".into(),
+        });
+    }
+    hits
 }
 
 /// 历史加分后重新排序截断（commands 在改分后调用）。
@@ -158,5 +194,36 @@ mod tests {
         let prefix = crate::search::ranker::SCORE_PREFIX
             + crate::history::HISTORY_BOOST_MAX;
         assert!(exact > prefix);
+    }
+
+    #[test]
+    fn empty_query_recent_first() {
+        let apps = vec![item("A"), item("B"), item("C")];
+        let recent = vec![apps[2].id.clone(), apps[0].id.clone()];
+        let hits = order_by_recent(&apps, &recent, 3);
+        assert_eq!(hits[0].item.name, "C");
+        assert_eq!(hits[0].matched_by, "recent");
+        assert_eq!(hits[1].item.name, "A");
+        assert_eq!(hits[2].item.name, "B");
+        assert_eq!(hits[2].matched_by, "default");
+    }
+
+    #[test]
+    fn empty_query_recent_missing_id_skipped() {
+        let apps = vec![item("A"), item("B")];
+        let recent = vec!["ghost".into(), apps[1].id.clone()];
+        let hits = order_by_recent(&apps, &recent, 2);
+        assert_eq!(hits[0].item.name, "B");
+        assert_eq!(hits[1].item.name, "A");
+    }
+
+    #[test]
+    fn empty_query_no_duplicate() {
+        let apps = vec![item("A"), item("B")];
+        let recent = vec![apps[0].id.clone(), apps[0].id.clone()];
+        let hits = order_by_recent(&apps, &recent, 2);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].item.name, "A");
+        assert_eq!(hits[1].item.name, "B");
     }
 }

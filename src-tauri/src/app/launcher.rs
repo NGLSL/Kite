@@ -12,9 +12,18 @@ pub fn launch(item: &AppItem) -> Result<(), String> {
         return Err("empty target".into());
     }
 
-    // Store / shell 路径
-    if target.starts_with("shell:") {
+    // Store / shell / 系统设置 URI
+    if target.starts_with("shell:")
+        || target.starts_with("ms-settings:")
+        || target.starts_with("ms-clock:")
+        || target.starts_with("ms-contact-support:")
+    {
         return uwp::launch_shell_path(target);
+    }
+
+    // 内置动作由 commands 层处理；此处不认 kite:
+    if target.starts_with("kite:") {
+        return Err("builtin action should be handled by launch_app".into());
     }
 
     // 文件/文件夹（Everything 结果）

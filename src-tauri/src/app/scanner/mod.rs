@@ -91,10 +91,10 @@ pub fn scan_apps(icon_dir: &Path, fast: bool) -> AppIndex {
         let tp = Instant::now();
         item.attach_search_fields();
         py += tp.elapsed();
+        // 保留提取源，快速扫描阶段先不提图标，稍后统一补
+        item.icon_src = icon_src.or_else(|| Some(item.target.clone()));
         if !fast {
-            item.icon = icons::cache_icon(icon_dir, &item.id, icon_src.as_deref());
-        } else {
-            let _ = icon_src;
+            item.icon = icons::cache_icon(icon_dir, &item.id, item.icon_src.as_deref());
         }
         apps.push(item);
     }
@@ -117,7 +117,14 @@ pub fn fill_missing_icons(index: &mut AppIndex, icon_dir: &Path) {
         .apps
         .iter()
         .filter(|a| a.icon.is_none())
-        .map(|a| (a.id.clone(), Some(a.target.clone())))
+        .map(|a| {
+            let src = a
+                .icon_src
+                .clone()
+                .filter(|s| !s.is_empty())
+                .or_else(|| Some(a.target.clone()));
+            (a.id.clone(), src)
+        })
         .collect();
     if pending.is_empty() {
         return;

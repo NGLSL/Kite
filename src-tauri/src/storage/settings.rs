@@ -10,6 +10,8 @@ pub struct Settings {
     pub hide_on_blur: bool,
     pub autostart: bool,
     pub max_results: i64,
+    /// 可解析的快捷键，如 Alt+Space。
+    pub hotkey: String,
     pub hotkey_label: String,
 }
 
@@ -19,7 +21,8 @@ impl Default for Settings {
             hide_on_blur: true,
             autostart: false,
             max_results: 10,
-            hotkey_label: "Alt+Space".into(),
+            hotkey: crate::system::hotkey::DEFAULT_HOTKEY.into(),
+            hotkey_label: crate::system::hotkey::DEFAULT_HOTKEY.into(),
         }
     }
 }
@@ -59,6 +62,12 @@ impl HistoryDb {
         if let Ok(v) = self.get_setting("max_results") {
             if let Ok(n) = v.parse() {
                 s.max_results = n;
+            }
+        }
+        if let Ok(v) = self.get_setting("hotkey") {
+            if crate::system::hotkey::parse_hotkey(&v).is_some() {
+                s.hotkey_label = crate::system::hotkey::display_label(&v);
+                s.hotkey = v;
             }
         }
         s
@@ -125,6 +134,35 @@ impl HistoryDb {
             )
             .into_iter()
             .collect()
+    }
+
+    /// 偏好浏览器 id（chrome/edge/…）；未设置为 None。
+    pub fn preferred_browser(&self) -> Option<String> {
+        self.get_setting("preferred_browser")
+            .ok()
+            .filter(|s| !s.is_empty())
+    }
+
+    /// 记住用户选过的浏览器，下次优先展示。
+    pub fn set_preferred_browser(&mut self, browser_id: &str) -> rusqlite::Result<()> {
+        if browser_id.is_empty() {
+            return Ok(());
+        }
+        self.save_setting("preferred_browser", browser_id)
+    }
+
+    /// 已缓存的搜索引擎 URL 模板（含 {searchTerms}）。
+    pub fn search_url_template(&self) -> Option<String> {
+        self.get_setting("search_url_template")
+            .ok()
+            .filter(|s| !s.is_empty())
+    }
+
+    pub fn set_search_url_template(&mut self, template: &str) -> rusqlite::Result<()> {
+        if template.is_empty() {
+            return Ok(());
+        }
+        self.save_setting("search_url_template", template)
     }
 
     pub(crate) fn conn(&self) -> &Connection {

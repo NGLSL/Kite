@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Emitter, Manager};
@@ -11,6 +12,8 @@ use crate::storage::HistoryDb;
 pub struct AppState {
     pub index: Mutex<AppIndex>,
     pub history: Mutex<HistoryDb>,
+    /// 设置页打开时禁止失焦隐藏，避免缩放/点控件误收起。
+    pub settings_open: AtomicBool,
 }
 
 impl AppState {
@@ -18,7 +21,16 @@ impl AppState {
         Self {
             index: Mutex::new(AppIndex::empty()),
             history: Mutex::new(history),
+            settings_open: AtomicBool::new(false),
         }
+    }
+
+    pub fn is_settings_open(&self) -> bool {
+        self.settings_open.load(Ordering::Relaxed)
+    }
+
+    pub fn set_settings_open(&self, open: bool) {
+        self.settings_open.store(open, Ordering::Relaxed);
     }
 }
 
@@ -46,7 +58,16 @@ pub fn rebuild_index(app: &AppHandle) -> Result<usize, String> {
     let _ = std::fs::remove_dir_all(&dir);
     crate::log::info(&format!("rebuild start, icon_dir={dir:?} cleared_cache"));
 
-    let index = crate::app::scan_apps(&dir, true);
+    // 扫描可能因系统异常 panic；兜底为空索引，避免线程静默死亡
+    let index = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::app::scan_apps(&dir, true)
+    })) {
+        Ok(idx) => idx,
+        Err(_) => {
+            crate::log::info("scan_apps panicked; fallback empty index");
+            crate::model::AppIndex::empty()
+        }
+    };
     let count = index.apps.len();
     if let Some(state) = app.try_state::<AppState>() {
         *state.index.lock().map_err(|e| e.to_string())? = index;
@@ -66,7 +87,14 @@ pub fn rebuild_index(app: &AppHandle) -> Result<usize, String> {
             .apps
             .iter()
             .filter(|a| a.icon.is_none())
-            .map(|a| (a.id.clone(), Some(a.target.clone())))
+            .map(|a| {
+                let src = a
+                    .icon_src
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| Some(a.target.clone()));
+                (a.id.clone(), src)
+            })
             .collect()
     };
 
@@ -112,5 +140,71 @@ pub fn rebuild_index(app: &AppHandle) -> Result<usize, String> {
     }
     let _ = app.emit("kite://icons-ready", count);
     crate::log::info(&format!("rebuild total {:?}", t0.elapsed()));
+
+    // 首屏不堵：后台补扫 UWP / Store 应用，合并进索引
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        let t = std::time::Instant::now();
+        let mut raw = Vec::new();
+        crate::app::uwp::collect_uwp("uwp", &mut raw);
+        if raw.is_empty() {
+            crate::log::info("uwp background: empty");
+            return;
+        }
+        let total_scan = raw.len();
+        let added = merge_uwp_apps(&handle, raw, &dir);
+        crate::log::info(&format!(
+            "uwp background: +{added} total_scan={total_scan} in {:?}",
+            t.elapsed()
+        ));
+        if added > 0 {
+            if let Some(state) = handle.try_state::<AppState>() {
+                if let Ok(idx) = state.index.lock() {
+                    let n = idx.apps.len();
+                    let _ = handle.emit("kite://index-ready", n);
+                    let _ = handle.emit("kite://icons-ready", n);
+                }
+            }
+        }
+    });
+
     Ok(count)
+}
+
+/// 把 UWP 条目去重后并入现有索引，并尝试提图标。
+fn merge_uwp_apps(
+    app: &AppHandle,
+    raw: Vec<(crate::model::AppItem, Option<String>)>,
+    icon_dir: &std::path::Path,
+) -> usize {
+    use crate::app::scanner::util::normalize_path_key;
+    let Some(state) = app.try_state::<AppState>() else {
+        return 0;
+    };
+    let Ok(mut guard) = state.index.lock() else {
+        return 0;
+    };
+    let mut known: std::collections::HashSet<String> = guard
+        .apps
+        .iter()
+        .map(|a| normalize_path_key(&a.target))
+        .collect();
+    let mut added = 0usize;
+    for (mut item, icon_src) in raw {
+        let key = normalize_path_key(&item.target);
+        if known.contains(&key) {
+            continue;
+        }
+        known.insert(key);
+        item.attach_search_fields();
+        item.icon_src = icon_src.or_else(|| Some(item.target.clone()));
+        item.icon = crate::system::icons::cache_icon(
+            icon_dir,
+            &item.id,
+            item.icon_src.as_deref(),
+        );
+        guard.apps.push(item);
+        added += 1;
+    }
+    added
 }

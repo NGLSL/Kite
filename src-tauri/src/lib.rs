@@ -11,7 +11,7 @@ mod storage;
 mod system;
 
 use tauri::{Emitter, Manager};
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::ShortcutState;
 
 use state::AppState;
 
@@ -34,8 +34,14 @@ pub fn run() {
                 if window.label() != "main" {
                     return;
                 }
-                let hide = window
-                    .app_handle()
+                let handle = window.app_handle();
+                // 设置页打开时不隐藏，避免缩放/点开关导致窗口消失
+                if let Some(s) = handle.try_state::<AppState>() {
+                    if s.is_settings_open() {
+                        return;
+                    }
+                }
+                let hide = handle
                     .try_state::<AppState>()
                     .map(|s| {
                         s.history
@@ -45,7 +51,7 @@ pub fn run() {
                     })
                     .unwrap_or(true);
                 if hide {
-                    let _ = window.hide();
+                    system::window::hide(&handle);
                 }
             }
         })
@@ -54,6 +60,7 @@ pub fn run() {
             commands::index_count,
             commands::launch_app,
             commands::rescan_apps,
+            commands::set_ui_mode,
             commands::toggle_window,
             commands::get_settings,
             commands::save_settings,
@@ -118,14 +125,14 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let alt_space = Shortcut::new(Some(Modifiers::ALT), Code::Space);
-    match app.global_shortcut().register(alt_space) {
-        Ok(()) => log::info("Alt+Space registered"),
+    let alt_space = system::hotkey::load_hotkey(app.handle());
+    match system::hotkey::reregister(app.handle(), &alt_space) {
+        Ok(label) => log::info(&format!("{label} registered")),
         Err(e) => {
-            log::info(&format!("Alt+Space 注册失败: {e}"));
-            let _ = app.global_shortcut().unregister(alt_space);
-            if app.global_shortcut().register(alt_space).is_err() {
-                log::info("Alt+Space 仍不可用");
+            log::info(&format!("hotkey register failed: {e}"));
+            // 兜底再试默认
+            if alt_space != system::hotkey::DEFAULT_HOTKEY {
+                let _ = system::hotkey::reregister(app.handle(), system::hotkey::DEFAULT_HOTKEY);
             }
         }
     }

@@ -105,6 +105,20 @@ impl HistoryDb {
             })
     }
 
+    /// 最近启动的应用 id，按 last_used_at 降序。
+    pub fn recent_ids(&self, limit: usize) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT item_id FROM usage_history
+             WHERE last_used_at > 0
+             ORDER BY last_used_at DESC
+             LIMIT ?1",
+        )?;
+        let ids = stmt
+            .query_map(params![limit as i64], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ids)
+    }
+
     pub fn query_pair(&self, query_norm: &str, item_id: &str) -> rusqlite::Result<QueryPairStats> {
         self.conn
             .query_row(
@@ -131,4 +145,74 @@ pub fn now_ts() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db() -> HistoryDb {
+        let dir = std::env::temp_dir().join(format!("kite-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(format!("{}.db", uuid_like()));
+        HistoryDb::open(&path).expect("open temp db")
+    }
+
+    fn uuid_like() -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(format!("{:?}", std::time::Instant::now()).as_bytes());
+        format!("{:x}", h.finalize()[..8].iter().fold(0u64, |a, b| (a << 8) | *b as u64))
+    }
+
+    #[test]
+    fn recent_ids_ordered_by_last_used() {
+        let mut db = temp_db();
+        db.record_launch("app-a", "", 100).unwrap();
+        db.record_launch("app-b", "", 300).unwrap();
+        db.record_launch("app-c", "", 200).unwrap();
+        db.record_launch("app-a", "", 400).unwrap(); // a 更新为最新
+        let ids = db.recent_ids(10).unwrap();
+        assert_eq!(ids, vec!["app-a", "app-b", "app-c"]);
+    }
+
+    #[test]
+    fn recent_ids_respects_limit() {
+        let mut db = temp_db();
+        for i in 0..5 {
+            db.record_launch(&format!("app-{i}"), "", 100 + i).unwrap();
+        }
+        let ids = db.recent_ids(2).unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0], "app-4");
+        assert_eq!(ids[1], "app-3");
+    }
+
+    #[test]
+    fn recent_ids_empty_when_no_launch() {
+        let db = temp_db();
+        assert!(db.recent_ids(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn preferred_browser_roundtrip() {
+        let mut db = temp_db();
+        assert_eq!(db.preferred_browser(), None);
+        db.set_preferred_browser("edge").unwrap();
+        assert_eq!(db.preferred_browser().as_deref(), Some("edge"));
+        db.set_preferred_browser("chrome").unwrap();
+        assert_eq!(db.preferred_browser().as_deref(), Some("chrome"));
+    }
+
+    #[test]
+    fn search_template_roundtrip() {
+        let mut db = temp_db();
+        assert_eq!(db.search_url_template(), None);
+        db.set_search_url_template("https://www.google.com/search?q={searchTerms}")
+            .unwrap();
+        assert_eq!(
+            db.search_url_template().as_deref(),
+            Some("https://www.google.com/search?q={searchTerms}")
+        );
+    }
 }

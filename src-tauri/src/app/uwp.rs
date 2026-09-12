@@ -1,128 +1,301 @@
-//! UWP / Store 应用：从 Packages 仓库枚举显示名，用 shell:AppsFolder 启动。
+//! UWP / Store 应用：枚举 shell:AppsFolder（对齐 LaunchyQt UWPApp）。
+//! 过滤：System.Launcher.AppState 非空；用 AUMID + ActivationManager 启动。
 
 use std::collections::HashSet;
 use std::os::windows::ffi::OsStrExt;
+use std::path::PathBuf;
 
-use windows::core::PCWSTR;
-use windows::Win32::System::Registry::{
-    RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, HKEY_CURRENT_USER, KEY_READ,
+use windows::core::{PCWSTR, PWSTR};
+use windows::Win32::Foundation::PROPERTYKEY;
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
+    COINIT_APARTMENTTHREADED, IBindCtx,
 };
-use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-
-use crate::model::AppItem;
+use windows::Win32::System::Com::StructuredStorage::{
+    PropVariantClear, PropVariantToStringAlloc, PROPVARIANT,
+};
+use windows::Win32::System::Variant::{VT_BSTR, VT_EMPTY, VT_LPWSTR};
+use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, PSGetPropertyKeyFromName};
+use windows::Win32::UI::Shell::{
+    ApplicationActivationManager, BHID_EnumItems, BHID_PropertyStore, IApplicationActivationManager,
+    IEnumShellItems, IShellItem, SHCreateItemFromParsingName, AO_NONE, SIGDN_NORMALDISPLAY,
+};
 
 use super::scanner::util::{hash_id, normalize_path_key};
+use crate::model::AppItem;
 
-/// 补充 Store 应用到扫描结果（失败静默）。
-pub fn collect_uwp(source: &str, out: &mut Vec<(AppItem, Option<String>)>) {
-    fn wide(s: &str) -> Vec<u16> {
-        std::ffi::OsStr::new(s)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    }
+type RawItem = (AppItem, Option<String>);
 
-    let key = r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages";
-    let key_wide = wide(key);
-    let mut hkey = Default::default();
+/// 补充 Store / 系统 UWP 应用（失败静默）。
+pub fn collect_uwp(source: &str, out: &mut Vec<RawItem>) {
     unsafe {
-        if RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR(key_wide.as_ptr()),
-            Some(0),
-            KEY_READ,
-            &mut hkey,
-        )
-        .is_err()
-        {
-            return;
-        }
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
-
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut index = 0u32;
-    loop {
-        let mut name_buf = [0u16; 512];
-        let mut name_len = name_buf.len() as u32;
-        let ok = unsafe {
-            RegEnumKeyExW(
-                hkey,
-                index,
-                Some(windows::core::PWSTR(name_buf.as_mut_ptr())),
-                &mut name_len,
-                None,
-                None,
-                None,
-                None,
-            )
-            .is_ok()
-        };
-        if !ok {
-            break;
-        }
-        let full = String::from_utf16_lossy(&name_buf[..name_len as usize]);
-        let display = full
-            .split('_')
-            .next()
-            .unwrap_or(&full)
-            .replace('.', " ")
-            .trim()
-            .to_string();
-        // 跳过系统框架包，避免列表被噪声淹没
-        let lower = display.to_lowercase();
-        const SKIP: &[&str] = &[
-            "microsoft.windows",
-            "microsoft.ui",
-            "microsoft.net",
-            "microsoft.vclibs",
-            "microsoft.desktopappinstaller",
-            "windows.",
-        ];
-        if SKIP.iter().any(|p| lower.starts_with(p)) {
-            index += 1;
-            continue;
-        }
-        if display.is_empty() || !seen.insert(display.to_lowercase()) {
-            index += 1;
-            continue;
-        }
-        let family = {
-            let parts: Vec<&str> = full.split('_').collect();
-            if parts.len() >= 5 {
-                format!("{}_{}", parts[0], parts[4])
-            } else {
-                full.clone()
-            }
-        };
-        let target = format!("shell:AppsFolder\\{family}");
-        let id = hash_id(&[&normalize_path_key(&target), source]);
-        let item = AppItem::scanned(id, display, target, None, None, source);
-        out.push((item, None));
-        index += 1;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        collect_apps_folder(source, out)
+    }));
+    if result.is_err() {
+        crate::log::info("uwp collect panicked; skip");
     }
     unsafe {
-        let _ = RegCloseKey(hkey);
+        let _ = CoUninitialize();
     }
 }
 
-/// 启动 shell:AppsFolder / 普通路径。
+fn collect_apps_folder(source: &str, out: &mut Vec<RawItem>) {
+    let mut seen: HashSet<String> = HashSet::new();
+
+    let folder: IShellItem = unsafe {
+        match SHCreateItemFromParsingName(
+            PCWSTR(wide("shell:AppsFolder").as_ptr()),
+            None::<&IBindCtx>,
+        ) {
+            Ok(f) => f,
+            Err(e) => {
+                crate::log::info(&format!("uwp: open AppsFolder failed: {e}"));
+                return;
+            }
+        }
+    };
+
+    let enum_items: IEnumShellItems = unsafe {
+        match folder.BindToHandler(None::<&IBindCtx>, &BHID_EnumItems) {
+            Ok(e) => e,
+            Err(e) => {
+                crate::log::info(&format!("uwp: bind enum failed: {e}"));
+                return;
+            }
+        }
+    };
+
+    let pk_app_state = prop_key("System.Launcher.AppState");
+    let pk_aumid = prop_key("System.AppUserModel.ID");
+    let pk_logo = prop_key("System.Tile.SmallLogoPath");
+    let pk_install = prop_key("System.AppUserModel.PackageInstallPath");
+
+    loop {
+        let mut fetched = 0u32;
+        let mut slot: Option<IShellItem> = None;
+        let ok = unsafe {
+            enum_items
+                .Next(std::slice::from_mut(&mut slot), Some(&mut fetched))
+                .is_ok()
+        };
+        if !ok || fetched == 0 {
+            break;
+        }
+        let Some(item) = slot else { continue };
+
+        let props: IPropertyStore = match unsafe {
+            item.BindToHandler(None::<&IBindCtx>, &BHID_PropertyStore)
+        } {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        // 真 UWP 才有非空 Launcher.AppState
+        let Some(state) = prop_string(&props, &pk_app_state) else {
+            continue;
+        };
+        if state.trim().is_empty() {
+            continue;
+        }
+
+        let name = display_name(&item).unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        let Some(aumid) = prop_string(&props, &pk_aumid) else {
+            continue;
+        };
+        if aumid.is_empty() || !seen.insert(aumid.to_lowercase()) {
+            continue;
+        }
+
+        let install = prop_string(&props, &pk_install).unwrap_or_default();
+        let logo = prop_string(&props, &pk_logo).unwrap_or_default();
+        let icon_src = resolve_uwp_icon(&install, &logo);
+
+        let target = format!("shell:AppsFolder\\{aumid}");
+        let id = hash_id(&[&normalize_path_key(&target), source]);
+        let item = AppItem::scanned(id, name, target, None, None, source);
+        out.push((item, icon_src));
+    }
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    std::ffi::OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+fn prop_key(name: &str) -> PROPERTYKEY {
+    let mut key = PROPERTYKEY::default();
+    let w = wide(name);
+    let _ = unsafe { PSGetPropertyKeyFromName(PCWSTR(w.as_ptr()), &mut key) };
+    key
+}
+
+fn prop_string(store: &IPropertyStore, key: &PROPERTYKEY) -> Option<String> {
+    unsafe {
+        let mut pv: PROPVARIANT = store.GetValue(key).ok()?;
+        let s = prop_variant_to_string(&pv);
+        let _ = PropVariantClear(&mut pv);
+        s
+    }
+}
+
+fn prop_variant_to_string(pv: &PROPVARIANT) -> Option<String> {
+    unsafe {
+        let vt = pv.Anonymous.Anonymous.vt;
+        if vt == VT_EMPTY {
+            return None;
+        }
+        if vt == VT_LPWSTR {
+            let p = pv.Anonymous.Anonymous.Anonymous.pwszVal;
+            if !p.is_null() {
+                return p.to_string().ok();
+            }
+            return None;
+        }
+        if vt == VT_BSTR {
+            let b = &*pv.Anonymous.Anonymous.Anonymous.bstrVal;
+            return Some(b.to_string());
+        }
+        let out = PropVariantToStringAlloc(pv).ok()?;
+        if out.is_null() {
+            return None;
+        }
+        let s = out.to_string().ok();
+        let _ = CoTaskMemFree(Some(out.0 as *const _));
+        s
+    }
+}
+
+fn display_name(item: &IShellItem) -> Option<String> {
+    unsafe {
+        let p: PWSTR = item.GetDisplayName(SIGDN_NORMALDISPLAY).ok()?;
+        if p.is_null() {
+            return None;
+        }
+        let s = p.to_string().ok();
+        let _ = CoTaskMemFree(Some(p.0 as *const _));
+        s.filter(|x| !x.trim().is_empty())
+    }
+}
+
+/// LaunchyQt 风格：安装目录里按 scale 后缀找 Tile logo PNG。
+fn resolve_uwp_icon(install_path: &str, logo_rel: &str) -> Option<String> {
+    if install_path.is_empty() || logo_rel.is_empty() {
+        return None;
+    }
+    let base = PathBuf::from(install_path);
+    let rel = logo_rel.replace('/', "\\");
+    let full = base.join(&rel);
+    let parent = full.parent()?;
+    let stem = full.file_stem()?.to_string_lossy().to_string();
+    let ext = full.extension().map(|e| e.to_string_lossy().to_string())?;
+
+    const SCALES: &[&str] = &[
+        ".scale-200",
+        ".scale-100",
+        "",
+        ".scale-300",
+        ".scale-400",
+        ".targetsize-48",
+        ".targetsize-24",
+        ".targetsize-16",
+        ".targetsize-256",
+    ];
+    for s in SCALES {
+        let name = format!("{stem}{s}.{ext}");
+        let p = parent.join(name);
+        if p.is_file() {
+            return Some(p.to_string_lossy().to_string());
+        }
+    }
+
+    let rd = std::fs::read_dir(parent).ok()?;
+    let mut best: Option<(usize, PathBuf)> = None;
+    for e in rd.flatten() {
+        let path = e.path();
+        if path
+            .extension()
+            .map(|x| x.eq_ignore_ascii_case("png"))
+            .unwrap_or(false)
+        {
+            let fname = path.file_name().map(|x| x.to_string_lossy().to_string())?;
+            if fname.starts_with(&stem) {
+                let len = fname.len();
+                if best.as_ref().map(|(l, _)| len < *l).unwrap_or(true) {
+                    best = Some((len, path));
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p.to_string_lossy().to_string())
+}
+
+/// 启动 shell:AppsFolder / 普通路径 / UWP AUMID。
 pub fn launch_shell_path(target: &str) -> Result<(), String> {
+    if let Some(aumid) = target.strip_prefix("shell:AppsFolder\\") {
+        if !aumid.is_empty() {
+            return activate_uwp(aumid);
+        }
+    }
+
     let file: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
     let code = unsafe {
-        ShellExecuteW(
+        windows::Win32::UI::Shell::ShellExecuteW(
             None,
             PCWSTR::null(),
             PCWSTR(file.as_ptr()),
             PCWSTR::null(),
             PCWSTR::null(),
-            SW_SHOWNORMAL,
+            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
         )
     };
-    // ShellExecute 返回 HINSTANCE，> 32 为成功
     if code.0 as isize > 32 {
         Ok(())
     } else {
         Err(format!("ShellExecute failed for {target}"))
+    }
+}
+
+fn activate_uwp(aumid: &str) -> Result<(), String> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let aam: IApplicationActivationManager =
+            CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_INPROC_SERVER)
+                .map_err(|e| format!("ActivationManager: {e}"))?;
+        let wide_aumid = wide(aumid);
+        aam.ActivateApplication(
+            PCWSTR(wide_aumid.as_ptr()),
+            PCWSTR::null(),
+            AO_NONE,
+        )
+        .map_err(|e| format!("ActivateApplication: {e}"))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_icon_empty() {
+        assert!(resolve_uwp_icon("", "").is_none());
+        assert!(resolve_uwp_icon(r"C:\nope", "").is_none());
+    }
+
+    #[test]
+    fn strip_aumid_prefix() {
+        assert_eq!(
+            "shell:AppsFolder\\Microsoft.WindowsStore_8wekyb3d8bbwe!App"
+                .strip_prefix("shell:AppsFolder\\"),
+            Some("Microsoft.WindowsStore_8wekyb3d8bbwe!App")
+        );
     }
 }
