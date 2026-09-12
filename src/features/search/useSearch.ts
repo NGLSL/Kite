@@ -65,14 +65,14 @@ export function useSearch() {
     };
 
     const poll = async () => {
-      for (let i = 0; i < 40 && !cancelled; i++) {
+      for (let i = 0; i < 20 && !cancelled; i++) {
         const ok = await syncFromIndex();
         if (ok) return;
-        await new Promise((r) => setTimeout(r, 150));
+        await new Promise((r) => setTimeout(r, 120));
       }
       if (!cancelled) {
-        // 仍无索引则停止扫描态，显示空结果，避免一直卡住
         setScanning(false);
+        void runSearch(queryRef.current, filesRef.current);
       }
     };
 

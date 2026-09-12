@@ -7,10 +7,10 @@ type Props = {
 export function StatusRegion({ scanning, empty, error }: Props) {
   return (
     <>
-      {scanning && !empty && !error && (
-        <div className="empty-state">正在扫描应用…</div>
+      {scanning && (
+        <div className="empty-state scanning-hint">正在加载应用索引…</div>
       )}
-      {empty && (
+      {!scanning && empty && (
         <div className="empty-state">
           <div className="empty-title">没有找到相关结果</div>
           <div className="empty-sub">试试其他关键词</div>

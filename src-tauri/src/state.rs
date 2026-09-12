@@ -42,7 +42,9 @@ pub fn history_db_path(app: &AppHandle) -> PathBuf {
 pub fn rebuild_index(app: &AppHandle) -> Result<usize, String> {
     let t0 = std::time::Instant::now();
     let dir = icon_dir(app);
-    crate::log::info(&format!("rebuild start, icon_dir={dir:?}"));
+    // 旧缓存可能是未裁边的小图标，首次重建时清掉
+    let _ = std::fs::remove_dir_all(&dir);
+    crate::log::info(&format!("rebuild start, icon_dir={dir:?} cleared_cache"));
 
     let index = crate::app::scan_apps(&dir, true);
     let count = index.apps.len();

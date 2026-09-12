@@ -1,5 +1,5 @@
-//! 扫描开始菜单 / 桌面，解析快捷方式，去重并挂载图标。
-//! 性能：先出完整列表（不含图标），再并行补图标，避免首屏卡在「正在扫描」。
+//! 扫描开始菜单 / 桌面，解析快捷方式，去重。
+//! 注意：不要 follow_links（开始菜单 junction 可能卡死）；快速扫描有时间预算。
 
 mod lnk;
 mod registry;
@@ -8,6 +8,7 @@ pub(crate) mod util;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use walkdir::WalkDir;
 
@@ -17,9 +18,15 @@ use util::{app_display_name, hash_id, normalize_path_key};
 
 type RawItem = (AppItem, Option<String>);
 
+/// 快速扫描时间预算；超时后用已收集结果。
+const FAST_BUDGET: Duration = Duration::from_millis(1500);
+const MAX_PER_DIR: usize = 400;
+const MAX_TOTAL: usize = 1500;
+
 /// 完整扫描。`fast` 为 true 时只建列表、不提图标（首屏用）。
 pub fn scan_apps(icon_dir: &Path, fast: bool) -> AppIndex {
-    let t0 = std::time::Instant::now();
+    let t0 = Instant::now();
+    let budget = if fast { Some(FAST_BUDGET) } else { None };
     let mut raw: Vec<RawItem> = Vec::new();
 
     let user_start = dirs::data_dir()
@@ -29,40 +36,59 @@ pub fn scan_apps(icon_dir: &Path, fast: bool) -> AppIndex {
     let user_desktop = dirs::desktop_dir().unwrap_or_default();
     let public_desktop = PathBuf::from(r"C:\Users\Public\Desktop");
 
-    let mark = |label: &str, raw: &Vec<RawItem>, t: std::time::Instant| {
-        eprintln!("[kite:scan] {label}: +{} items in {:?}", raw.len(), t.elapsed());
-    };
+    crate::log::info(&format!("scan fast={fast} start"));
 
-    let t = std::time::Instant::now();
-    collect_from_dir(&user_start, "start-menu", &mut raw);
-    mark("user-start", &raw, t);
+    let steps: [(&str, PathBuf, &str); 4] = [
+        ("user-start", user_start, "start-menu"),
+        ("common-start", common_start, "start-menu"),
+        ("user-desktop", user_desktop, "desktop"),
+        ("public-desktop", public_desktop, "desktop"),
+    ];
 
-    let t = std::time::Instant::now();
-    collect_from_dir(&common_start, "start-menu", &mut raw);
-    mark("common-start", &raw, t);
+    for (label, root, source) in steps {
+        if budget_exhausted(budget, t0) {
+            crate::log::info(&format!("scan budget hit before {label}"));
+            break;
+        }
+        let before = raw.len();
+        collect_from_dir(&root, source, budget, t0, &mut raw);
+        crate::log::info(&format!(
+            "{label}: +{} -> total {} in {:?}",
+            raw.len() - before,
+            raw.len(),
+            t0.elapsed()
+        ));
+    }
 
-    let t = std::time::Instant::now();
-    collect_from_dir(&user_desktop, "desktop", &mut raw);
-    collect_from_dir(&public_desktop, "desktop", &mut raw);
-    mark("desktop", &raw, t);
+    if !budget_exhausted(budget, t0) && raw.len() < MAX_TOTAL {
+        let t = Instant::now();
+        registry::collect_app_paths("app-paths", &mut raw);
+        crate::log::info(&format!(
+            "app-paths: +... total {} in {:?}",
+            raw.len(),
+            t.elapsed()
+        ));
+    }
 
-    let t = std::time::Instant::now();
-    registry::collect_app_paths("app-paths", &mut raw);
-    mark("app-paths", &raw, t);
+    // UWP 较慢且噪声多，仅在非快速扫描时做，且限制数量
+    if !fast {
+        let t = Instant::now();
+        crate::app::uwp::collect_uwp("uwp", &mut raw);
+        crate::log::info(&format!(
+            "uwp: total {} in {:?}",
+            raw.len(),
+            t.elapsed()
+        ));
+    }
 
-    let t = std::time::Instant::now();
-    crate::app::uwp::collect_uwp("uwp", &mut raw);
-    mark("uwp", &raw, t);
-
-    let t = std::time::Instant::now();
     let items = dedupe(raw);
-    eprintln!("[kite:scan] dedupe -> {} apps in {:?}", items.len(), t.elapsed());
+    crate::log::info(&format!("dedupe -> {} in {:?}", items.len(), t0.elapsed()));
 
     let mut apps = Vec::with_capacity(items.len());
-    let t = std::time::Instant::now();
-    let mut py = std::time::Duration::ZERO;
+    let t = Instant::now();
+    let mut py = Duration::ZERO;
     for (mut item, icon_src) in items {
-        let tp = std::time::Instant::now();
+        let tp = Instant::now();
         item.attach_search_fields();
         py += tp.elapsed();
         if !fast {
@@ -72,15 +98,17 @@ pub fn scan_apps(icon_dir: &Path, fast: bool) -> AppIndex {
         }
         apps.push(item);
     }
-    eprintln!(
-        "[kite:scan] fields/icons (fast={fast}): {} apps in {:?} (pinyin {:?})",
+    crate::log::info(&format!(
+        "fields/icons fast={fast}: {} apps in {:?} pinyin={py:?}",
         apps.len(),
-        t.elapsed(),
-        py
-    );
-    eprintln!("[kite:scan] total {:?} -> index", t0.elapsed());
+        t.elapsed()
+    ));
 
     AppIndex { apps }
+}
+
+fn budget_exhausted(budget: Option<Duration>, t0: Instant) -> bool {
+    budget.is_some_and(|b| t0.elapsed() >= b)
 }
 
 /// 只给缺少 icon 的条目补图标（可多次调用）。
@@ -109,24 +137,18 @@ fn fill_icons_parallel(apps: &mut [AppItem], icon_dir: &Path, pending: &[(String
             let icon_dir = icon_dir.clone();
             let results = Arc::clone(&results);
             s.spawn(move || {
-                let mut local = Vec::with_capacity(part.len());
                 for (id, src) in &part {
                     let path = icons::cache_icon(&icon_dir, id, src.as_deref());
-                    local.push((id.clone(), path));
-                }
-                if let Ok(mut g) = results.lock() {
-                    for (id, path) in local {
-                        g.insert(id, path);
+                    if let Ok(mut g) = results.lock() {
+                        g.insert(id.clone(), path);
                     }
                 }
             });
         }
     });
 
-    let snapshot: HashMap<String, Option<String>> = results
-        .lock()
-        .map(|g| g.clone())
-        .unwrap_or_default();
+    let snapshot: HashMap<String, Option<String>> =
+        results.lock().map(|g| g.clone()).unwrap_or_default();
     for app in apps.iter_mut() {
         if app.icon.is_none() {
             if let Some(p) = snapshot.get(&app.id) {
@@ -136,16 +158,26 @@ fn fill_icons_parallel(apps: &mut [AppItem], icon_dir: &Path, pending: &[(String
     }
 }
 
-fn collect_from_dir(root: &Path, source: &str, out: &mut Vec<RawItem>) {
+fn collect_from_dir(
+    root: &Path,
+    source: &str,
+    budget: Option<Duration>,
+    t0: Instant,
+    out: &mut Vec<RawItem>,
+) {
     if !root.exists() {
         return;
     }
+    let mut n = 0usize;
     for entry in WalkDir::new(root)
-        .follow_links(true)
-        .max_depth(3)
+        .follow_links(false)
+        .max_depth(2)
         .into_iter()
         .filter_map(|e| e.ok())
     {
+        if n >= MAX_PER_DIR || out.len() >= MAX_TOTAL || budget_exhausted(budget, t0) {
+            break;
+        }
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -172,6 +204,7 @@ fn collect_from_dir(root: &Path, source: &str, out: &mut Vec<RawItem>) {
                 ]);
                 let item = AppItem::scanned(id, name, target, args, working_dir, source);
                 out.push((item, icon_src));
+                n += 1;
             }
         } else if ext == "exe" {
             let target = path.to_string_lossy().to_string();
@@ -181,6 +214,7 @@ fn collect_from_dir(root: &Path, source: &str, out: &mut Vec<RawItem>) {
             let icon_src = Some(target.clone());
             let item = AppItem::scanned(id, name, target, None, working_dir, source);
             out.push((item, icon_src));
+            n += 1;
         }
     }
 }
