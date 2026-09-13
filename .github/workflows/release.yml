@@ -29,11 +29,16 @@ jobs:
           workspaces: .
       - name: Install NSIS
         run: choco install nsis -y
+      - name: Run release tests
+        run: cargo test
       - name: Build installer
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-installer.ps1 -Nsis "C:\Program Files (x86)\NSIS\makensis.exe"
+      - name: Assemble release report
+        shell: pwsh
+        run: ./scripts/generate-release-report.ps1
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/kite-setup.exe
-          generate_release_notes: true
+          body_path: release-body.md

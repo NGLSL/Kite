@@ -46,3 +46,9 @@ artifacts/kite-setup.exe
 ```
 
 需要 NSIS 时执行 `winget install NSIS.NSIS`。不要提交 `target/`、`artifacts/`、`.scratch/` 或本机日志。
+
+## 正式发布
+
+正式版本只由 `main` 上的 `v*` tag 触发。创建 tag 前，先按 [`docs/releases/README.md`](releases/README.md) 新建对应的详细版本说明，例如 `docs/releases/v0.3.0.md`。GitHub Actions 会把维护者说明和自动构建信息合并到 Release 页面，并上传 `kite-setup.exe`。
+
+发布报告会记录 tag 提交、提交范围、`cargo test`、release 构建、NSIS 构建、构建环境、安装包大小和 SHA-256。发布完成后应检查报告内容和下载文件，再向用户公布版本。
