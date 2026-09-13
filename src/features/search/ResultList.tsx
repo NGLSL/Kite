@@ -6,9 +6,11 @@ type Props = {
   results: SearchResult[];
   active: number;
   query: string;
+  pinnedIds: Set<string>;
   listRef: RefObject<HTMLDivElement | null>;
   onSelect: (index: number) => void;
   onLaunch: (item: SearchResult) => void;
+  onContextMenu: (item: SearchResult, x: number, y: number) => void;
   /** 结果容器滚动到底部时触发（滚动加载）。 */
   onScroll?: (e: React.UIEvent<HTMLDivElement>) => void;
 };
@@ -17,9 +19,11 @@ export function ResultList({
   results,
   active,
   query,
+  pinnedIds,
   listRef,
   onSelect,
   onLaunch,
+  onContextMenu,
   onScroll,
 }: Props) {
   return (
@@ -31,8 +35,10 @@ export function ResultList({
           index={i}
           active={i === active}
           query={query}
+          pinned={pinnedIds.has(item.id)}
           onSelect={onSelect}
           onLaunch={onLaunch}
+          onContextMenu={onContextMenu}
         />
       ))}
     </div>

@@ -16,7 +16,7 @@ cd src-tauri; cargo check; cd ..
 
 ## 结构（禁止平铺堆叠）
 
-- Rust：`app/` 扫描启动 · `search/` 搜索 · `system/` 窗口图标 · `commands.rs` 仅 IPC · `lib.rs` 仅装配
+- Rust：`app/` 扫描启动 · `search/` 搜索 · `system/` 窗口图标 · `commands/` 仅 IPC · `lib.rs` 仅装配
 - 前端：`features/search/` UI · `shared/` 复用 · `types/ipc.ts` 与 Rust 对齐 · `App.tsx` 仅组合
 - 文件规模、注释、禁止重复实现 → **`docs/DEVELOPMENT.md` §2–4**
 
@@ -50,3 +50,7 @@ See `docs/agents/issue-tracker.md`.
 
 This is a single-context repo. Read `docs/CONTEXT.md` and relevant files under `docs/adr/`.
 See `docs/agents/domain.md`.
+
+### Triage labels
+
+Use the canonical Triage states in `Status:` lines. See `docs/agents/triage-labels.md`.

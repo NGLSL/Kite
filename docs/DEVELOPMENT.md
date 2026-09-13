@@ -9,7 +9,7 @@ Agent 与人类开发都按本文执行。`AGENTS.md` 只保留入口摘要，�
 | Rust | 扫描、去重、搜索、排序、启动、系统集成 | UI 布局、样式 |
 | React | 输入、结果列表、键盘、空/错状态 | 搜索算法、索引 |
 
-IPC：`React invoke → commands.rs → app/search/system`。禁止把全量应用列表丢给前端过滤。
+IPC：`React invoke → commands/ → app/search/system`。禁止把全量应用列表丢给前端过滤。
 
 ## 2. 目录与文件规模
 
@@ -19,7 +19,8 @@ IPC：`React invoke → commands.rs → app/search/system`。禁止把全量应�
 
 ```
 src-tauri/src/
-  lib.rs / main.rs / model.rs / state.rs / commands.rs
+  lib.rs / main.rs / model.rs / state.rs
+  commands/           # 仅 IPC：search / launch / settings 子文件
   app/launcher.rs
   app/scanner/{mod,lnk,registry,util}.rs
   search/{mod,matcher}.rs

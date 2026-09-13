@@ -2,14 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { Settings, UserAlias } from "../../types/ipc";
+import type { Settings } from "../../types/ipc";
 import { startWindowDrag } from "../../shared/windowDrag";
 import { NavIcon, Row, Toggle } from "./SettingsUI";
 import { AboutSection } from "./AboutSection";
+import { AliasSettings } from "./AliasSettings";
 
 type Props = {
   onClose: () => void;
-  onRescanned?: () => void;
 };
 
 type SectionId = "general" | "hotkey" | "alias" | "index" | "about";
@@ -46,12 +46,9 @@ function keyFromEvent(e: KeyboardEvent): string | null {
   return null;
 }
 
-export function SettingsPanel({ onClose, onRescanned }: Props) {
+export function SettingsPanel({ onClose }: Props) {
   const [section, setSection] = useState<SectionId>("general");
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [aliases, setAliases] = useState<UserAlias[]>([]);
-  const [alias, setAlias] = useState("");
-  const [target, setTarget] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
   const recordingRef = useRef(false);
@@ -66,7 +63,6 @@ export function SettingsPanel({ onClose, onRescanned }: Props) {
   const reload = useCallback(async () => {
     const s = await invoke<Settings>("get_settings");
     setSettings(s);
-    setAliases(await invoke<UserAlias[]>("list_user_aliases"));
   }, []);
 
   useEffect(() => {
@@ -77,8 +73,8 @@ export function SettingsPanel({ onClose, onRescanned }: Props) {
     patch: Partial<{
       hideOnBlur: boolean;
       autostart: boolean;
-      maxResults: number;
       hotkey: string;
+      historyRecording: boolean;
     }>,
   ) => {
     try {
@@ -128,31 +124,19 @@ export function SettingsPanel({ onClose, onRescanned }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recording]);
 
-  const addAlias = async () => {
-    if (!alias.trim() || !target.trim()) return;
+  const clearHistory = async () => {
     try {
-      const list = await invoke<UserAlias[]>("set_user_alias", {
-        alias: alias.trim(),
-        targetName: target.trim(),
-      });
-      setAliases(list);
-      setAlias("");
-      setTarget("");
-      flash("别名已添加");
+      await invoke("clear_history");
+      flash("使用历史已清空");
     } catch (e) {
       flash(String(e));
     }
   };
 
-  const removeAlias = async (a: string) => {
-    const list = await invoke<UserAlias[]>("remove_user_alias", { alias: a });
-    setAliases(list);
-  };
-
   const rescan = async () => {
+    // 只调用一次；完成后 Rust 广播 index-ready，搜索列表自动刷新
     const n = await invoke<number>("rescan_apps");
     flash(`已重新扫描，共 ${n} 个应用`);
-    onRescanned?.();
   };
 
   if (!settings) {
@@ -204,40 +188,47 @@ export function SettingsPanel({ onClose, onRescanned }: Props) {
 
         <div className="settings-body">
           {section === "general" && (
-            <>
-              <div className="flow-card">
-                <Row
-                  icon="M12 3v10M8 7l4-4 4 4M5 21h14"
-                  title="开机自动启动"
-                  hint="登录 Windows 后在后台待命"
-                >
-                  <Toggle
-                    checked={settings.autostart}
-                    onChange={(v) => void save({ autostart: v })}
-                  />
-                </Row>
-                <Row
-                  icon="M4 4h16v12H4zM8 20h8"
-                  title="失焦时隐藏"
-                  hint="点击其它窗口后自动收起启动器"
-                >
-                  <Toggle
-                    checked={settings.hide_on_blur}
-                    onChange={(v) => void save({ hideOnBlur: v })}
-                  />
-                </Row>
-                <Row icon="M4 6h16M4 12h16M4 18h10" title="结果数量" hint="每次搜索最多展示的应用数">
-                  <input
-                    className="num-input"
-                    type="number"
-                    min={5}
-                    max={30}
-                    value={settings.max_results}
-                    onChange={(e) => void save({ maxResults: Number(e.currentTarget.value) })}
-                  />
-                </Row>
-              </div>
-            </>
+            <div className="flow-card">
+              <Row
+                icon="M12 3v10M8 7l4-4 4 4M5 21h14"
+                title="开机自动启动"
+                hint="登录 Windows 后在后台待命"
+              >
+                <Toggle
+                  checked={settings.autostart}
+                  onChange={(v) => void save({ autostart: v })}
+                />
+              </Row>
+              <Row
+                icon="M4 4h16v12H4zM8 20h8"
+                title="失焦时隐藏"
+                hint="点击其它窗口后自动收起启动器"
+              >
+                <Toggle
+                  checked={settings.hide_on_blur}
+                  onChange={(v) => void save({ hideOnBlur: v })}
+                />
+              </Row>
+              <Row
+                icon="M12 4v16M5 9l7-5 7 5M5 15l7 5 7-5"
+                title="记录使用历史"
+                hint="暂停后不再记录启动次数与查询偏好"
+              >
+                <Toggle
+                  checked={settings.history_recording}
+                  onChange={(v) => void save({ historyRecording: v })}
+                />
+              </Row>
+              <Row
+                icon="M5 7h14M8 12h8M10 17h4"
+                title="清空使用历史"
+                hint="删除全部启动次数与查询配对，固定项不受影响"
+              >
+                <button type="button" className="btn" onClick={() => void clearHistory()}>
+                  清空
+                </button>
+              </Row>
+            </div>
           )}
 
           {section === "hotkey" && (
@@ -275,48 +266,7 @@ export function SettingsPanel({ onClose, onRescanned }: Props) {
             </div>
           )}
 
-          {section === "alias" && (
-            <div className="flow-card">
-              <div className="flow-pad">
-                <p className="set-hint">用短词直达应用，例如 code → Visual Studio Code</p>
-                <div className="alias-form">
-                  <input
-                    placeholder="别名"
-                    value={alias}
-                    onChange={(e) => setAlias(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && void addAlias()}
-                  />
-                  <input
-                    placeholder="应用名称"
-                    value={target}
-                    onChange={(e) => setTarget(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && void addAlias()}
-                  />
-                  <button type="button" className="btn btn-primary" onClick={() => void addAlias()}>
-                    添加
-                  </button>
-                </div>
-                {aliases.length > 0 && (
-                  <ul className="alias-list">
-                    {aliases.map((a) => (
-                      <li key={a.alias}>
-                        <code>{a.alias}</code>
-                        <span className="alias-arrow">→</span>
-                        <span className="alias-target">{a.target_name}</span>
-                        <button
-                          type="button"
-                          className="link-btn"
-                          onClick={() => void removeAlias(a.alias)}
-                        >
-                          删除
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            </div>
-          )}
+          {section === "alias" && <AliasSettings notify={flash} />}
 
           {section === "index" && (
             <div className="flow-card">

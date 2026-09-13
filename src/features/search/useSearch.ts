@@ -13,12 +13,14 @@ const ROW_PX = 54;
 const CHROME_PX = 110;
 /** 每次滚动到底部追加的条数 */
 const PAGE_STEP = 10;
-/** 首屏条数上下限 */
+/** 首屏条数上下限（Rust 侧还会按「结果数量」设置兜底截断） */
 const MIN_COUNT = 6;
 const MAX_COUNT = 30;
 
+type SettingsShape = { search_files: boolean };
+
 /** 按软件窗口高度动态计算首屏加载条数（可见行数 + 少量预载） */
-function initialCount(): number {
+function initialWant(): number {
   const rows = Math.ceil(Math.max(window.innerHeight - CHROME_PX, ROW_PX) / ROW_PX);
   return Math.min(MAX_COUNT, Math.max(MIN_COUNT, rows + 2));
 }
@@ -29,7 +31,9 @@ export function useSearch() {
   const [active, setActive] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [scanning, setScanning] = useState(true);
-  const [searchFiles, setSearchFiles] = useState(false);
+  const [searchFiles, setSearchFilesState] = useState(false);
+  /** 固定项 id 集合（菜单标签与固定标记用） */
+  const [pinnedIds, setPinnedIds] = useState<Set<string>>(new Set());
   const debounceRef = useRef<number | undefined>(undefined);
   const queryRef = useRef("");
   const filesRef = useRef(false);
@@ -37,13 +41,13 @@ export function useSearch() {
   filesRef.current = searchFiles;
 
   // 滚动加载：已请求条数 / 结果镜像 / 在途标记
-  const requestedRef = useRef(initialCount());
+  const requestedRef = useRef(initialWant());
   const resultsRef = useRef<SearchResult[]>([]);
   const loadingMoreRef = useRef(false);
 
   const runSearch = useCallback(async (q: string, files: boolean) => {
     try {
-      const want = initialCount(); // 新查询重置为首屏条数
+      const want = initialWant(); // 新查询重置为首屏条数
       requestedRef.current = want;
       const hits = await invoke<SearchResult[]>("search_apps", {
         query: q,
@@ -82,6 +86,54 @@ export function useSearch() {
       loadingMoreRef.current = false;
     }
   }, []);
+
+  // 设置接入：搜文件开关（Rust 是唯一事实来源，变化后立即重搜）
+  useEffect(() => {
+    let cancelled = false;
+    const pull = async () => {
+      try {
+        const s = await invoke<SettingsShape>("get_settings");
+        if (cancelled) return;
+        const changed = s.search_files !== filesRef.current;
+        setSearchFilesState(s.search_files);
+        if (changed) void runSearch(queryRef.current, s.search_files);
+      } catch {
+        /* 设置读取失败保持默认 */
+      }
+    };
+    void pull();
+    const unChanged = listen("kite://settings-changed", () => void pull());
+    return () => {
+      cancelled = true;
+      unChanged.then((f) => f());
+    };
+  }, [runSearch]);
+
+  /** 切换搜文件开关：立即生效并持久化选择（重启沿用）。 */
+  const toggleSearchFiles = useCallback(() => {
+    const next = !filesRef.current;
+    filesRef.current = next; // 立即同步，避免连续点击读到旧值
+    setSearchFilesState(next);
+    void invoke("save_settings", { searchFiles: next }).catch(() => undefined);
+  }, []);
+
+  const refreshPinned = useCallback(async () => {
+    try {
+      const ids = await invoke<string[]>("list_pinned");
+      setPinnedIds(new Set(ids));
+    } catch {
+      /* 保持现有集合 */
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshPinned();
+  }, [refreshPinned]);
+
+  /** 重新执行当前 Query（设置 / Alias / 固定变化后立即反映）。 */
+  const refresh = useCallback(() => {
+    void runSearch(queryRef.current, filesRef.current);
+  }, [runSearch]);
 
   useEffect(() => {
     window.clearTimeout(debounceRef.current);
@@ -179,11 +231,15 @@ export function useSearch() {
     active,
     setActive,
     error,
+    setError,
     scanning,
     launch,
     moveActive,
     searchFiles,
-    setSearchFiles,
+    toggleSearchFiles,
+    pinnedIds,
+    refreshPinned,
+    refresh,
     loadMore,
   };
 }

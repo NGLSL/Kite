@@ -1,6 +1,7 @@
 //! SQLite 历史库：启动频次、最近使用、Query→App 配对。
 //! 手写 SQL，无 ORM。连接可被 `Mutex` 串行使用。
 
+pub mod pins;
 pub mod settings;
 
 use std::collections::HashMap;
@@ -53,6 +54,7 @@ impl HistoryDb {
         )?;
         let mut db = Self { conn };
         db.ensure_schema()?;
+        db.ensure_pins_schema()?;
         Ok(db)
     }
 
@@ -65,7 +67,11 @@ impl HistoryDb {
     }
 
     /// 记录一次启动；`query_norm` 为空则只记 Usage，不记 Query History。
+    /// 用户暂停记录时整体跳过（设置读取一次，SQLite 本地读开销可忽略）。
     pub fn record_launch(&mut self, item_id: &str, query_norm: &str, now: i64) -> rusqlite::Result<()> {
+        if !self.history_recording_enabled() {
+            return Ok(());
+        }
         self.conn.execute(
             "INSERT INTO usage_history (item_id, launch_count, last_used_at)
              VALUES (?1, 1, ?2)
@@ -112,6 +118,13 @@ impl HistoryDb {
         })
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default()
+    }
+
+    /// 清空使用历史（Usage + Query History）。固定项不属于历史，保留。
+    pub fn clear_history(&mut self) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM usage_history", [])?;
+        self.conn.execute("DELETE FROM query_history", [])?;
+        Ok(())
     }
 
     /// 最近启动的应用 id，按 last_used_at 降序。
@@ -176,9 +189,11 @@ mod tests {
     use super::*;
 
     fn temp_db() -> HistoryDb {
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("kite-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join(format!("{}.db", uuid_like()));
+        let path = dir.join(format!("{}-{n}.db", uuid_like()));
         HistoryDb::open(&path).expect("open temp db")
     }
 
@@ -299,5 +314,36 @@ mod tests {
         db.record_launch("only", "", 1).unwrap();
         let ids: Vec<String> = (0..50).map(|i| format!("ghost-{i}")).collect();
         assert!(db.usage_snapshot(&ids).is_empty(), "全缺行时返回空表");
+    }
+
+    #[test]
+    fn clear_history_empties_usage_and_pairs() {
+        let mut db = temp_db();
+        db.record_launch("app-a", "aa", 100).unwrap();
+        db.record_launch("app-b", "bb", 200).unwrap();
+        db.clear_history().unwrap();
+        assert!(db.recent_ids(10).unwrap().is_empty(), "清空后最近使用应为空");
+        let snap = db.usage_snapshot(&["app-a".into(), "app-b".into()]);
+        assert!(snap.is_empty());
+        let pairs = db.query_pair_snapshot("aa", &["app-a".into()]);
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn record_launch_skipped_when_paused() {
+        let mut db = temp_db();
+        db.save_setting("history_recording", "0").unwrap();
+        db.record_launch("app-a", "aa", 100).unwrap();
+        assert!(
+            db.recent_ids(10).unwrap().is_empty(),
+            "暂停记录后不得新增启动次数"
+        );
+        let pairs = db.query_pair_snapshot("aa", &["app-a".into()]);
+        assert!(pairs.is_empty(), "暂停记录后不得新增 Query History");
+
+        // 恢复记录后正常写入
+        db.save_setting("history_recording", "1").unwrap();
+        db.record_launch("app-a", "aa", 200).unwrap();
+        assert_eq!(db.recent_ids(10).unwrap(), vec!["app-a".to_string()]);
     }
 }

@@ -13,3 +13,4 @@
 | **Query History** | 「某 Query 最终选了哪个 AppItem」的配对记忆 |
 | **FinalScore** | MatchScore + 各类加分后的最终排序分 |
 | **明确匹配保护** | 高质量 Match（如 Name Exact）不得被历史分压到低质量匹配之下 |
+| **Pin（固定）** | 用户手动置顶的结果；空 Query 排在最近使用之前，非空 Query 获得固定加分（与历史加分取较大者，不叠加） |

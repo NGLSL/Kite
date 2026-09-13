@@ -5,8 +5,10 @@ mod fuzzy;
 mod matcher;
 mod normalizer;
 mod pinyin;
-mod ranker;
+pub mod ranker;
 pub mod url;
+
+pub use matcher::UserTarget;
 
 use crate::model::{AppItem, SearchResult};
 
@@ -27,12 +29,12 @@ pub fn pinyin_of(text: &str) -> (String, String) {
 }
 
 /// 入口：空 Query 给默认列表，否则多路召回 + 排序。
-/// `user_alias_targets`：用户 Alias 命中的应用名（小写）。
+/// `user_alias_targets`：用户 Alias 目标（稳定 id / 名称）。
 /// `max_results`：返回条数上限（滚动加载时调用方逐步放大；截断在 IPC 边界做）。
 pub fn search(
     apps: &[AppItem],
     query: &str,
-    user_alias_targets: &[String],
+    user_alias_targets: &[UserTarget],
     max_results: usize,
 ) -> Vec<SearchResult> {
     let q = normalizer::normalize_query(query);
@@ -53,23 +55,38 @@ pub fn search(
     ranker::rank_and_truncate(hits, max_results)
 }
 
-/// 空 Query 默认列表：最近使用优先，不足再按索引顺序补满。
-pub fn order_by_recent(apps: &[AppItem], recent_ids: &[String], top_n: usize) -> Vec<SearchResult> {
+/// 空 Query 默认列表：固定项优先，其次最近使用，不足再按索引顺序补满。
+pub fn order_by_recent(
+    apps: &[AppItem],
+    recent_ids: &[String],
+    pinned_ids: &[String],
+    top_n: usize,
+) -> Vec<SearchResult> {
     let mut hits: Vec<SearchResult> = Vec::with_capacity(top_n.min(apps.len()));
+    let push_hit = |id: &str, score: i32, matched_by: &'static str, hits: &mut Vec<SearchResult>| -> bool {        if hits.iter().any(|h| h.item.id == id) {
+            return false;
+        }
+        if let Some(item) = apps.iter().find(|a| a.id == id) {
+            hits.push(SearchResult {
+                item: item.clone(),
+                score,
+                matched_by: matched_by.into(),
+            });
+            return true;
+        }
+        false
+    };
+    for id in pinned_ids {
+        if hits.len() >= top_n {
+            break;
+        }
+        push_hit(id, 2, "pinned", &mut hits);
+    }
     for id in recent_ids {
         if hits.len() >= top_n {
             break;
         }
-        if hits.iter().any(|h| h.item.id == *id) {
-            continue;
-        }
-        if let Some(item) = apps.iter().find(|a| a.id == *id) {
-            hits.push(SearchResult {
-                item: item.clone(),
-                score: 1,
-                matched_by: "recent".into(),
-            });
-        }
+        push_hit(id, 1, "recent", &mut hits);
     }
     for item in apps {
         if hits.len() >= top_n {
@@ -85,6 +102,48 @@ pub fn order_by_recent(apps: &[AppItem], recent_ids: &[String], top_n: usize) ->
         });
     }
     hits
+}
+
+/// Alias 目标选择器用：按名称/拼音从索引挑候选，Top N。
+/// 轻量实现（前缀 > 包含，短名优先），不走完整评分管线。
+pub fn name_candidates(apps: &[AppItem], query: &str, top_n: usize) -> Vec<SearchResult> {
+    fn norm<'a>(precomputed: &'a str, raw: &'a str) -> std::borrow::Cow<'a, str> {
+        if precomputed.is_empty() {
+            std::borrow::Cow::Owned(normalizer::normalize_name(raw))
+        } else {
+            std::borrow::Cow::Borrowed(precomputed)
+        }
+    }
+
+    let q = normalizer::normalize_query(query);
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let mut hits: Vec<SearchResult> = Vec::new();
+    for item in apps {
+        let name = norm(&item.normalized_name, &item.name);
+        let display = norm(&item.normalized_display, &item.display_name);
+        let mut score = 0i32;
+        if name == q || display == q {
+            score = 4;
+        } else if name.starts_with(&*q) || display.starts_with(&*q) {
+            score = 3;
+        } else if !item.pinyin.is_empty() && item.pinyin.starts_with(&*q) {
+            score = 2;
+        } else if name.contains(&*q) || display.contains(&*q) {
+            score = 1;
+        } else if !item.pinyin_initials.is_empty() && item.pinyin_initials.starts_with(&*q) {
+            score = 1;
+        }
+        if score > 0 {
+            hits.push(SearchResult {
+                item: item.clone(),
+                score,
+                matched_by: "candidate".into(),
+            });
+        }
+    }
+    ranker::rank_and_truncate(hits, top_n)
 }
 
 /// 历史加分后重新排序截断（commands 在改分后调用）。
@@ -228,7 +287,7 @@ mod tests {
     fn empty_query_recent_first() {
         let apps = vec![item("A"), item("B"), item("C")];
         let recent = vec![apps[2].id.clone(), apps[0].id.clone()];
-        let hits = order_by_recent(&apps, &recent, 3);
+        let hits = order_by_recent(&apps, &recent, &[], 3);
         assert_eq!(hits[0].item.name, "C");
         assert_eq!(hits[0].matched_by, "recent");
         assert_eq!(hits[1].item.name, "A");
@@ -237,22 +296,80 @@ mod tests {
     }
 
     #[test]
+    fn empty_query_pinned_before_recent() {
+        let apps = vec![item("A"), item("B"), item("C")];
+        let recent = vec![apps[2].id.clone()];
+        let pinned = vec![apps[0].id.clone()];
+        let hits = order_by_recent(&apps, &recent, &pinned, 3);
+        assert_eq!(hits[0].item.name, "A");
+        assert_eq!(hits[0].matched_by, "pinned");
+        assert_eq!(hits[1].item.name, "C");
+        assert_eq!(hits[1].matched_by, "recent");
+        assert_eq!(hits[2].item.name, "B");
+    }
+
+    #[test]
+    fn pinned_order_follows_pin_time_desc() {
+        let apps = vec![item("A"), item("B"), item("C")];
+        let hits = order_by_recent(&apps, &[], &[apps[2].id.clone(), apps[0].id.clone()], 3);
+        assert_eq!(hits[0].item.name, "C");
+        assert_eq!(hits[1].item.name, "A");
+    }
+
+    #[test]
     fn empty_query_recent_missing_id_skipped() {
         let apps = vec![item("A"), item("B")];
         let recent = vec!["ghost".into(), apps[1].id.clone()];
-        let hits = order_by_recent(&apps, &recent, 2);
+        let hits = order_by_recent(&apps, &recent, &[], 2);
         assert_eq!(hits[0].item.name, "B");
         assert_eq!(hits[1].item.name, "A");
+    }
+
+    #[test]
+    fn empty_query_pinned_missing_id_skipped() {
+        let apps = vec![item("A"), item("B")];
+        let hits = order_by_recent(&apps, &[], &["ghost".into(), apps[0].id.clone()], 2);
+        assert_eq!(hits[0].item.name, "A");
+        assert_eq!(hits[1].item.name, "B");
     }
 
     #[test]
     fn empty_query_no_duplicate() {
         let apps = vec![item("A"), item("B")];
         let recent = vec![apps[0].id.clone(), apps[0].id.clone()];
-        let hits = order_by_recent(&apps, &recent, 2);
+        let hits = order_by_recent(&apps, &recent, &[apps[0].id.clone()], 2);
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].item.name, "A");
         assert_eq!(hits[1].item.name, "B");
+    }
+
+    #[test]
+    fn name_candidates_rank_prefix_over_contains() {
+        let apps: Vec<_> = ["Google Chrome", "Chrome Remote Desktop", "My Chrome Box"]
+            .iter()
+            .map(|n| item(n))
+            .collect();
+        let hits = name_candidates(&apps, "chro", 8);
+        // 只有 "Chrome Remote Desktop" 是前缀；另两条靠包含命中，同分短名在前
+        assert_eq!(hits[0].item.name, "Chrome Remote Desktop");
+        assert_eq!(hits[1].item.name, "Google Chrome");
+        assert_eq!(hits[2].item.name, "My Chrome Box");
+        assert!(hits.iter().all(|h| h.matched_by == "candidate"));
+    }
+
+    #[test]
+    fn name_candidates_supports_pinyin() {
+        let apps = vec![item("微信")];
+        assert_eq!(name_candidates(&apps, "weixin", 8).len(), 1);
+        assert_eq!(name_candidates(&apps, "wx", 8).len(), 1);
+        assert!(name_candidates(&apps, "zzz", 8).is_empty());
+    }
+
+    #[test]
+    fn name_candidates_empty_query_and_limit() {
+        let apps: Vec<_> = (0..10).map(|i| item(&format!("App{i:02}"))).collect();
+        assert!(name_candidates(&apps, "  ", 8).is_empty(), "空 Query 无候选");
+        assert_eq!(name_candidates(&apps, "app", 3).len(), 3, "只返回 Top N");
     }
 
     #[test]

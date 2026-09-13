@@ -4,7 +4,7 @@
 //! - 历史总加分有上限，不得让 Prefix 压过 Name Exact
 //! - 不做纯 LRU
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::model::SearchResult;
 use crate::storage::{QueryPairStats, UsageStats};
@@ -12,24 +12,34 @@ use crate::storage::{QueryPairStats, UsageStats};
 /// 历史总加分上限。须 < (SCORE_NAME_EXACT - SCORE_PREFIX) = 200。
 pub const HISTORY_BOOST_MAX: i32 = 160;
 
+/// 固定项加分。与历史取较大者，须满足：固定 Prefix(800+180) 仍低于 Name Exact(1000)
+/// （明确匹配保护，见 PRD §41–42）。
+pub const PIN_BOOST: i32 = 180;
+
 const FREQUENCY_CAP: i32 = 50;
 const RECENCY_CAP: i32 = 40;
 
-/// 把批量取回的历史加到排序结果上（Match 仍是主信号）。
-/// `usage`/`pairs` 缺行按默认值（0 加分）。
+/// 个性化加分统一入口（Match 仍是主信号）：历史（Usage/Recency/Query 配对）+ 固定。
+/// 固定与历史取较大者、不叠加，保证 Prefix+个人化(800+180) 仍低于 Name Exact(1000)。
+/// `usage`/`pairs`/`pinned` 缺行按默认值（0 加分）。
 pub fn apply_boosts(
     hits: &mut [SearchResult],
     usage: HashMap<String, UsageStats>,
     pairs: HashMap<String, QueryPairStats>,
     query_norm: &str,
     now: i64,
+    pinned: &HashSet<String>,
 ) {
     for hit in hits {
+        let is_pinned = pinned.contains(&hit.item.id);
         let u = usage.get(&hit.item.id).cloned().unwrap_or_default();
         let p = pairs.get(&hit.item.id).cloned().unwrap_or_default();
-        let boost = history_boost(query_norm, &u, &p, now);
+        let history = history_boost(query_norm, &u, &p, now);
+        let boost = if is_pinned { PIN_BOOST.max(history) } else { history };
         hit.score += boost;
-        if boost > 0 {
+        if is_pinned {
+            hit.matched_by = format!("{}+pin", hit.matched_by);
+        } else if boost > 0 {
             hit.matched_by = format!("{}+history", hit.matched_by);
         }
     }
@@ -94,7 +104,7 @@ mod tests {
     #[test]
     fn apply_boosts_missing_rows_are_zero() {
         let mut hits = vec![hit("a"), hit("b")];
-        apply_boosts(&mut hits, HashMap::new(), HashMap::new(), "q", 1);
+        apply_boosts(&mut hits, HashMap::new(), HashMap::new(), "q", 1, &HashSet::new());
         assert_eq!(hits[0].score, 100, "无历史记录 → 不加分");
         assert_eq!(hits[0].matched_by, "test");
     }
@@ -110,7 +120,7 @@ mod tests {
                 last_used_at: 1_000,
             },
         );
-        apply_boosts(&mut hits, usage, HashMap::new(), "q", 2_000);
+        apply_boosts(&mut hits, usage, HashMap::new(), "q", 2_000, &HashSet::new());
         assert!(hits[0].score > 100);
         assert!(hits[0].matched_by.ends_with("+history"));
     }
@@ -160,5 +170,51 @@ mod tests {
         assert!(
             recency_score(fresh.last_used_at, now) > recency_score(old.last_used_at, now)
         );
+    }
+
+    #[test]
+    fn pin_boost_ranks_pinned_item_up() {
+        let mut hits = vec![hit("a"), hit("b")];
+        let pinned: HashSet<String> = ["b".to_string()].into_iter().collect();
+        apply_boosts(&mut hits, HashMap::new(), HashMap::new(), "q", 1, &pinned);
+        assert_eq!(hits[0].score, 100, "未固定不加分");
+        assert_eq!(hits[1].score, 100 + PIN_BOOST, "无历史时固定项获得 PIN_BOOST");
+        assert!(hits[1].matched_by.ends_with("+pin"));
+    }
+
+    #[test]
+    fn pin_does_not_stack_with_history() {
+        // 固定与历史取较大者：两者都有时不得叠加突破明确匹配保护
+        let mut hits = vec![hit("a")];
+        let mut usage = HashMap::new();
+        usage.insert(
+            "a".to_string(),
+            UsageStats {
+                launch_count: 10_000,
+                last_used_at: 0,
+            },
+        );
+        let pinned: HashSet<String> = ["a".to_string()].into_iter().collect();
+        apply_boosts(&mut hits, usage, HashMap::new(), "q", 1, &pinned);
+        assert!(
+            hits[0].score <= 100 + PIN_BOOST,
+            "固定+历史叠加后得分 {} 超过上限", hits[0].score
+        );
+    }
+
+    #[test]
+    fn pin_boost_keeps_exact_above_pinned_prefix() {
+        // 明确匹配保护：固定项的 Prefix 加成不得压过另一条的 Name Exact
+        let pinned_prefix = crate::search::ranker::SCORE_PREFIX + PIN_BOOST;
+        let exact = crate::search::ranker::SCORE_NAME_EXACT;
+        assert!(exact > pinned_prefix);
+    }
+
+    #[test]
+    fn pin_boost_empty_set_noop() {
+        let mut hits = vec![hit("a")];
+        apply_boosts(&mut hits, HashMap::new(), HashMap::new(), "q", 1, &HashSet::new());
+        assert_eq!(hits[0].score, 100);
+        assert_eq!(hits[0].matched_by, "test");
     }
 }

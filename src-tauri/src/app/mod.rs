@@ -1,5 +1,6 @@
 //! 应用目录：扫描 Windows 入口并启动目标。
 
+pub mod actions;
 pub mod builtin;
 mod launcher;
 pub mod scanner;

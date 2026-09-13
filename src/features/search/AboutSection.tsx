@@ -1,4 +1,4 @@
-/** 关于：当前版本、更新检查（对比 GitHub 最新 Release）、技术栈。 */
+/** 关于：当前版本、更新检查（对比 GitHub 最新 Release）。 */
 
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
@@ -64,9 +64,6 @@ export function AboutSection() {
             {checking ? "检查中…" : "检查"}
           </button>
         )}
-      </Row>
-      <Row icon="M4 7h16M4 12h16M4 17h10" title="技术栈" hint="Tauri 2 · React 19 · Rust · Apache-2.0">
-        <span />
       </Row>
     </div>
   );

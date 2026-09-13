@@ -8,8 +8,10 @@ type Props = {
   index: number;
   active: boolean;
   query: string;
+  pinned: boolean;
   onSelect: (index: number) => void;
   onLaunch: (item: SearchResult) => void;
+  onContextMenu: (item: SearchResult, x: number, y: number) => void;
 };
 
 function secondaryLabel(item: SearchResult): string {
@@ -21,7 +23,16 @@ function secondaryLabel(item: SearchResult): string {
   return i >= 0 ? t.slice(i + 1) : t;
 }
 
-export function ResultItem({ item, index, active, query, onSelect, onLaunch }: Props) {
+export function ResultItem({
+  item,
+  index,
+  active,
+  query,
+  pinned,
+  onSelect,
+  onLaunch,
+  onContextMenu,
+}: Props) {
   const [iconFailed, setIconFailed] = useState(false);
   const src = iconFailed ? undefined : iconSrc(item.icon);
   return (
@@ -32,6 +43,10 @@ export function ResultItem({ item, index, active, query, onSelect, onLaunch }: P
       className={`item ${active ? "active" : ""}`}
       onMouseMove={() => onSelect(index)}
       onClick={() => onLaunch(item)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onContextMenu(item, e.clientX, e.clientY);
+      }}
     >
       <div className="item-icon">
         {src ? (
@@ -53,7 +68,17 @@ export function ResultItem({ item, index, active, query, onSelect, onLaunch }: P
           {secondaryLabel(item)}
         </div>
       </div>
-      <div className="item-hint">{index < 9 ? `Alt+${index + 1}` : ""}</div>
+      <div className="item-hint">
+        {pinned && (
+          <svg className="pin-flag" viewBox="0 0 24 24" width="12" height="12" aria-label="已固定">
+            <path
+              d="M12 3l4 4-1 1 2 5-3.5 1.5L12 20l-1.5-5.5L7 13l2-5-1-1z"
+              fill="currentColor"
+            />
+          </svg>
+        )}
+        {index < 9 ? `Alt+${index + 1}` : ""}
+      </div>
     </div>
   );
 }

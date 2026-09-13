@@ -56,17 +56,21 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            commands::search_apps,
-            commands::index_count,
-            commands::launch_app,
-            commands::rescan_apps,
-            commands::set_ui_mode,
-            commands::toggle_window,
-            commands::get_settings,
-            commands::save_settings,
-            commands::list_user_aliases,
-            commands::set_user_alias,
-            commands::remove_user_alias
+            commands::search::search_apps,
+            commands::search::search_alias_targets,
+            commands::search::index_count,
+            commands::launch::launch_app,
+            commands::launch::result_action,
+            commands::launch::list_pinned,
+            commands::launch::rescan_apps,
+            commands::launch::set_ui_mode,
+            commands::launch::toggle_window,
+            commands::settings::get_settings,
+            commands::settings::save_settings,
+            commands::settings::clear_history,
+            commands::settings::list_user_aliases,
+            commands::settings::set_user_alias,
+            commands::settings::remove_user_alias
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

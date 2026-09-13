@@ -10,6 +10,12 @@ use crate::search::ranker::{
     SCORE_PREFIX, SCORE_SUBSTRING, SCORE_USER_ALIAS_EXACT,
 };
 
+/// 用户 Alias 的一行匹配素材：优先按稳定 id 命中，旧行（无 id）退回名称包含。
+pub struct UserTarget {
+    pub id: Option<String>,
+    pub name: String,
+}
+
 /// 预计算字段为空时退回现场规范化。
 fn cow_normalized<'a>(normalized: &'a str, raw: &'a str) -> Cow<'a, str> {
     if normalized.is_empty() {
@@ -30,8 +36,8 @@ fn take_best(
     })
 }
 
-/// `user_targets`：用户 Alias 指向的应用名（已小写）。
-pub fn collect_candidates(apps: &[AppItem], q: &str, user_targets: &[String]) -> Vec<SearchResult> {
+/// `user_targets`：用户 Alias 的目标（已小写名称 / 可选稳定 id）。
+pub fn collect_candidates(apps: &[AppItem], q: &str, user_targets: &[UserTarget]) -> Vec<SearchResult> {
     let mut out = Vec::new();
     for item in apps {
         if let Some(hit) = match_item(item, q, user_targets) {
@@ -41,7 +47,7 @@ pub fn collect_candidates(apps: &[AppItem], q: &str, user_targets: &[String]) ->
     out
 }
 
-fn match_item(item: &AppItem, q: &str, user_targets: &[String]) -> Option<SearchResult> {
+fn match_item(item: &AppItem, q: &str, user_targets: &[UserTarget]) -> Option<SearchResult> {
     // 预计算字段直接借用；缺省时才临时规范化（Cow 避免每键全量分配）
     let name = cow_normalized(item.normalized_name.as_str(), &item.name);
     let display = cow_normalized(item.normalized_display.as_str(), &item.display_name);
@@ -50,10 +56,14 @@ fn match_item(item: &AppItem, q: &str, user_targets: &[String]) -> Option<Search
 
     let mut best: Option<(i32, &'static str)> = None;
 
-    // 0) 用户 Alias（优先级最高）
-    let hit_user = user_targets
-        .iter()
-        .any(|t| name.as_ref() == t.as_str() || name.contains(t.as_str()) || display.contains(t.as_str()));
+    // 0) 用户 Alias（优先级最高）：有稳定 id 的按 id 精确点名，避免重名误绑
+    let hit_user = user_targets.iter().any(|t| match &t.id {
+        Some(id) => item.id == *id,
+        None => {
+            let n = t.name.to_lowercase();
+            name.as_ref() == n.as_str() || name.contains(n.as_str()) || display.contains(n.as_str())
+        }
+    });
     if hit_user {
         best = take_best(best, SCORE_USER_ALIAS_EXACT, "user-alias-exact");
     }
