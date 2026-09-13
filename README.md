@@ -8,8 +8,6 @@ Kite 使用 Rust 和 Iced 构建原生桌面应用，采用 tiny-skia 软渲染�
   <img src="docs/Kite-Github.png" alt="Kite" width="440">
 </p>
 
-<p align="center"><em>原生 Windows 应用启动器</em></p>
-
 Kite 通过全局快捷键呼出搜索窗口，输入应用名称、别名或拼音后直接启动目标程序。
 
 ## 界面预览

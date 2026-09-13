@@ -8,6 +8,7 @@ InstallDirRegKey HKLM "Software\Kite" "InstallLocation"
 RequestExecutionLevel admin
 
 !include "MUI2.nsh"
+!include "LogicLib.nsh"
 !define MUI_ABORTWARNING
 !define MUI_ICON "..\icons\icon.ico"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\kite.exe"
@@ -21,11 +22,27 @@ RequestExecutionLevel admin
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
+Var OldInstallDir
+
 Function .onInit
+  ; 兼容新旧安装器保存的安装位置。
+  ReadRegStr $OldInstallDir HKLM "Software\Kite" "InstallLocation"
+  StrCmp $OldInstallDir "" 0 +2
+    ReadRegStr $OldInstallDir HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Kite" "InstallLocation"
   ; 覆盖安装前结束正在运行的旧版，避免 kite.exe 被占用而复制失败。
   ExecWait '"$SYSDIR\taskkill.exe" /F /T /IM kite.exe'
   Sleep 300
 FunctionEnd
+
+Section "卸载旧版本（推荐）" SEC_REMOVE_OLD
+  SectionIn 1
+  ; 只在路径变化且旧卸载器存在时执行，避免删除当前正在覆盖的目录。
+  StrCmp $OldInstallDir "" done
+  StrCmp $OldInstallDir $INSTDIR done
+  IfFileExists "$OldInstallDir\uninstall.exe" 0 done
+    ExecWait '"$OldInstallDir\uninstall.exe" /S'
+done:
+SectionEnd
 
 Section "Kite 主程序" SEC_MAIN
   SectionIn RO
