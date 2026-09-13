@@ -39,3 +39,14 @@ cd src-tauri; cargo check; cd ..
 - 搜索回归：`cd src-tauri; cargo test`
 - 领域词汇：`docs/CONTEXT.md` · ADR：`docs/adr/`
 - `vite.config.ts` 保持 `host: 127.0.0.1`；失败先读真实错误
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live as Markdown files under `.scratch/<feature-slug>/`.
+See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+This is a single-context repo. Read `docs/CONTEXT.md` and relevant files under `docs/adr/`.
+See `docs/agents/domain.md`.
