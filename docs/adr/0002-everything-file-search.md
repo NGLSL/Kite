@@ -13,7 +13,7 @@ PRD §53：不要自行实现 NTFS 全盘索引；优先 Everything IPC/SDK。
 
 ## 决策
 
-- **捆绑官方 SDK DLL**（`src-tauri/resources/Everything64.dll`，随安装包发布），
+- **捆绑官方 SDK DLL**（`resources/Everything64.dll`，随安装包发布），
   通过 `LoadLibraryW` + IPC 查询运行中的 Everything 实例；结果在列表中直接显示
 - Everything **未运行 → 查询失败返回空**，绝不启动 Everything 窗口
 - DLL 查找顺序：exe 目录 → 资源目录 → Everything 安装目录 → 系统 PATH

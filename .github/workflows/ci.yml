@@ -1,34 +1,18 @@
-# CI：前端类型检查 + Rust 测试（Windows 专属项目，跑在 windows-latest）。
 name: CI
-
 on:
   push:
     branches: [main]
   pull_request:
-
 jobs:
   check:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
-
-      - name: Install frontend deps
-        run: npm ci
-
-      - name: Type check
-        run: npx tsc --noEmit
-
+          workspaces: .
       - name: Rust tests
         run: cargo test
-        working-directory: src-tauri
+      - name: Release build
+        run: cargo build --release

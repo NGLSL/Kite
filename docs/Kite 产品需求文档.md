@@ -1,3 +1,16 @@
+# 现行实现基线（2026-09-14）
+
+以下内容优先于本文中早期的技术选型描述：
+
+- **运行时**：Rust 2021 + Iced 0.14 + tiny-skia，单进程原生 Windows UI。
+- **已移除**：Tauri、WebView2、React、TypeScript、Vite 和 IPC 前端层。
+- **项目结构**：Cargo 项目位于仓库根目录，业务代码在 `src/`，资源在 `resources/`，图标在 `icons/`。
+- **发布方式**：NSIS 生成 `artifacts/kite-setup.exe` 安装版；便携运行不作为发布形态。
+- **性能基线**：稳定空闲私有内存约 14.86 MB，20 秒 CPU 采样无增量，主程序约 7.90 MiB。详细测量见 [`docs/PERFORMANCE.md`](PERFORMANCE.md)。
+
+本文后续早期章节保留作为需求演进记录；凡与本节冲突的架构、构建和运行描述，以本节及开发规范为准。
+
+---
 # Kite 产品需求文档
 
 ## 1. 项目概述
@@ -1417,7 +1430,7 @@ CPU 满意
 可以逐步整理：
 
 ```text
-src-tauri/src/
+src/
 
 app/
     scanner

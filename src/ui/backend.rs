@@ -1,0 +1,113 @@
+//! 原型后台：历史库副本与两阶段索引重建（对齐 state::rebuild_index，去 Tauri 化）。
+//! 只调用 kite_lib 既有函数，不改数据格式；历史库用副本，避免污染 Kite 真实数据。
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use iced::futures::channel::mpsc::UnboundedSender;
+
+use crate::model::{AppIndex, AppItem};
+use crate::{app, system};
+
+use super::{plog, Message};
+
+
+/// 三阶段：快速索引（首屏可搜索）→ 图标并行补齐 → UWP 后台合并。
+/// 每阶段完成发一条 Message，时序写进 poc.log。
+pub fn build_index(index: Arc<Mutex<AppIndex>>, icon_dir: PathBuf, tx: UnboundedSender<Message>) {
+    let _ = std::fs::create_dir_all(&icon_dir);
+
+    // 阶段 1：快速扫描（与 Kite 首屏一致，不提图标）
+    let t0 = Instant::now();
+    let built = app::scan_apps(&icon_dir, true);
+    let n = built.apps.len();
+    if let Ok(mut g) = index.lock() {
+        *g = built;
+    }
+    plog(&format!("index fast n={n} in {:?}", t0.elapsed()));
+    let _ = tx.unbounded_send(Message::IndexReady(n));
+
+    // 阶段 2：图标并行补齐（对齐 rebuild_index 的后台补图标，全程不持锁）
+    let t1 = Instant::now();
+    let pending = {
+        let g = index.lock().unwrap_or_else(|e| e.into_inner());
+        app::scanner::missing_icon_targets(&g)
+    };
+    let filled = app::scanner::extract_icons_parallel(&pending, &icon_dir);
+    if let Ok(mut g) = index.lock() {
+        for item in g.apps.iter_mut() {
+            if item.icon.is_none() {
+                if let Some(Some(p)) = filled.get(&item.id) {
+                    item.icon = Some(p.clone());
+                }
+            }
+        }
+        let with_icon = g.apps.iter().filter(|a| a.icon.is_some()).count();
+        plog(&format!(
+            "icons filled {with_icon}/{} in {:?}",
+            g.apps.len(),
+            t1.elapsed()
+        ));
+    }
+    let _ = tx.unbounded_send(Message::IconsFilled(filled.len()));
+
+    // 阶段 3：UWP / Store 应用后台补扫合并（对齐 merge_uwp_apps）
+    let t2 = Instant::now();
+    let mut raw = Vec::new();
+    app::uwp::collect_uwp("uwp", &mut raw);
+    let raw_n = raw.len();
+    let added = merge_uwp(&index, raw, &icon_dir);
+    plog(&format!(
+        "uwp merged +{added} (scanned {raw_n}) in {:?}",
+        t2.elapsed()
+    ));
+    let _ = tx.unbounded_send(Message::UwpMerged(added));
+}
+
+/// 与 state::merge_uwp_apps 相同的去重合并：按规范化路径 key 去重后并入索引。
+fn merge_uwp(
+    index: &Arc<Mutex<AppIndex>>,
+    raw: Vec<(AppItem, Option<String>)>,
+    icon_dir: &Path,
+) -> usize {
+    use crate::app::scanner::util::normalize_path_key;
+
+    let mut known: HashSet<String> = {
+        let g = index.lock().unwrap_or_else(|e| e.into_inner());
+        g.apps
+            .iter()
+            .map(|a| normalize_path_key(&a.target))
+            .collect()
+    };
+
+    let mut to_add = Vec::new();
+    for (mut item, icon_src) in raw {
+        let key = normalize_path_key(&item.target);
+        if !known.insert(key) {
+            continue;
+        }
+        item.attach_search_fields();
+        item.icon_src = icon_src.or_else(|| Some(item.target.clone()));
+        item.icon = system::icons::cache_icon(icon_dir, &item.id, item.icon_src.as_deref());
+        to_add.push(item);
+    }
+
+    let mut added = 0usize;
+    if let Ok(mut g) = index.lock() {
+        let existing: HashSet<String> = g
+            .apps
+            .iter()
+            .map(|a| normalize_path_key(&a.target))
+            .collect();
+        for item in to_add {
+            if existing.contains(&normalize_path_key(&item.target)) {
+                continue;
+            }
+            g.apps.push(item);
+            added += 1;
+        }
+    }
+    added
+}

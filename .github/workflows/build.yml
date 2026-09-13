@@ -1,42 +1,32 @@
-name: Build Windows installers
+name: Build Windows application
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build MSI and NSIS packages
+    name: Build Windows application
     runs-on: windows-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Build installers
-        run: npm run tauri:build
-
-      - name: Upload installers
+          workspaces: .
+      - name: Install NSIS
+        run: choco install nsis -y
+      - name: Build native application
+        run: cargo build --release --manifest-path Cargo.toml
+      - name: Build NSIS installer
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-installer.ps1 -Nsis "C:\Program Files (x86)\NSIS\makensis.exe"
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: kite-windows-installers
+          name: kite-windows
           if-no-files-found: error
           path: |
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/msi/*.msi
+            artifacts/kite.exe
+            artifacts/kite-setup.exe

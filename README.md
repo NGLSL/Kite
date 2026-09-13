@@ -1,127 +1,70 @@
 # Kite
 
-Kite 是一个面向 Windows 的轻量桌面启动器。按下快捷键，输入应用名称、别名或拼音，即可快速找到并启动程序。
+Kite 是一个面向 Windows 的轻量应用启动器。按下快捷键，输入应用名称、别名或拼音，即可快速找到并启动程序。
 
-Kite 使用 Rust 负责扫描、索引、搜索和 Windows 系统集成，使用 Tauri 2 承载桌面窗口，使用 React 和 TypeScript 构建界面。项目关注三件事：搜索结果足够准确、响应足够快、后台资源占用足够低。
-
-> 当前版本面向 Windows x64。项目仍在持续迭代中，欢迎提交 Issue 和 Pull Request。
+Kite 使用 Rust 和 Iced 构建原生桌面应用，采用 tiny-skia 软渲染，不依赖 Tauri、WebView2、React 或 Node.js。
 
 ## 功能
 
 - 全局快捷键唤起和隐藏搜索窗口
-- 扫描开始菜单、桌面、注册表 App Paths 以及 Windows packaged apps
-- 识别 `.lnk`、`.exe` 和 UWP 应用，并按稳定 target 去重
-- 中文、英文、别名、拼音和拼音首字母搜索
+- 扫描开始菜单、桌面、注册表 App Paths 和 Windows packaged apps
+- 支持 `.lnk`、`.exe`、UWP 应用、别名、中文、拼音和拼音首字母搜索
 - Exact、Prefix、Substring、Fuzzy 多路召回和统一排序
-- 用户 Alias、固定结果、启动历史和个性化排序
+- 启动历史、固定结果、设置和系统托盘
 - 应用图标提取与失败降级
-- 键盘操作：上下选择、Enter 启动、Esc 隐藏
-- 系统托盘、开机启动、失焦隐藏和手动重新扫描
-- 可选的 Everything 文件搜索集成
+- 可选 Everything 文件搜索
 
-搜索逻辑全部在 Rust 中执行，前端通过 Tauri IPC 只接收排序后的 Top N 结果。启动应用时只执行索引中记录的 target，不把用户输入拼接进 shell 命令。
+## 系统要求
 
-## 截图
+- Windows 10/11 x64
+- 运行程序无需安装 WebView2 或 Node.js
 
-界面设计稿位于 [`docs/Kite-UI设计图.png`](docs/Kite-UI设计图.png)。
+## 下载与安装
 
-## 技术栈
+从 GitHub Releases 下载 `kite-setup.exe`，运行安装程序即可。安装器会自动部署程序和运行资源，创建开始菜单与桌面快捷方式，并注册卸载入口。Kite 当前只发布安装版，避免便携运行时遗漏 DLL、音效或注册信息。
 
-- [Tauri 2](https://v2.tauri.app/)
-- Rust 2021
-- React 19
-- TypeScript
-- Vite
-- SQLite（`rusqlite`，用于设置、固定项和使用历史）
+## 从源码构建
 
-## 开始开发
+环境要求：Rust stable、MSVC 工具链和 Visual Studio Build Tools 的 Desktop development with C++ 工作负载。
 
-### 环境要求
+```powershell
+cargo test
+cargo build --release
+.\scripts\build-installer.ps1
+```
 
-- Windows x64
-- [Node.js](https://nodejs.org/)（建议使用当前 LTS）
-- npm
-- [Rust](https://www.rust-lang.org/tools/install) stable 工具链
-- Visual Studio Build Tools 的 **Desktop development with C++** 工作负载
-- WebView2 Runtime（Windows 10/11 通常已预装）
-
-Rust 应使用 MSVC 目标：
+构建产物位于：
 
 ```text
-stable-x86_64-pc-windows-msvc
+artifacts/kite-setup.exe
 ```
 
-### 安装依赖并运行
-
-```powershell
-npm install
-npm run tauri:dev
-```
-
-如果只需要启动 Vite 前端：
-
-```powershell
-npm run dev
-```
-
-### 构建和检查
-
-```powershell
-# TypeScript 类型检查并构建前端
-npm run build
-
-# 构建 Windows 安装包（MSI / NSIS）
-npm run tauri:build
-
-# Rust 编译检查和搜索回归测试
-cd src-tauri
-cargo check
-cargo test
-cd ..
-```
-
-首次构建会下载 Rust 和 npm 依赖，所需时间取决于网络和本地缓存。不要把本机的 `RUSTUP_HOME`、`CARGO_HOME`、Visual Studio 或 Node.js 安装路径写入项目配置；请通过系统工具链和环境变量管理它们。
-
-### 使用 GitHub Actions 构建
-
-仓库内置了 `.github/workflows/build.yml`。在 GitHub 仓库的 **Actions → Build Windows installers → Run workflow** 中手动触发后，Actions 会在 `windows-latest` Runner 上构建 MSI 和 NSIS 安装包，并将它们作为 `kite-windows-installers` Artifact 提供下载。推送 `v*` 标签则由 Release workflow 创建 GitHub Release。
 ## 项目结构
 
 ```text
-src/                         React 界面和前端共享模块
-  features/search/           搜索窗口、结果列表、设置
-  shared/                    跨功能复用逻辑
-  types/ipc.ts               与 Rust 对齐的 IPC 类型
-src-tauri/src/               Rust 应用核心
-  app/                       应用扫描、解析和启动
-  search/                    规范化、召回、拼音和排序
-  commands/                  Tauri IPC 命令
-  storage/                   设置、固定项和历史数据
-  system/                    快捷键、窗口、托盘和 Windows 集成
-docs/                        PRD、领域词汇、ADR 和开发规范
+src/          Rust 业务逻辑与 Iced UI
+icons/        应用图标
+resources/    运行资源
+installer/    NSIS 安装脚本
+scripts/      构建脚本
+docs/         开发文档、需求和 ADR
 ```
 
-更完整的模块边界、文件规模和测试约定见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。业务术语见 [`docs/CONTEXT.md`](docs/CONTEXT.md)。
+## 性能
 
-## 开发约定
+在 Windows 11、i5-13490F、32 GB 内存环境下，Iced 原生版本为单进程，稳定空闲私有内存约 14.86 MB，20 秒 CPU 采样无增量，主程序约 7.90 MiB，NSIS 安装包约 3.91 MiB。详细测量方法、100 次唤起曲线和 Flow Launcher 对比见 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)。
 
-- 搜索和启动逻辑放在 Rust，React 只负责输入、展示和交互。
-- IPC 返回排序后的有限结果，不把完整索引发送到前端。
-- 单个快捷方式损坏、图标读取失败或 target 不存在时，应跳过或降级，不能让整个索引失败。
-- 新增搜索行为时，同时补充 `src-tauri` 中的回归测试。
-- 优先复用现有模块，避免为尚未实现的插件、AI、OCR、云同步或跨平台能力提前增加抽象。
+## 贡献
 
-## 当前范围
+提交修改前请阅读 [`AGENTS.md`](AGENTS.md) 和 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)，并至少运行 `cargo test` 和 `cargo build --release`。Issue 和 Pull Request 请说明变更内容、验证方式以及适用的 Windows 环境。
 
-Kite 当前专注于 Windows 应用和文件启动体验。插件市场、AI 助手、OCR、云同步、账户系统、Linux/macOS 支持和自建全文索引不在当前范围内。
+## 开源参考
 
-## 参与贡献
+Kite 的产品定位和工程实践参考了以下开源启动器项目：
 
-欢迎通过 Issue 报告问题、提出功能建议，或提交 Pull Request。提交代码前请：
-
-1. 阅读 [`AGENTS.md`](AGENTS.md) 和 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
-2. 说明变更的用户行为和验证方式。
-3. 至少运行与改动相关的前端构建或 Rust 测试。
+- [ZeroLaunch-rs](https://github.com/ghost-him/ZeroLaunch-rs/)
+- [LaunchyQt](https://github.com/samsonwang/LaunchyQt)
+- [Flow Launcher](https://github.com/Flow-Launcher/Flow.Launcher)
 
 ## 许可证
 

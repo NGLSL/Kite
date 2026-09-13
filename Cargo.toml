@@ -1,0 +1,46 @@
+[package]
+name = "kite"
+version = "0.2.0"
+description = "Lightweight Windows launcher"
+license = "Apache-2.0"
+authors = ["Kite Authors"]
+edition = "2021"
+
+[lib]
+name = "kite_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+winres = "0.1"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir = { version = "2", default-features = false }
+dirs = { version = "6", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+base64 = { version = "0.22", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Environment", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_Variant", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging"] }
+pinyin = "0.11"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+# 原生 UI：tiny-skia 软渲染（无 wgpu/GPU 依赖），unconditional-rendering 消除局部重绘残影
+iced_core = "0.14"
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "crisp", "thread-pool", "image", "canvas", "unconditional-rendering"] }
+tray-icon = { version = "0.25", default-features = false }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
+
+# Windows MSVC 默认 debug=2：每个构建产物生成 ~100MB PDB，且旧哈希不自动回收，
+# target/debug 会累积到 10GB+。只保留行号表（断点/调用栈仍有文件与行号），
+# 依赖库不出调试信息——日常调试足够，体积降一个数量级。
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+debug = false
