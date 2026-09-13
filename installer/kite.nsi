@@ -36,9 +36,8 @@ FunctionEnd
 
 Section "卸载旧版本（推荐）" SEC_REMOVE_OLD
   SectionIn 1
-  ; 只在路径变化且旧卸载器存在时执行，避免删除当前正在覆盖的目录。
+  ; 勾选后始终先卸载旧版本，再由后续主程序 section 重新安装。
   StrCmp $OldInstallDir "" done
-  StrCmp $OldInstallDir $INSTDIR done
   IfFileExists "$OldInstallDir\uninstall.exe" 0 done
     ExecWait '"$OldInstallDir\uninstall.exe" /S'
 done:
