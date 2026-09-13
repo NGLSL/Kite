@@ -11,8 +11,9 @@ RequestExecutionLevel admin
 !include "LogicLib.nsh"
 !define MUI_ABORTWARNING
 !define MUI_ICON "..\icons\icon.ico"
-!define MUI_FINISHPAGE_RUN "$INSTDIR\kite.exe"
+!define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_TEXT "安装完成后启动 Kite"
+!define MUI_FINISHPAGE_RUN_FUNCTION LaunchKiteUnelevated
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
@@ -32,6 +33,12 @@ Function .onInit
   ; 覆盖安装前结束正在运行的旧版，避免 kite.exe 被占用而复制失败。
   ExecWait '"$SYSDIR\taskkill.exe" /F /T /IM kite.exe'
   Sleep 300
+FunctionEnd
+
+Function LaunchKiteUnelevated
+  ; 安装器以管理员权限运行，但 Kite 本身不需要提权。
+  ; ShellExecute 让 Explorer 使用当前用户上下文启动，避免 UIPI 阻断外部快捷键。
+  ExecShell "open" "$INSTDIR\kite.exe"
 FunctionEnd
 
 Section "卸载旧版本（推荐）" SEC_REMOVE_OLD
