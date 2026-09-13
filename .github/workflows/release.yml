@@ -10,6 +10,19 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Verify tag commit is on main
+        shell: pwsh
+        run: |
+          git fetch origin main --no-tags
+          $tagCommit = (git rev-list -n 1 $env:GITHUB_REF).Trim()
+          $mainCommit = (git rev-parse origin/main).Trim()
+          git merge-base --is-ancestor $tagCommit $mainCommit
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release tag $env:GITHUB_REF points to $tagCommit, which is not contained in origin/main ($mainCommit)."
+          }
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
