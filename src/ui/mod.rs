@@ -433,12 +433,12 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
     (state, window::latest().map(Message::WindowReady))
 }
 
-fn subscription(_state: &State) -> Subscription<Message> {
+fn subscription(state: &State) -> Subscription<Message> {
     Subscription::batch([
         // 后台线程消息桥（快捷键、索引构建完成等）
         Subscription::run(events_worker),
         // 键盘 + IME + 窗口焦点事件
-        keyboard_events(),
+        keyboard_events(state),
     ])
 }
 
@@ -463,9 +463,29 @@ fn events_worker() -> impl iced::futures::Stream<Item = Message> {
     })
 }
 
-fn keyboard_events() -> Subscription<Message> {
-    iced::event::listen().filter_map(|event| match event {
-        iced::event::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+fn keyboard_events(state: &State) -> Subscription<Message> {
+    // 正常运行时只订阅 Kite 自己使用的按键；否则外部截图、录屏和辅助工具的
+    // 单键快捷键会先进入 Iced 窗口。录制快捷键时才临时接收完整按键流。
+    if state.hotkey_recording {
+        iced::event::listen().filter_map(keyboard_message_recording)
+    } else {
+        iced::event::listen().filter_map(keyboard_message_app)
+    }
+}
+
+fn keyboard_message_recording(event: iced::event::Event) -> Option<Message> {
+    keyboard_message(event, true)
+}
+
+fn keyboard_message_app(event: iced::event::Event) -> Option<Message> {
+    keyboard_message(event, false)
+}
+
+fn keyboard_message(event: iced::event::Event, recording: bool) -> Option<Message> {
+    match event {
+        iced::event::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+            if recording || app_key(&key, modifiers) =>
+        {
             Some(Message::KeyPressed(key, modifiers))
         }
         iced::event::Event::InputMethod(im) => match im {
@@ -482,7 +502,19 @@ fn keyboard_events() -> Subscription<Message> {
             Some(Message::MousePressed(btn))
         }
         _ => None,
-    })
+    }
+}
+
+fn app_key(key: &Key, mods: Modifiers) -> bool {
+    match key {
+        Key::Named(
+            Named::Escape | Named::ArrowUp | Named::ArrowDown | Named::Enter,
+        ) => true,
+        Key::Character(c) => {
+            mods.alt() && c.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+        }
+        _ => false,
+    }
 }
 
 fn update(state: &mut State, message: Message) -> Task<Message> {
