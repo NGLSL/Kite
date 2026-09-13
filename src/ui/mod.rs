@@ -299,6 +299,13 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
     let _ = EVENT_TX.set(tx.clone());
     let _ = EVENT_RX.set(Mutex::new(Some(rx)));
 
+    // 先读取持久化快捷键，再启动注册线程。否则升级/重启后线程会先注册
+    // 默认 Alt+Space，而 UI 随后才加载用户配置，保存的快捷键永远不会生效。
+    let saved_hotkey = history_db
+        .as_ref()
+        .map(|db| db.load_settings().hotkey)
+        .unwrap_or_else(|| "Alt+Space".to_string());
+
     // 快捷键线程：原生 RegisterHotKey（线程关联）+ 消息泵 + 改键命令轮询。
     // 注意：必须在本线程泵消息（GetMessageW），WM_HOTKEY 才会被投递；注册失败
     // （如同键位已被 Kite 占用）直接退出（code=2）。
@@ -313,13 +320,16 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
             WM_HOTKEY,
         };
         const ID: i32 = 0xB00B;
-        let mut current = (MOD_ALT | MOD_NOREPEAT, 0x20u32);
+        let default_mods = (MOD_ALT | MOD_NOREPEAT).0;
+        let (saved_mods, saved_vk) = parse_raw(&saved_hotkey)
+            .unwrap_or((default_mods, 0x20u32));
+        let mut current = (HOT_KEY_MODIFIERS(saved_mods), saved_vk);
         unsafe {
             if RegisterHotKey(None, ID, current.0, current.1).is_err() {
                 plog("hotkey register failed (Kite 正在运行?)");
                 std::process::exit(2);
             }
-            plog("hotkey registered Alt+Space");
+            plog(&format!("hotkey registered {saved_hotkey}"));
             let mut msg = MSG::default();
             loop {
                 // 泵全部待处理消息
