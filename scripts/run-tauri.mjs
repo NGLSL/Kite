@@ -18,10 +18,13 @@ env.RUSTUP_HOME = env.RUSTUP_HOME || "D:\\Tools\\rustup";
 env.CARGO_HOME = env.CARGO_HOME || "D:\\Tools\\cargo";
 
 const sub = process.argv[2] === "build" ? "build" : "dev";
-const child = spawn("npx", ["tauri", sub], {
+const command = process.platform === "win32" ? "cmd.exe" : "npx";
+const args = process.platform === "win32"
+  ? ["/d", "/s", "/c", `npx.cmd tauri ${sub}`]
+  : ["tauri", sub];
+const child = spawn(command, args, {
   cwd: root,
   env,
   stdio: "inherit",
-  shell: true,
 });
 child.on("exit", (code) => process.exit(code ?? 1));
