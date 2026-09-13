@@ -175,8 +175,6 @@ enum Message {
     ImeCommit(String),
     WindowBlur,
     WindowReady(Option<window::Id>),
-    /// 唤起后短暂延迟再补一次焦点（对齐 Kite：set_focus + 16ms 后重试）。
-    Refocus,
     QueryChanged(String),
     ClearQuery,
     /// 鼠标悬停选中（css onMouseMove）。
@@ -494,12 +492,6 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                         window::gain_focus(id),
                         iced::widget::operation::focus(state.input_id.clone()),
                         sync_scroll(state),
-                        Task::perform(
-                            async {
-                                std::thread::sleep(std::time::Duration::from_millis(20));
-                            },
-                            |()| Message::Refocus,
-                        ),
                     ])
                 }
                 Some(id) => {
@@ -543,10 +535,6 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             state.window_id = id;
             Task::none()
         }
-        Message::Refocus => state
-            .window_id
-            .map(|id| window::gain_focus(id))
-            .unwrap_or_else(Task::none),
         Message::QueryChanged(q) => {
             state.query = q;
             state.refresh_results();
