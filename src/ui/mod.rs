@@ -488,6 +488,8 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                     system::sound::play_open();
                     plog(&format!("show issued epoch={}", state.epoch));
                     Task::batch([
+                        // 搜索窗口只需要前台焦点，不应持续置顶，否则会压住截图层和其它全局快捷键 UI。
+                        window::set_level(id, window::Level::Normal),
                         window::set_mode(id, window::Mode::Windowed),
                         window::gain_focus(id),
                         iced::widget::operation::focus(state.input_id.clone()),
@@ -1056,7 +1058,7 @@ fn close_settings(state: &mut State) -> Task<Message> {
     state.flash = None;
     plog("settings close");
     Task::batch([
-        state.window_id.map(|id| window::set_level(id, window::Level::AlwaysOnTop)).unwrap_or_else(Task::none),
+        state.window_id.map(|id| window::set_level(id, window::Level::Normal)).unwrap_or_else(Task::none),
         state
             .window_id
             .map(|id| window::resize(id, iced::Size::new(WINDOW_W, WINDOW_H)))

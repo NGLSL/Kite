@@ -20,6 +20,12 @@ RequestExecutionLevel admin
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
+Function .onInit
+  ; 覆盖安装前结束正在运行的旧版，避免 kite.exe 被占用而复制失败。
+  ExecWait '"$SYSDIR\taskkill.exe" /F /T /IM kite.exe'
+  Sleep 300
+FunctionEnd
+
 Section "Kite 主程序" SEC_MAIN
   SectionIn RO
   SetOutPath "$INSTDIR"
