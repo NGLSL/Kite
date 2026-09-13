@@ -6,7 +6,7 @@ Kite 使用 Rust 和 Iced 构建原生桌面应用，采用 tiny-skia 软渲染�
 
 ## 界面预览
 
-![Kite 搜索窗口与应用结果列表](docs/Kite-Github.png)
+<img src="docs/Kite-Github.png" alt="Kite 搜索窗口与应用结果列表" width="760">
 
 Kite 通过全局快捷键呼出搜索窗口，输入应用名称、别名或拼音后直接启动目标程序。截图展示的是当前原生 Iced 界面和应用结果列表；后续更新截图时，只需替换 `docs/Kite-Github.png` 即可。
 
