@@ -3,7 +3,8 @@ Unicode True
 Name "Kite"
 OutFile "..\artifacts\kite-setup.exe"
 InstallDir "$PROGRAMFILES64\Kite"
-InstallDirRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Kite" "InstallLocation"
+; 独立保存安装目录，卸载时保留，便于下一次安装继续使用用户选择的盘符。
+InstallDirRegKey HKLM "Software\Kite" "InstallLocation"
 RequestExecutionLevel admin
 
 !include "MUI2.nsh"
@@ -34,6 +35,7 @@ Section "Kite 主程序" SEC_MAIN
   File "..\resources\Everything64.dll"
   File "..\resources\open.wav"
   WriteUninstaller "$INSTDIR\uninstall.exe"
+  WriteRegStr HKLM "Software\Kite" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Kite" "DisplayName" "Kite"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Kite" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Kite" "UninstallString" "$INSTDIR\uninstall.exe"
