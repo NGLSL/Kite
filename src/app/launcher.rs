@@ -1,5 +1,6 @@
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use crate::model::AppItem;
 use crate::system::env::expand_env;
@@ -57,9 +58,8 @@ pub fn launch(item: &AppItem) -> Result<(), String> {
 
     let mut cmd = Command::new(target);
     if let Some(args) = &item.args {
-        for a in args.split_whitespace() {
-            cmd.arg(a);
-        }
+        // .lnk 参数已是 Windows 命令行片段，保留其引号和转义。
+        cmd.raw_arg(args);
     }
     // working_dir 无效时回落用户主目录，而不是继承 Kite 自己的 cwd
     let working_dir = resolve_working_dir(item.working_dir.as_deref());
@@ -67,10 +67,7 @@ pub fn launch(item: &AppItem) -> Result<(), String> {
         cmd.current_dir(dir);
     }
 
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
+    // 交互式控制台需要 Windows 分配的标准句柄；stdin=NUL 会让 PowerShell 读到 EOF 后退出。
     match cmd.spawn() {
         Ok(_) => Ok(()),
         // requireAdministrator 清单的程序：CreateProcess 无法触发 UAC（os error 740），
@@ -139,14 +136,12 @@ mod tests {
     fn launch_without_working_dir_starts_in_home() {
         let out = std::env::temp_dir().join(format!("kite-cwd-cmd-{}.txt", std::process::id()));
         let _ = std::fs::remove_file(&out);
-        // std::Command 会把参数里的引号转义成 \"，cmd.exe 不认；临时目录无空格，不用引号
-        assert!(!out.to_string_lossy().contains(' '), "测试依赖无空格临时路径");
         let cmd_path = std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into());
         let item = AppItem::scanned(
             "cwd-test".into(),
             "cmd".into(),
             cmd_path,
-            Some(format!("/c cd > {}", out.display())),
+            Some(format!("/c cd > \"{}\"", out.display())),
             None,
             "test",
         );
@@ -165,5 +160,39 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn launch_preserves_quoted_shortcut_arguments() {
+        let out = std::env::temp_dir().join(format!(
+            "kite quoted args {}.txt",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&out);
+        let cmd_path =
+            std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into());
+        let item = AppItem::scanned(
+            "quoted-args-test".into(),
+            "cmd".into(),
+            cmd_path,
+            Some(format!("/c echo quoted > \"{}\"", out.display())),
+            None,
+            "test",
+        );
+        launch(&item).expect("spawn cmd with quoted arguments");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(&out) {
+                assert_eq!(contents.trim(), "quoted");
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "quoted path was not passed intact to cmd"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let _ = std::fs::remove_file(out);
     }
 }

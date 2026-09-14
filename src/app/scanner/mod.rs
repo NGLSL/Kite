@@ -24,6 +24,10 @@ type RawItem = (AppItem, Option<String>);
 const FAST_BUDGET: Duration = Duration::from_millis(1500);
 const MAX_PER_DIR: usize = 400;
 const MAX_TOTAL: usize = 1500;
+/// Start Menu 应用通常位于 Programs/<分类>/<应用>，开发工具还可能再嵌套一层。
+/// 上限覆盖常见入口，同时继续受每目录、总量和快速扫描预算约束。
+const START_MENU_MAX_DEPTH: usize = 5;
+const OTHER_SOURCE_MAX_DEPTH: usize = 2;
 
 /// 完整扫描。`fast` 为 true 时只建列表、不提图标（首屏用）。
 pub fn scan_apps(icon_dir: &Path, fast: bool) -> AppIndex {
@@ -76,20 +80,28 @@ fn scan_apps_with_scoop_shims(
         t0.elapsed()
     ));
 
-    let steps: [(&str, PathBuf, &str); 4] = [
-        ("user-start", user_start, "start-menu"),
-        ("common-start", common_start, "start-menu"),
-        ("user-desktop", user_desktop, "desktop"),
-        ("public-desktop", public_desktop, "desktop"),
+    let steps: [(&str, PathBuf, &str, usize); 4] = [
+        ("user-start", user_start, "start-menu", START_MENU_MAX_DEPTH),
+        ("common-start", common_start, "start-menu", START_MENU_MAX_DEPTH),
+        ("user-desktop", user_desktop, "desktop", OTHER_SOURCE_MAX_DEPTH),
+        ("public-desktop", public_desktop, "desktop", OTHER_SOURCE_MAX_DEPTH),
     ];
 
-    for (label, root, source) in steps {
+    for (label, root, source, max_depth) in steps {
         if budget_exhausted(budget, t0) {
             crate::log::info(&format!("scan budget hit before {label}"));
             break;
         }
         let before = raw.len();
-        collect_from_dir(&root, source, budget, t0, &mut raw, &mut cache);
+        collect_from_dir(
+            &root,
+            source,
+            max_depth,
+            budget,
+            t0,
+            &mut raw,
+            &mut cache,
+        );
         crate::log::info(&format!(
             "{label}: +{} -> total {} in {:?}",
             raw.len() - before,
@@ -208,6 +220,7 @@ pub fn extract_icons_parallel(
 fn collect_from_dir(
     root: &Path,
     source: &str,
+    max_depth: usize,
     budget: Option<Duration>,
     t0: Instant,
     out: &mut Vec<RawItem>,
@@ -219,7 +232,7 @@ fn collect_from_dir(
     let mut n = 0usize;
     for entry in WalkDir::new(root)
         .follow_links(false)
-        .max_depth(2)
+        .max_depth(max_depth)
         .into_iter()
         .filter_map(|e| e.ok())
     {
@@ -307,7 +320,15 @@ fn collect_scoop_shims(
         if !seen.insert(normalize_path_key(&root.to_string_lossy())) {
             continue;
         }
-        collect_from_dir(&root, "scoop", budget, t0, out, cache);
+        collect_from_dir(
+            &root,
+            "scoop",
+            OTHER_SOURCE_MAX_DEPTH,
+            budget,
+            t0,
+            out,
+            cache,
+        );
     }
 }
 
@@ -322,7 +343,7 @@ fn dedupe(raw: Vec<RawItem>) -> Vec<RawItem> {
 
     let mut best: HashMap<String, RawItem> = HashMap::new();
     for (item, icon) in raw {
-        let key = normalize_path_key(&item.target);
+        let key = dedupe_key(&item);
         match best.get(&key) {
             Some((existing, _)) if rank(&existing.source) <= rank(&item.source) => {}
             _ => {
@@ -339,6 +360,15 @@ fn dedupe(raw: Vec<RawItem>) -> Vec<RawItem> {
             .then_with(|| a.0.source.cmp(&b.0.source))
     });
     list
+}
+
+/// 同一 target 的不同参数可能代表不同的启动语义（例如普通 PowerShell
+/// 与 Developer PowerShell），不能仅按 exe 路径合并。工作目录不参与
+/// 去重：开始菜单、桌面快捷方式经常只是在快捷方式元数据中提供了
+/// 不同的起始位置，而启动器会将无效或未提供的目录统一回落到用户主目录。
+fn dedupe_key(item: &AppItem) -> String {
+    let target = normalize_path_key(&item.target);
+    hash_id(&[&target, item.args.as_deref().unwrap_or("")])
 }
 
 #[cfg(test)]
@@ -372,5 +402,74 @@ mod tests {
             "Scoop shim 应进入应用索引"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn nested_program_entries_are_indexed() {
+        let root = temp_dir("nested-programs");
+        let first = root.join("Programs").join("Category").join("Launcher.exe");
+        let second = root
+            .join("Programs")
+            .join("Category")
+            .join("Tools")
+            .join("Developer Launcher.exe");
+        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+        std::fs::write(&first, b"fixture").unwrap();
+        std::fs::write(&second, b"fixture").unwrap();
+
+        let mut raw = Vec::new();
+        let mut cache = ScanCache::load(&root);
+        collect_from_dir(
+            &root,
+            "start-menu",
+            START_MENU_MAX_DEPTH,
+            None,
+            Instant::now(),
+            &mut raw,
+            &mut cache,
+        );
+
+        let targets: Vec<_> = raw
+            .iter()
+            .map(|(item, _)| item.target.as_str())
+            .collect();
+        assert!(targets.contains(&first.to_string_lossy().as_ref()));
+        assert!(targets.contains(&second.to_string_lossy().as_ref()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dedupe_preserves_distinct_launch_arguments() {
+        let target = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+        let normal = AppItem::scanned(
+            "normal".into(),
+            "PowerShell".into(),
+            target.into(),
+            None,
+            Some(r"C:\Users\admin".into()),
+            "start-menu",
+        );
+        let normal_duplicate = AppItem::scanned(
+            "normal-duplicate".into(),
+            "PowerShell (desktop)".into(),
+            target.into(),
+            None,
+            Some(r"C:\Users\admin\Desktop".into()),
+            "desktop",
+        );
+        let developer = AppItem::scanned(
+            "developer".into(),
+            "Developer PowerShell".into(),
+            target.into(),
+            Some("-NoExit -Command Enter-VsDevShell".into()),
+            Some(r"C:\Users\admin".into()),
+            "start-menu",
+        );
+
+        let items = dedupe(vec![(normal, None), (normal_duplicate, None), (developer, None)]);
+
+        assert_eq!(items.len(), 2, "相同启动语义应合并，不同参数必须保留");
+        assert!(items.iter().any(|(item, _)| item.name == "Developer PowerShell"));
     }
 }
