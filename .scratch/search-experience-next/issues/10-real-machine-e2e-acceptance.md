@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: done
 Type: task
 Blocked by: 01 后台完整扫描与原子索引快照、02 入口变化监听与刷新合并、05 图标链路正确性、09 排序分层与 History 学习
 
@@ -18,15 +18,15 @@ Blocked by: 01 后台完整扫描与原子索引快照、02 入口变化监听�
 
 ## Acceptance Criteria
 
-- [ ] 运行中安装应用后无需重启即可搜到；卸载后失效入口消失。
-- [ ] 重命名快捷方式后 Query 使用新名称。
-- [ ] Scoop shim 新增/移除后结果自动变化。
-- [ ] App Paths 注册变化后可搜到无快捷方式程序。
-- [ ] 同程序多来源不占据多个相邻重复位；不同参数/独立功能入口仍保留可启动。
-- [ ] 图标与当前安装状态一致（含 CC Switch、控制面板类样本）。
-- [ ] 多个 PowerShell 入口身份与参数分别核对，点击后窗口保持运行。
-- [ ] `visual code`/`vs code`/`todo`/`ter`/`vsc`/`ndm`/`雷蛇` 等样本达到规格期望。
-- [ ] `cargo test` 与 `cargo build --release` 通过；实机检查项有记录。
+- [x] 运行中安装应用后无需重启即可搜到；卸载后失效入口消失。
+- [x] 重命名快捷方式后 Query 使用新名称。
+- [x] Scoop shim 新增/移除后结果自动变化。
+- [x] App Paths 注册变化后可搜到无快捷方式程序。
+- [x] 同程序多来源不占据多个相邻重复位；不同参数/独立功能入口仍保留可启动。
+- [x] 图标与当前安装状态一致（含 CC Switch、控制面板类样本）。
+- [x] 多个 PowerShell 入口身份与参数分别核对，点击后窗口保持运行。
+- [x] `visual code`/`vs code`/`todo`/`ter`/`vsc`/`ndm`/`雷蛇` 等样本达到规格期望。
+- [x] `cargo test` 与 `cargo build --release` 通过；实机检查项有记录。
 
 ## Validation
 
