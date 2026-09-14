@@ -30,10 +30,6 @@ Function .onInit
   ReadRegStr $OldInstallDir HKLM "Software\Kite" "InstallLocation"
   StrCmp $OldInstallDir "" 0 +2
     ReadRegStr $OldInstallDir HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Kite" "InstallLocation"
-  ; 覆盖安装前只结束 Kite 自身。不要启用进程树递归结束，避免连带
-  ; Kite 已经唤起的用户应用。
-  ExecWait '"$SYSDIR\taskkill.exe" /F /IM kite.exe'
-  Sleep 300
 FunctionEnd
 
 Function LaunchKiteUnelevated
@@ -41,6 +37,14 @@ Function LaunchKiteUnelevated
   ; ShellExecute 让 Explorer 使用当前用户上下文启动，避免 UIPI 阻断外部快捷键。
   ExecShell "open" "$INSTDIR\kite.exe"
 FunctionEnd
+
+; 用户确认开始安装后才关闭旧 Kite。取消安装向导时，旧版继续运行。
+Section "-关闭旧版 Kite" SEC_CLOSE_OLD
+  SectionIn RO
+  ; 只结束 Kite 自身，不递归结束它唤起的应用。
+  ExecWait '"$SYSDIR\taskkill.exe" /F /IM kite.exe'
+  Sleep 300
+SectionEnd
 
 Section "卸载旧版本（推荐）" SEC_REMOVE_OLD
   SectionIn 1

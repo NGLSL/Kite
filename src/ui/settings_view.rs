@@ -593,12 +593,12 @@ fn index_card(state: &State) -> Element<'_, Message> {
 }
 
 fn about_card(state: &State) -> Element<'_, Message> {
-    // 对齐 AboutSection.tsx：两行 Flow 卡片（版本行 + 检查更新行）
+    // 版本、更新与项目链接都在关于页，手动安装入口始终可用。
     let hint = match &state.update_status {
         None => "对比 GitHub 最新发布版本".to_string(),
         Some(Ok(latest)) if latest == "latest" => "已是最新版本".to_string(),
         Some(Ok(latest)) => format!("发现新版本 {latest}"),
-        Some(Err(e)) => format!("检查失败：{e}"),
+        Some(Err(e)) => format!("更新失败：{e}"),
     };
     let available = matches!(
         &state.update_status,
@@ -607,9 +607,15 @@ fn about_card(state: &State) -> Element<'_, Message> {
 
     let control: Element<'static, Message> = if available {
         // 下载并启动安装器；无资产时退回发布页。
-        button(text(if state.update_url.is_some() { "下载并安装" } else { "查看发布页" }).size(13.0))
+        let label = if state.update_checking {
+            "下载中…"
+        } else if state.update_asset.is_some() {
+            "下载并安装"
+        } else {
+            "查看发布页"
+        };
+        let button = button(text(label).size(13.0))
             .padding([7.0, 12.0])
-            .on_press(if state.update_url.is_some() { Message::DownloadUpdate } else { Message::OpenReleases })
             .style(|_t, _s| button::Style {
                 background: Some(Background::Color(MARK)),
                 text_color: color!(0xFF_FF_FF),
@@ -619,8 +625,17 @@ fn about_card(state: &State) -> Element<'_, Message> {
                     radius: border::radius(8.0),
                 },
                 ..button::Style::default()
-            })
-            .into()
+            });
+        if state.update_checking {
+            button.into()
+        } else {
+            let action = if state.update_asset.is_some() {
+                Message::DownloadUpdate
+            } else {
+                Message::OpenReleases
+            };
+            button.on_press(action).into()
+        }
     } else {
         std_button(
             if state.update_checking { "检查中…" } else { "检查" },
@@ -638,6 +653,16 @@ fn about_card(state: &State) -> Element<'_, Message> {
                 .into(),
         ),
         flow_row("检查更新", hint, control),
+        flow_row(
+            "最新发布",
+            "在 GitHub 下载官方安装包".to_string(),
+            std_button("打开发布页", Message::OpenReleases),
+        ),
+        flow_row(
+            "GitHub 仓库",
+            "https://github.com/NGLSL/Kite".to_string(),
+            std_button("访问仓库", Message::OpenRepository),
+        ),
     ])
 }
 
