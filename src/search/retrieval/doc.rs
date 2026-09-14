@@ -1,6 +1,8 @@
 //! 索引文档与倒排结构。快照构建时一次性生成，查询只读。
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
+
+use fst::{IntoStreamer, Map as FstMap, MapBuilder, Streamer};
 
 use crate::model::AppItem;
 use crate::search::matcher::UserTarget;
@@ -8,7 +10,7 @@ use crate::search::normalizer::{compact, split_camel, tokens};
 use crate::search::pinyin_of;
 
 use super::symspell::{self, DeleteIndex};
-use super::verify::CharBits;
+use super::verify::{CharBits, QueryContext};
 
 /// 内部文档 ID（快照局部，不持久化）。
 pub type DocId = u32;
@@ -124,8 +126,8 @@ pub struct RetrievalIndex {
     pub docs: Vec<IndexedDoc>,
     /// 词元 → 文档 ID（排序去重）。
     term_postings: HashMap<String, Vec<DocId>>,
-    /// 支持前缀枚举的词典（BTreeMap 等价于 FST 的有序键空间）。
-    term_dict: BTreeMap<String, ()>,
+    /// FST 词典：规范化词元 → 词元序号（快照构建时整体生成，支持精确/前缀枚举）。
+    term_fst: FstMap<Vec<u8>>,
     /// compact 精确/前缀。
     compact_postings: HashMap<String, Vec<DocId>>,
     /// Unicode 字符 2-gram → 文档。
@@ -230,12 +232,22 @@ impl RetrievalIndex {
         }
 
         let deletes = symspell::build(&term_set, 2);
-        let term_dict: BTreeMap<String, ()> = term_set.into_iter().map(|t| (t, ())).collect();
+
+        // FST 词典：字典序插入（值暂存序号，便于日后挂倒排地址）
+        let mut term_list: Vec<String> = term_set.into_iter().collect();
+        term_list.sort_unstable();
+        let mut builder = MapBuilder::memory();
+        for (i, term) in term_list.iter().enumerate() {
+            builder
+                .insert(term.as_bytes(), i as u64)
+                .expect("fst insert sorted term");
+        }
+        let term_fst = builder.into_map();
 
         Self {
             docs,
             term_postings,
-            term_dict,
+            term_fst,
             compact_postings,
             gram2,
             gram3,
@@ -270,13 +282,25 @@ impl RetrievalIndex {
         self.compact_postings.get(term).map(|v| v.as_slice())
     }
 
-    pub fn prefix_terms(&self, prefix: &str, limit: usize) -> Vec<&str> {
-        self.term_dict
-            .range(prefix.to_string()..)
-            .take_while(|(k, _)| k.starts_with(prefix))
-            .take(limit)
-            .map(|(k, _)| k.as_str())
-            .collect()
+    /// FST 前缀枚举：返回前缀命中的词元（有序，最多 limit 条）。
+    pub fn prefix_terms(&self, prefix: &str, limit: usize) -> Vec<String> {
+        if prefix.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut stream = self.term_fst.range().ge(prefix.as_bytes()).into_stream();
+        while let Some((key, _idx)) = stream.next() {
+            if !key.starts_with(prefix.as_bytes()) {
+                break;
+            }
+            if let Ok(s) = std::str::from_utf8(key) {
+                out.push(s.to_string());
+            }
+            if out.len() >= limit {
+                break;
+            }
+        }
+        out
     }
 
     pub fn gram2_postings(&self, g: (char, char)) -> Option<&[DocId]> {
@@ -311,8 +335,9 @@ impl RetrievalIndex {
         if q.is_empty() {
             return Vec::new();
         }
+        let mut ctx = QueryContext::build(&q, self);
         let candidates = super::channels::collect(self, &q, user_targets);
-        let mut scored = super::verify::verify_all(self, &candidates, &q, user_targets);
+        let mut scored = super::verify::verify_all(self, &candidates, &mut ctx, user_targets);
         scored.sort_by(|a, b| b.score.cmp(&a.score));
         // 排序前不物化全部候选：只克隆可能进入 Top K 的窗口
         const FRIENDLY_DISCOUNT_SLACK: i32 = 220;

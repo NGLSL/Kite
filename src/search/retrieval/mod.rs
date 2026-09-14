@@ -11,7 +11,7 @@ pub(crate) mod verify;
 
 pub use doc::{IndexedDoc, RetrievalIndex};
 pub use query::{ChannelStats, ParsedQuery};
-pub use verify::{reference_search, SCORE_SKIP};
+pub use verify::{reference_search, QueryContext, SCORE_SKIP};
 
 use crate::model::{AppItem, SearchResult};
 use crate::search::matcher::UserTarget;

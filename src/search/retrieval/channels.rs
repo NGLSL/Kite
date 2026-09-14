@@ -75,7 +75,7 @@ pub fn collect(
         // 前缀枚举
         if term.chars().count() >= 2 {
             for t in index.prefix_terms(term, MAX_PREFIX_TERMS) {
-                if let Some(list) = index.postings(t) {
+                if let Some(list) = index.postings(&t) {
                     for &id in list {
                         out.ids.insert(id);
                         out.stats.prefix += 1;
@@ -107,7 +107,7 @@ pub fn collect(
                 // 某词无精确词元：用前缀扩展
                 let mut ids: Vec<DocId> = Vec::new();
                 for pt in index.prefix_terms(t, MAX_PREFIX_TERMS) {
-                    if let Some(list) = index.postings(pt) {
+                    if let Some(list) = index.postings(&pt) {
                         ids.extend_from_slice(list);
                     }
                 }

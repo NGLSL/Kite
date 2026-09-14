@@ -1,5 +1,11 @@
 //! 候选验证：多通道证据合并为 MatchScore。
-//! 精确/词前缀/Alias/纠错/拼音各自有验证语义；nucleo 风格对齐只补充非连续证据。
+//! 精确/词前缀/Alias/纠错/拼音各自有验证语义。
+//! nucleo-matcher 只补充非连续对齐证据，不否决其他通道。
+
+use fixedbitset::FixedBitSet;
+use ib_pinyin::{matcher::PinyinMatcher, pinyin::PinyinNotation};
+use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization};
+use nucleo_matcher::{Config as NucleoConfig, Matcher as NucleoMatcher, Utf32Str};
 
 use crate::model::SearchResult;
 use crate::search::alias;
@@ -17,6 +23,8 @@ use crate::search::retrieval::query::ParsedQuery;
 
 /// 有序跳字命中分：低于 fuzzy(2)，避免压过真正的编辑距离命中。
 pub const SCORE_SKIP: i32 = 320;
+/// nucleo 非连续对齐分上限（低于 skip，只作补充证据）。
+pub const SCORE_NUCLEO_MAX: i32 = 300;
 
 const MIN_COMPACT_SUBSTR_LEN: usize = 3;
 const MIN_WORD_PREFIX_LEN: usize = 2;
@@ -31,20 +39,62 @@ pub struct ScoredHit {
     pub matched_by: String,
 }
 
-/// 字符位图：ASCII 用 u128，其余保留有序列表（量小）。
+/// 每 Query 构建一次的匹配上下文：ib-pinyin 混合拼音 + nucleo 对齐缓冲。
+pub struct QueryContext<'a> {
+    pub parsed: &'a ParsedQuery,
+    pinyin: Option<PinyinMatcher<'a>>,
+    nucleo: NucleoMatcher,
+    nucleo_atom: Option<Atom>,
+    hay_buf: Vec<char>,
+}
+
+impl<'a> QueryContext<'a> {
+    pub fn build(q: &'a ParsedQuery, _index: &RetrievalIndex) -> Self {
+        let pinyin = if q.latin && q.chars.len() >= 2 {
+            Some(
+                PinyinMatcher::builder(q.raw_norm.as_str())
+                    .pinyin_notations(PinyinNotation::Ascii | PinyinNotation::AsciiFirstLetter)
+                    .is_pattern_partial(true)
+                    .build(),
+            )
+        } else {
+            None
+        };
+        let nucleo_atom = if q.chars.len() >= 2 {
+            Some(Atom::new(
+                q.raw_norm.as_str(),
+                CaseMatching::Ignore,
+                Normalization::Smart,
+                AtomKind::Fuzzy,
+                false,
+            ))
+        } else {
+            None
+        };
+        Self {
+            parsed: q,
+            pinyin,
+            nucleo: NucleoMatcher::new(NucleoConfig::DEFAULT),
+            nucleo_atom,
+            hay_buf: Vec::new(),
+        }
+    }
+}
+
+/// 字符位图：ASCII 用 fixedbitset，其余保留有序列表（量小）。
 #[derive(Debug, Clone, Default)]
 pub struct CharBits {
-    ascii: u128,
+    ascii: FixedBitSet,
     other: Vec<char>,
 }
 
 impl CharBits {
     pub fn from_str(s: &str) -> Self {
-        let mut ascii = 0u128;
+        let mut ascii = FixedBitSet::with_capacity(128);
         let mut other: Vec<char> = Vec::new();
         for c in s.chars() {
             if (c as u32) < 128 {
-                ascii |= 1u128 << (c as u32);
+                ascii.insert(c as usize);
             } else if !other.contains(&c) {
                 other.push(c);
             }
@@ -60,7 +110,7 @@ impl CharBits {
 
     fn contains(&self, c: char) -> bool {
         if (c as u32) < 128 {
-            self.ascii & (1u128 << (c as u32)) != 0
+            self.ascii.contains(c as usize)
         } else {
             self.other.binary_search(&c).is_ok()
         }
@@ -71,13 +121,13 @@ impl CharBits {
 pub fn verify_all(
     index: &RetrievalIndex,
     candidates: &Candidates,
-    q: &ParsedQuery,
+    ctx: &mut QueryContext,
     user_targets: &[UserTarget],
 ) -> Vec<ScoredHit> {
     let mut hits = Vec::new();
     for &id in &candidates.ids {
         let Some(doc) = index.doc(id) else { continue };
-        if let Some((score, matched_by)) = verify_one(doc, q, user_targets) {
+        if let Some((score, matched_by)) = verify_one(doc, ctx, user_targets) {
             hits.push(ScoredHit {
                 doc_id: id,
                 score,
@@ -101,9 +151,10 @@ fn take_best(
 
 fn verify_one(
     doc: &IndexedDoc,
-    q: &ParsedQuery,
+    ctx: &mut QueryContext,
     user_targets: &[UserTarget],
 ) -> Option<(i32, String)> {
+    let q = ctx.parsed;
     let name = doc.name.as_str();
     let display = doc.display.as_str();
     let q_raw = q.raw_norm.as_str();
@@ -174,7 +225,7 @@ fn verify_one(
         best = take_best(best, SCORE_ACRONYM, "acronym");
     }
 
-    // 3) 拼音（全拼 / 首字母 / 混合音节）
+    // 3) 拼音（全拼 / 首字母 / ib-pinyin 混合+多音字）
     if !doc.pinyin.is_empty() {
         if doc.pinyin == q_raw {
             best = take_best(best, SCORE_PINYIN_EXACT, "pinyin-exact");
@@ -191,9 +242,18 @@ fn verify_one(
             best = take_best(best, SCORE_PINYIN_INITIAL_INNER, "pinyin-initial-inner");
         }
     }
-    if q.latin && !doc.pinyin_syllables.is_empty() {
-        if let Some((score, kind)) = match_mixed_pinyin(&doc.pinyin_syllables, q_raw) {
-            best = take_best(best, score, kind);
+    // ib-pinyin：混合全拼/简拼/多音字（对原文匹配，覆盖非默认读音）
+    if q.latin {
+        if let Some(matcher) = ctx.pinyin.as_ref() {
+            let haystack = &doc.item.display_name;
+            if matcher.is_match(haystack.as_str()) {
+                // 前缀式匹配（is_pattern_partial）略低于完整全拼
+                best = take_best(best, SCORE_PINYIN_EXACT - 20, "pinyin-ib");
+            }
+        } else if !doc.pinyin_syllables.is_empty() {
+            if let Some((score, kind)) = match_mixed_pinyin(&doc.pinyin_syllables, q_raw) {
+                best = take_best(best, score, kind);
+            }
         }
     }
 
@@ -206,7 +266,21 @@ fn verify_one(
         }
     }
 
-    // 5) Fuzzy / SymSpell 验证（编辑距离）
+    // 5) nucleo-matcher 非连续对齐：只补充证据，不否决已有命中
+    if best.map(|(s, _)| s < SCORE_NUCLEO_MAX).unwrap_or(true) {
+        if ctx.nucleo_atom.is_some() {
+            let hay = Utf32Str::new(name, &mut ctx.hay_buf);
+            let atom = ctx.nucleo_atom.as_ref().unwrap();
+            if let Some(raw) = atom.score(hay, &mut ctx.nucleo) {
+                let mapped = map_nucleo_score(raw);
+                if mapped > 0 {
+                    best = take_best(best, mapped, "nucleo");
+                }
+            }
+        }
+    }
+
+    // 6) Fuzzy / SymSpell 验证（编辑距离）
     if best.is_none() {
         if let Some((score, _)) = fuzzy_name_or_tokens(q_raw, name)
             .or_else(|| fuzzy_name_or_tokens(q_raw, display))
@@ -217,6 +291,13 @@ fn verify_one(
 
     let (score, matched_by) = best?;
     Some((score, matched_by.to_string()))
+}
+
+/// nucleo u16 分映射到本内核分数域（低质量，不抢精确/前缀）。
+fn map_nucleo_score(raw: u16) -> i32 {
+    // nucleo 分数量级约 0..~200+；线性压到 100..SCORE_NUCLEO_MAX
+    let s = (raw as i32).clamp(0, 200);
+    100 + (s * (SCORE_NUCLEO_MAX - 100)) / 200
 }
 
 fn fuzzy_name_or_tokens(q: &str, name: &str) -> Option<(i32, usize)> {
@@ -357,9 +438,12 @@ pub fn reference_search(
     user_targets: &[UserTarget],
     max_results: usize,
 ) -> Vec<SearchResult> {
+    // 参考路径也用同一验证语义；ib-pinyin 需要 Query 生命周期，这里用临时空索引构建上下文
+    let empty = RetrievalIndex::build(&[], &[]);
+    let mut ctx = QueryContext::build(q, &empty);
     let mut hits: Vec<(i32, usize, String, DocId, String)> = Vec::new();
     for doc in docs {
-        if let Some((score, matched_by)) = verify_one(doc, q, user_targets) {
+        if let Some((score, matched_by)) = verify_one(doc, &mut ctx, user_targets) {
             hits.push((
                 score,
                 doc.item.name.chars().count(),
@@ -411,6 +495,21 @@ mod tests {
         let hit = match_mixed_pinyin(&syl, "wx");
         assert!(hit.is_some());
         assert!(match_mixed_pinyin(&syl, "zzz").is_none());
+    }
+
+    #[test]
+    fn ib_pinyin_mixed_and_polyphone() {
+        // 官方语义：混合全拼/简拼 + 多音字数据
+        let m = PinyinMatcher::builder("pysousuoeve")
+            .pinyin_notations(PinyinNotation::Ascii | PinyinNotation::AsciiFirstLetter)
+            .build();
+        assert!(m.is_match("拼音搜索Everything"), "ib-pinyin 混合命中");
+
+        let m = PinyinMatcher::builder("wxin")
+            .pinyin_notations(PinyinNotation::Ascii | PinyinNotation::AsciiFirstLetter)
+            .is_pattern_partial(true)
+            .build();
+        assert!(m.is_match("微信"), "wxin 应命中微信");
     }
 
     #[test]
