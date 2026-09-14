@@ -25,11 +25,6 @@ static PENDING_REBUILD: AtomicBool = AtomicBool::new(false);
 /// 构建代际：完成时仅当仍等于启动时记下的 generation 才发布，避免旧构建覆盖新状态。
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// 是否已有索引构建在跑。
-pub fn is_building() -> bool {
-    BUILDING.load(Ordering::SeqCst)
-}
-
 /// 触发一次完整重建：快扫首屏 + 后台完整补扫。
 /// 已在跑时标记 pending，当前构建结束后自动再跑一轮。
 pub fn request_build(index: Arc<Mutex<AppIndex>>, icon_dir: PathBuf, tx: UnboundedSender<Message>) -> bool {
@@ -208,7 +203,7 @@ mod tests {
         BUILDING.store(false, Ordering::SeqCst);
         // 手动模拟：第一次 swap 成功
         assert!(!BUILDING.swap(true, Ordering::SeqCst));
-        assert!(is_building());
+        assert!(BUILDING.load(Ordering::SeqCst));
         assert!(BUILDING.swap(true, Ordering::SeqCst), "second caller sees already-building");
         BUILDING.store(false, Ordering::SeqCst);
         let _ = std::fs::remove_dir_all(dir);

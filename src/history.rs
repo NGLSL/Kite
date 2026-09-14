@@ -7,10 +7,6 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::model::SearchResult;
-use crate::search::ranker::{
-    SCORE_ACRONYM, SCORE_COMPACT_EXACT, SCORE_COMPACT_SUBSTRING, SCORE_FUZZY_MAX, SCORE_NAME_EXACT,
-    SCORE_PINYIN_EXACT, SCORE_PREFIX, SCORE_SUBSTRING, SCORE_WORD_PREFIX,
-};
 use crate::storage::{QueryPairStats, UsageStats};
 
 /// 历史总加分上限。须 < (SCORE_NAME_EXACT - SCORE_PREFIX) = 200。
