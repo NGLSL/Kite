@@ -154,8 +154,7 @@
       "expected_in_top5": ["fx-todo"],
       "forbidden_top": [],
       "history": "none",
-      "status": "known-gap",
-      "gap_ticket": "07"
+      "status": "required"
     },
     {
       "id": "todo-space",
@@ -175,8 +174,7 @@
       "expected_in_top5": ["fx-vscode"],
       "forbidden_top": [],
       "history": "none",
-      "status": "known-gap",
-      "gap_ticket": "07"
+      "status": "required"
     },
     {
       "id": "vs-code-token-gap",
@@ -186,8 +184,7 @@
       "expected_in_top5": ["fx-vscode"],
       "forbidden_top": [],
       "history": "none",
-      "status": "known-gap",
-      "gap_ticket": "07"
+      "status": "required"
     },
     {
       "id": "ter-word-prefix-gap",
@@ -197,8 +194,7 @@
       "expected_in_top5": ["fx-xterminal", "fx-terminal"],
       "forbidden_top": [],
       "history": "none",
-      "status": "known-gap",
-      "gap_ticket": "07"
+      "status": "required"
     },
     {
       "id": "ndm-acronym-gap",

@@ -2,11 +2,19 @@
 
 Run: `cargo test search_eval -- --nocapture`
 
-Fixture: `tests/search_cases.json` (`default`), 22 cases.
+Fixture: `tests/search_cases.json` (`default`).
 
-Recorded on branch `search-experience-next` after ticket 03 lock-in and `wt` alias specificity fix (`terminal` → `windows terminal`).
+## After ticket 07 (compact / token-seq / word-prefix)
 
-## All cases
+| metric | all | required |
+|---|---|---|
+| Top1 | ~0.91 | 1.00 |
+| Recall@5 | ~0.91 | 1.00 |
+| MRR | ~0.91 | 1.00 |
+
+Remaining known gaps (ticket 08/09): `ndm` acronym, `雷蛇` cross-lang, history boost for `ter`.
+
+## Initial baseline (after ticket 03 + 06)
 
 | metric | value |
 |---|---|
@@ -17,7 +25,7 @@ Recorded on branch `search-experience-next` after ticket 03 lock-in and `wt` ali
 | latency µs p50 | ~400 |
 | latency µs p95 | ~980 |
 
-## Required only (CI gate)
+### Required only
 
 | metric | value |
 |---|---|
@@ -26,20 +34,14 @@ Recorded on branch `search-experience-next` after ticket 03 lock-in and `wt` ali
 | Recall@5 | 1.000 |
 | MRR | 1.000 |
 
-## Known gaps (not CI-blocking until target tickets land)
+### Known gaps at initial baseline
 
 | case | query | expected | ticket |
 |---|---|---|---|
 | todo-compact-gap | `todo` | Microsoft To Do | 07 |
 | visual-code-token-gap | `visual code` | Visual Studio Code | 07 |
 | vs-code-token-gap | `vs code` | Visual Studio Code | 07 |
-| ter-word-prefix-gap | `ter` | XTerminal in top5 (top may be Windows Terminal today) | 07 |
+| ter-word-prefix-gap | `ter` | XTerminal in top5 | 07 |
 | ndm-acronym-gap | `ndm` | Neat Download Manager | 08 |
 | leishe-crosslang-gap | `雷蛇` | Razer Synapse | 08 |
 | history-ter-boosts-similar-tier | `ter` + history | XTerminal top | 09 |
-
-## Notes
-
-- Duplicate-entry count is asserted implicitly via fixture uniqueness (distinct args PowerShell retained; friendly vs raw WPS both searchable, raw not first).
-- Index coverage is a separate real-machine denominator; this harness only scores matcher/ranker on a fixed fixture.
-- Flip `status` from `known-gap` to `required` when the corresponding ticket lands.
