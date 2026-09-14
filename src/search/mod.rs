@@ -10,9 +10,11 @@ mod matcher;
 mod normalizer;
 mod pinyin;
 pub mod ranker;
+pub mod retrieval;
 pub mod url;
 
 pub use matcher::UserTarget;
+pub use retrieval::RetrievalIndex;
 
 use crate::model::{AppItem, SearchResult};
 
@@ -32,7 +34,7 @@ pub fn pinyin_of(text: &str) -> (String, String) {
     pinyin::precompute(text)
 }
 
-/// 入口：空 Query 给默认列表，否则多路召回 + 排序。
+/// 入口：空 Query 给默认列表，否则索引多路召回 + 排序。
 /// `user_alias_targets`：用户 Alias 目标（稳定 id / 名称）。
 /// `max_results`：返回条数上限（滚动加载时调用方逐步放大；截断在 IPC 边界做）。
 pub fn search(
@@ -55,9 +57,39 @@ pub fn search(
             .collect();
     }
 
-    let mut hits = matcher::collect_candidates(apps, &q, user_alias_targets);
-    ranker::prefer_friendly_install_entries(&mut hits);
-    ranker::rank_and_truncate(hits, max_results)
+    // 与系统入口共用检索内核；此处 apps 为应用快照（系统入口由 search_with_system 传入）
+    retrieval::search_with_snapshot(apps, &[], query, user_alias_targets, max_results)
+}
+
+/// 应用 + 系统入口统一召回（UI 热路径）。
+pub fn search_with_system(
+    apps: &[AppItem],
+    system_entries: &[AppItem],
+    query: &str,
+    user_alias_targets: &[UserTarget],
+    max_results: usize,
+) -> Vec<SearchResult> {
+    let q = normalizer::normalize_query(query);
+    if q.is_empty() {
+        return search(apps, query, user_alias_targets, max_results);
+    }
+    retrieval::search_with_snapshot(
+        apps,
+        system_entries,
+        query,
+        user_alias_targets,
+        max_results,
+    )
+}
+
+/// 使用预构建索引搜索（快照同代，避免每键重建）。
+pub fn search_with_index(
+    index: &RetrievalIndex,
+    query: &str,
+    user_alias_targets: &[UserTarget],
+    max_results: usize,
+) -> Vec<SearchResult> {
+    index.search(query, user_alias_targets, max_results)
 }
 
 /// 空 Query 默认列表：固定项优先，其次最近使用，不足再按索引顺序补满。
@@ -466,6 +498,41 @@ mod tests {
     }
 
     #[test]
+    fn single_letter_pinyin_initial_finds_control_panel() {
+        // k → 控制面板（kzmb）应可召回；名称前缀（Kite）仍可排更前
+        let apps = vec![
+            item("Kite"),
+            item("kdnet"),
+            item("控制面板"),
+            item("记事本"),
+        ];
+        let hits = search(&apps, "k", &[], TOP_N);
+        let names: Vec<_> = hits.iter().map(|h| h.item.name.as_str()).collect();
+        assert!(
+            names.contains(&"控制面板"),
+            "单字母 k 应召回控制面板: {names:?}"
+        );
+        assert!(
+            !names.contains(&"记事本"),
+            "记事本不应被 k 召回: {names:?}"
+        );
+        // 名称前缀优先于拼音首字母前缀
+        assert_eq!(hits[0].item.name, "Kite");
+    }
+
+    #[test]
+    fn system_tool_control_panel_via_single_letter() {
+        let apps = vec![item("Notepad")];
+        let entries = crate::app::builtin::materialize_system_entries(None);
+        let hits = search_with_system(&apps, &entries, "k", &[], TOP_N);
+        assert!(
+            hits.iter().any(|h| h.item.name == "控制面板"),
+            "系统入口控制面板应被 k 召回: {:?}",
+            hits.iter().map(|h| &h.item.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn exp_finds_file_explorer_via_word_and_name() {
         let apps = vec![item("File Explorer"), item("IEXPLORE")];
         let hits = search(&apps, "exp", &[], TOP_N);
@@ -473,6 +540,181 @@ mod tests {
             hits.iter().any(|h| h.item.name == "File Explorer"),
             "exp 应命中 File Explorer（explorer 词前缀）: {:?}",
             hits.iter().map(|h| &h.item.name).collect::<Vec<_>>()
+        );
+    }
+
+    // ── 索引多路召回：中段片段 / 跳字 / 混合拼音 / 系统入口同层 ──
+
+    #[test]
+    fn mid_string_continuous_fragment() {
+        // 名称中间连续片段：ownloa ⊂ Download
+        let apps = vec![
+            item("Neat Download Manager"),
+            item("Downhill Bike"),
+            item("Notepad"),
+        ];
+        let hits = search(&apps, "ownloa", &[], TOP_N);
+        assert!(
+            hits.iter().any(|h| h.item.name == "Neat Download Manager"),
+            "中段片段应召回: {:?}",
+            hits.iter().map(|h| &h.item.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn ordered_skip_recalls_omitted_chars() {
+        // 有序跳字：googchrome（≥4 字）跳过 google 中的 l/e 与空格
+        let apps = vec![
+            item("Google Chrome"),
+            item("Firefox"),
+            item("Steam"),
+        ];
+        let hits = search(&apps, "googchrome", &[], TOP_N);
+        assert!(
+            hits.iter().any(|h| h.item.name == "Google Chrome"),
+            "跳字应召回: {:?}",
+            hits.iter().map(|h| &h.item.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn mixed_pinyin_full_and_initial() {
+        // wxin：简拼 w + 全拼 xin
+        let apps = vec![item("微信"), item("微博"), item("记事本")];
+        let hits = search(&apps, "wxin", &[], TOP_N);
+        assert!(
+            hits.iter().any(|h| h.item.name == "微信"),
+            "混合拼音应召回微信: {:?}",
+            hits.iter().map(|h| &h.item.name).collect::<Vec<_>>()
+        );
+        let hits = search(&apps, "weixin", &[], TOP_N);
+        assert_eq!(hits[0].item.name, "微信");
+    }
+
+    #[test]
+    fn non_adjacent_words_in_order() {
+        // 不相邻词按序：visual … code
+        let apps = vec![
+            item("Visual Studio Code"),
+            item("Visual Studio"),
+            item("Code Blocks"),
+        ];
+        let hits = search(&apps, "visual code", &[], TOP_N);
+        assert!(
+            hits.iter().any(|h| h.item.name == "Visual Studio Code"),
+            "不相邻词应召回: {:?}",
+            hits.iter().map(|h| &h.item.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn system_entries_share_scoring_with_apps() {
+        let apps = vec![item("Notepad")];
+        let mut sys = item("显示");
+        sys.id = "winsettings:ms-settings:display".into();
+        sys.source = "win-settings".into();
+        sys.target = "ms-settings:display".into();
+        sys.search_keywords = vec!["display".into(), "xianshi".into()];
+        sys.attach_search_fields();
+
+        let hits = search_with_system(&apps, &[sys], "显示", &[], TOP_N);
+        assert!(
+            hits.iter().any(|h| h.item.id == "winsettings:ms-settings:display"),
+            "系统入口应与应用统一召回: {:?}",
+            hits.iter().map(|h| &h.item.name).collect::<Vec<_>>()
+        );
+        // 无关 Query 不应把系统入口抬到前面
+        let hits = search_with_system(&apps, &[item("显示")], "notepad", &[], TOP_N);
+        assert_eq!(hits[0].item.name, "Notepad");
+    }
+
+    #[test]
+    fn index_matches_reference_on_fixed_queries() {
+        // 预过滤允许假阳性，但最终 Top1 应与无剪枝参考一致
+        let apps = vec![
+            item("Google Chrome"),
+            item("Chrome Remote Desktop"),
+            item("Visual Studio Code"),
+            item("Visual Studio"),
+            item("微信"),
+            item("Neat Download Manager"),
+            item("Microsoft To Do"),
+            item("XTerminal"),
+        ];
+        let queries = [
+            "chrome",
+            "vis",
+            "vsc",
+            "微信",
+            "weixin",
+            "ndm",
+            "todo",
+            "ter",
+            "ownloa",
+            "chorme",
+        ];
+        let index = RetrievalIndex::build(&apps, &[]);
+        for q in queries {
+            let indexed = search_with_index(&index, q, &[], TOP_N);
+            let reference = retrieval::reference_search(
+                &index.docs,
+                &retrieval::query::parse(q),
+                &[],
+                TOP_N,
+            );
+            let indexed_top = indexed.first().map(|h| h.item.name.as_str());
+            let ref_top = reference.first().map(|h| h.item.name.as_str());
+            assert_eq!(
+                indexed_top, ref_top,
+                "query={q} indexed vs reference top mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn short_query_does_not_flood_fuzzy() {
+        let apps: Vec<_> = (0..40)
+            .map(|i| item(&format!("Sample Application {i:02}")))
+            .collect();
+        let hits = search(&apps, "sa", &[], TOP_N);
+        // 短 Query 仍可命中前缀，但不应把大量无关项挤满且全部靠 fuzzy
+        assert!(hits.len() <= TOP_N);
+        assert!(
+            hits.iter().all(|h| h.matched_by != "fuzzy"),
+            "两字符 Query 不应触发 fuzzy: {:?}",
+            hits.iter().map(|h| &h.matched_by).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn snapshot_update_reindexes_new_app() {
+        let apps = vec![item("Alpha")];
+        let hits = search(&apps, "beta", &[], TOP_N);
+        assert!(hits.iter().all(|h| h.item.name != "Beta"));
+
+        let apps = vec![item("Alpha"), item("Beta")];
+        let hits = search(&apps, "beta", &[], TOP_N);
+        assert_eq!(hits[0].item.name, "Beta");
+    }
+
+    #[test]
+    fn builtin_materialize_has_keywords_and_kite_settings() {
+        let entries = crate::app::builtin::materialize_system_entries(None);
+        assert!(
+            entries.iter().any(|e| e.id == "kite:settings"),
+            "应包含 Kite 设置"
+        );
+        let display = entries
+            .iter()
+            .find(|e| e.id.starts_with("winsettings:ms-settings:display"));
+        assert!(display.is_some(), "应包含显示设置页");
+        assert!(
+            display
+                .unwrap()
+                .search_keywords
+                .iter()
+                .any(|k| k == "display" || k == "xianshi"),
+            "关键词应入条目"
         );
     }
 }

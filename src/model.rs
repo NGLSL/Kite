@@ -30,6 +30,9 @@ pub struct AppItem {
     /// 索引时预计算：拼音首字母，如 wxkfzgj。
     #[serde(skip)]
     pub pinyin_initials: String,
+    /// 系统入口等附加搜索关键词（小写），随快照入索引。
+    #[serde(skip)]
+    pub search_keywords: Vec<String>,
 }
 
 impl AppItem {
@@ -56,6 +59,7 @@ impl AppItem {
             normalized_display: String::new(),
             pinyin: String::new(),
             pinyin_initials: String::new(),
+            search_keywords: Vec::new(),
         }
     }
 
@@ -82,10 +86,25 @@ pub struct SearchResult {
 #[derive(Debug, Default)]
 pub struct AppIndex {
     pub apps: Vec<AppItem>,
+    /// 快照同代的系统入口（Kite 设置 / Windows 设置页 / 系统工具）。
+    pub system_entries: Vec<AppItem>,
+    /// 与 apps + system_entries 同代的只读检索索引。
+    pub retrieval: Option<std::sync::Arc<crate::search::RetrievalIndex>>,
 }
 
 impl AppIndex {
     pub fn empty() -> Self {
-        Self { apps: Vec::new() }
+        Self {
+            apps: Vec::new(),
+            system_entries: Vec::new(),
+            retrieval: None,
+        }
+    }
+
+    /// 用当前 apps + system_entries 重建检索索引并发布。
+    pub fn rebuild_retrieval(&mut self) {
+        let index =
+            crate::search::RetrievalIndex::build(&self.apps, &self.system_entries);
+        self.retrieval = Some(std::sync::Arc::new(index));
     }
 }

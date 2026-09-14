@@ -202,6 +202,107 @@ pub fn collect_builtin_hits(query_norm: &str, icon_dir: &Path) -> Vec<SearchResu
     hits
 }
 
+/// 物化全部系统入口为可搜索 AppItem（快照构建时调用一次）。
+/// 不在此同步提取/校验图标——`icon_dir` 提供时仅写入 kite 图标与 settings 源路径。
+/// 文件型系统工具仅在目标存在时纳入。
+pub fn materialize_system_entries(icon_dir: Option<&Path>) -> Vec<AppItem> {
+    let mut out = Vec::new();
+
+    // Kite 设置
+    let mut kite = AppItem::scanned(
+        "kite:settings".into(),
+        "Kite 设置".into(),
+        "kite:settings".into(),
+        None,
+        None,
+        "builtin",
+    );
+    kite.search_keywords = vec![
+        "setting".into(),
+        "settings".into(),
+        "shezhi".into(),
+        "sz".into(),
+        "kite".into(),
+    ];
+    kite.attach_search_fields();
+    if let Some(dir) = icon_dir {
+        fill_kite_icon(&mut kite, dir);
+    }
+    out.push(kite);
+
+    // Windows 设置页
+    let settings_exe = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())
+        + r"\ImmersiveControlPanel\SystemSettings.exe";
+    for page in WIN_PAGES {
+        let mut item = AppItem::scanned(
+            format!("winsettings:{}", page.uri),
+            format!("Windows · {}", page.name),
+            page.uri.into(),
+            None,
+            None,
+            "win-settings",
+        );
+        item.icon_src = Some(settings_exe.clone());
+        item.search_keywords = page.keywords.iter().map(|k| k.to_lowercase()).collect();
+        item.attach_search_fields();
+        out.push(item);
+    }
+
+    // 系统工具（文件目标须存在）
+    let system_root = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+    for tool in SYSTEM_TOOLS {
+        let target = match tool.target {
+            SystemToolTarget::Shell(uri) => uri.to_string(),
+            SystemToolTarget::SystemFile(relative) => {
+                let path = system_root.join(relative);
+                if !path.is_file() {
+                    continue;
+                }
+                path.to_string_lossy().to_string()
+            }
+        };
+        let mut item = AppItem::scanned(
+            format!("system-tool:{}", tool.id),
+            tool.name.into(),
+            target.clone(),
+            tool.args.map(str::to_string),
+            std::path::Path::new(&target)
+                .parent()
+                .filter(|p| p.is_dir())
+                .map(|p| p.to_string_lossy().to_string()),
+            "builtin-system",
+        );
+        item.search_keywords = tool.keywords.iter().map(|k| k.to_lowercase()).collect();
+        item.attach_search_fields();
+        item.icon_src = Some(target);
+        out.push(item);
+    }
+
+    if let Some(dir) = icon_dir {
+        fill_entry_icons(&mut out, dir);
+    }
+
+    out
+}
+
+/// 展示阶段补齐系统入口图标（不在按键匹配路径调用）。
+pub fn fill_entry_icons(entries: &mut [AppItem], icon_dir: &Path) {
+    for item in entries.iter_mut() {
+        if item.icon.is_some() {
+            continue;
+        }
+        if item.id == "kite:settings" {
+            fill_kite_icon(item, icon_dir);
+            continue;
+        }
+        if let Some(src) = item.icon_src.clone() {
+            item.icon = icons::cache_icon(icon_dir, &item.id, Some(&src), None);
+        }
+    }
+}
+
 fn fill_kite_icon(item: &mut AppItem, icon_dir: &Path) {
     let _ = std::fs::create_dir_all(icon_dir);
     let out = icon_dir.join("builtin-kite-settings.png");

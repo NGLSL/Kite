@@ -33,6 +33,40 @@ pub fn precompute(text: &str) -> (String, String) {
     (full, initials)
 }
 
+/// 音节级拆分：每个汉字一个音节，拉丁/数字按连续段成一音节。
+/// 供混合全拼/简拼匹配（wxin / weixin / weix）。
+pub fn syllables(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            if !buf.is_empty() {
+                out.push(std::mem::take(&mut buf));
+            }
+            continue;
+        }
+        let mut converted = false;
+        for py in ch.to_string().as_str().to_pinyin() {
+            if let Some(py) = py {
+                if !buf.is_empty() {
+                    out.push(std::mem::take(&mut buf));
+                }
+                out.push(py.plain().to_string());
+                converted = true;
+                break;
+            }
+        }
+        if !converted {
+            let lower = ch.to_lowercase().next().unwrap_or(ch);
+            buf.push(lower);
+        }
+    }
+    if !buf.is_empty() {
+        out.push(buf);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

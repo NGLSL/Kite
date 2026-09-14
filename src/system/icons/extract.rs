@@ -12,6 +12,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
 };
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::Shell::{
     ExtractIconExW, SHGetFileInfoW, SHGetStockIconInfo, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON,
     SHGFI_USEFILEATTRIBUTES, SHGSI_ICON,
@@ -74,8 +75,10 @@ pub fn is_virtual_shell_path(path: &Path) -> bool {
 }
 
 /// shell 提取链：SHGetFileInfo 大图标 → ExtractIconEx 主图标 → 小图标。
+/// 后台扫描线程可能未初始化 COM，Shell API 会失败（控制面板等虚拟命名空间尤甚）。
 pub fn extract_shell_icon(path: &Path) -> Option<Vec<u8>> {
     unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         if is_virtual_shell_path(path) {
             // Prefer resolving the live Shell namespace object so Control Panel
             // and friends show the real system icon, not a generic stock glyph.

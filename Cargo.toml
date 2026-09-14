@@ -30,6 +30,10 @@ iced = { version = "0.14", default-features = false, features = ["tiny-skia", "c
 fontdb = "0.23"
 tray-icon = { version = "0.25", default-features = false }
 notify = { version = "7", default-features = false }
+fst = "0.4"
+ib-pinyin = "0.3"
+nucleo-matcher = "0.3"
+fixedbitset = "0.5"
 
 [profile.release]
 codegen-units = 1

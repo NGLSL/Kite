@@ -33,26 +33,34 @@ use std::path::Path;
 const RAW_APP_PATH_DISCOUNT: i32 = SCORE_NAME_EXACT - SCORE_PREFIX + 1;
 
 pub fn prefer_friendly_install_entries(hits: &mut [SearchResult]) {
-    let friendly_dirs: HashSet<String> = hits
-        .iter()
-        .filter(|h| matches!(h.item.source.as_str(), "start-menu" | "desktop"))
-        .filter_map(|h| Path::new(&h.item.target).parent())
+    let dirs = friendly_dirs_from(hits.iter().map(|h| (h.item.source.as_str(), &h.item.target)));
+    for hit in hits.iter_mut().filter(|h| h.item.source == "app-paths") {
+        if hit_under_friendly_dir(&hit.item.target, &dirs) {
+            hit.score -= RAW_APP_PATH_DISCOUNT;
+        }
+    }
+}
+
+fn friendly_dirs_from<'a>(
+    items: impl Iterator<Item = (&'a str, &'a String)>,
+) -> HashSet<String> {
+    items
+        .filter(|(source, _)| matches!(*source, "start-menu" | "desktop"))
+        .filter_map(|(_, target)| Path::new(target).parent())
         // 不将 Program Files 等公共父目录误判为同一款应用。
         .filter(|dir| dir.components().count() >= 4)
         .map(|dir| {
             let normalized = normalize_windows_path(&dir.to_string_lossy());
             format!("{}\\", normalized.trim_end_matches('\\'))
         })
-        .collect();
-    for hit in hits.iter_mut().filter(|h| h.item.source == "app-paths") {
-        let target = normalize_windows_path(&hit.item.target);
-        if target
-            .match_indices('\\')
-            .any(|(end, _)| friendly_dirs.contains(&target[..=end]))
-        {
-            hit.score -= RAW_APP_PATH_DISCOUNT;
-        }
-    }
+        .collect()
+}
+
+fn hit_under_friendly_dir(target: &str, dirs: &HashSet<String>) -> bool {
+    let target = normalize_windows_path(target);
+    target
+        .match_indices('\\')
+        .any(|(end, _)| dirs.contains(&target[..=end]))
 }
 
 pub fn rank_and_truncate(hits: Vec<SearchResult>, top_n: usize) -> Vec<SearchResult> {

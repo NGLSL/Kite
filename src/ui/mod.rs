@@ -9,6 +9,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use iced::keyboard::{key::Named, Key, Modifiers};
+use iced::keyboard::key::{Code, Physical};
 use iced::widget::operation::scroll_to;
 use iced::widget::scrollable::AbsoluteOffset;
 use iced::widget::Id as WidgetId;
@@ -171,7 +172,10 @@ fn boot_entry() -> (State, Task<Message>) {
 enum Message {
     /// 全局快捷键触发；携带接收线程的单调时间戳（埋点起点）。
     Hotkey(Instant),
-    KeyPressed(Key, Modifiers),
+    /// 按键：逻辑键 + 物理键 + 修饰键（Alt+N 在 Windows 上逻辑键常被改写，需物理键兜底）。
+    KeyPressed(Key, Physical, Modifiers),
+    /// 按键抬起（跟踪 Alt 状态，避免依赖 modifiers.alt() 在 SYSKEY 下的不可靠性）。
+    KeyReleased(Key, Modifiers),
     /// IME 组合态变化（true = 候选期间）。
     Composing(bool),
     /// IME 提交了文本（埋点用，插入由 text_input 自行处理）。
@@ -267,6 +271,10 @@ struct State {
     selected: usize,
     hidden: bool,
     ime_composing: bool,
+    /// 本地跟踪的 Alt 按下态（Windows SYSKEY 下 modifiers.alt() 可能不可靠）。
+    alt_down: bool,
+    /// 按下 Alt 时的 Query；用于丢弃 Alt+数字被 text_input 误插入的字符。
+    query_at_alt: Option<String>,
     index_ready: bool,
     files_mode: bool,
     /// 右键菜单：(结果下标, x, y)。
@@ -445,6 +453,8 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         selected: 0,
         hidden: true,
         ime_composing: false,
+        alt_down: false,
+        query_at_alt: None,
         index_ready: false,
         files_mode: false,
         menu: None,
@@ -533,10 +543,19 @@ fn keyboard_message_app(event: iced::event::Event) -> Option<Message> {
 
 fn keyboard_message(event: iced::event::Event, recording: bool) -> Option<Message> {
     match event {
-        iced::event::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
-            if recording || app_key(&key, modifiers) =>
+        iced::event::Event::Keyboard(keyboard::Event::KeyPressed {
+            key,
+            physical_key,
+            modifiers,
+            ..
+        }) if recording || app_key(&key, physical_key, modifiers) =>
         {
-            Some(Message::KeyPressed(key, modifiers))
+            Some(Message::KeyPressed(key, physical_key, modifiers))
+        }
+        iced::event::Event::Keyboard(keyboard::Event::KeyReleased { key, modifiers, .. })
+            if recording || matches!(key, Key::Named(Named::Alt)) =>
+        {
+            Some(Message::KeyReleased(key, modifiers))
         }
         iced::event::Event::InputMethod(im) => match im {
             iced_core::input_method::Event::Opened => Some(Message::Composing(true)),
@@ -555,15 +574,120 @@ fn keyboard_message(event: iced::event::Event, recording: bool) -> Option<Messag
     }
 }
 
-fn app_key(key: &Key, mods: Modifiers) -> bool {
+fn app_key(key: &Key, physical: Physical, mods: Modifiers) -> bool {
     match key {
         Key::Named(
-            Named::Escape | Named::ArrowUp | Named::ArrowDown | Named::Enter,
+            Named::Escape | Named::ArrowUp | Named::ArrowDown | Named::Enter | Named::Alt,
         ) => true,
         Key::Character(c) => {
-            mods.alt() && c.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+            // 字符路径：带 Alt 的数字，或任意字符（后续再判，避免 SYSKEY 下 modifiers 丢 Alt）
+            let _ = c;
+            true
         }
-        _ => false,
+        _ => {
+            // 物理数字键（含小键盘）：无 Alt 也放行，由 on_key 用本地 alt_down / modifiers 判定
+            physical_digit_code(physical).is_some() || mods.alt()
+        }
+    }
+}
+
+fn physical_digit_code(physical: Physical) -> Option<u32> {
+    let code = match physical {
+        Physical::Code(code) => code,
+        Physical::Unidentified(_) => return None,
+    };
+    match code {
+        Code::Digit1 | Code::Numpad1 => Some(1),
+        Code::Digit2 | Code::Numpad2 => Some(2),
+        Code::Digit3 | Code::Numpad3 => Some(3),
+        Code::Digit4 | Code::Numpad4 => Some(4),
+        Code::Digit5 | Code::Numpad5 => Some(5),
+        Code::Digit6 | Code::Numpad6 => Some(6),
+        Code::Digit7 | Code::Numpad7 => Some(7),
+        Code::Digit8 | Code::Numpad8 => Some(8),
+        Code::Digit9 | Code::Numpad9 => Some(9),
+        _ => None,
+    }
+}
+
+/// Alt+1..9 → 结果下标。
+/// 兼容：iced modifiers.alt()、本地跟踪的 Alt 按下态、逻辑字符、物理 Digit/Numpad。
+fn alt_digit_index(
+    key: &Key,
+    physical: Physical,
+    mods: Modifiers,
+    alt_down: bool,
+) -> Option<usize> {
+    if !mods.alt() && !alt_down {
+        return None;
+    }
+    let from_char = |c: &str| {
+        c.chars()
+            .next()
+            .and_then(|ch| ch.to_digit(10))
+            .filter(|d| *d >= 1)
+            .map(|d| (d - 1) as usize)
+    };
+    if let Key::Character(c) = key {
+        if let Some(i) = from_char(c) {
+            return Some(i);
+        }
+    }
+    physical_digit_code(physical).map(|d| (d - 1) as usize)
+}
+
+#[cfg(test)]
+mod alt_digit_tests {
+    use super::*;
+    use iced::keyboard::Modifiers;
+
+    #[test]
+    fn physical_digit_with_alt_maps_to_index() {
+        let mods = Modifiers::ALT;
+        let key = Key::Unidentified;
+        assert_eq!(
+            alt_digit_index(&key, Physical::Code(Code::Digit1), mods, false),
+            Some(0)
+        );
+        assert_eq!(
+            alt_digit_index(&key, Physical::Code(Code::Numpad9), mods, false),
+            Some(8)
+        );
+        assert_eq!(
+            alt_digit_index(&key, Physical::Code(Code::Digit0), mods, false),
+            None
+        );
+    }
+
+    #[test]
+    fn character_digit_still_works() {
+        let mods = Modifiers::ALT;
+        let key: Key = Key::Character("3".into());
+        assert_eq!(
+            alt_digit_index(&key, Physical::Code(Code::KeyC), mods, false),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn local_alt_down_without_modifiers_flag() {
+        // SYSKEY：modifiers 可能没有 ALT，但本地跟踪到 Alt 按下
+        let mods = Modifiers::empty();
+        let key = Key::Unidentified;
+        assert_eq!(
+            alt_digit_index(&key, Physical::Code(Code::Digit2), mods, true),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn without_alt_is_none() {
+        let mods = Modifiers::empty();
+        let key: Key = Key::Character("1".into());
+        assert_eq!(
+            alt_digit_index(&key, Physical::Code(Code::Digit1), mods, false),
+            None
+        );
     }
 }
 
@@ -599,7 +723,25 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 }
             }
         }
-        Message::KeyPressed(key, mods) => on_key(state, key, mods),
+        Message::KeyPressed(key, physical, mods) => {
+            // 本地跟踪 Alt（SYSKEY 下 modifiers.alt() 可能为假）
+            if matches!(key, Key::Named(Named::Alt)) {
+                state.alt_down = true;
+                if state.query_at_alt.is_none() {
+                    state.query_at_alt = Some(state.query.clone());
+                }
+                plog("alt down");
+            }
+            on_key(state, key, physical, mods)
+        }
+        Message::KeyReleased(key, _mods) => {
+            if matches!(key, Key::Named(Named::Alt)) {
+                state.alt_down = false;
+                state.query_at_alt = None;
+                plog("alt up");
+            }
+            Task::none()
+        }
         Message::Composing(active) => {
             if state.ime_composing != active {
                 plog(&format!("ime composing={active}"));
@@ -634,6 +776,14 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             }
         }
         Message::QueryChanged(q) => {
+            // Alt+数字时 text_input 可能把 "1" 插进 Query；按住 Alt 期间忽略纯数字插入
+            if state.alt_down
+                && q.chars().all(|c| c.is_ascii_digit())
+                && (q.len() <= 1 || state.query_at_alt.as_deref() == Some(q.as_str()))
+            {
+                plog(&format!("ignore alt-digit query insert '{q}'"));
+                return Task::none();
+            }
             state.query = q;
             state.refresh_results();
             sync_scroll(state)
@@ -988,10 +1138,37 @@ fn menu_action(state: &mut State, i: usize, action: MenuAction) -> Task<Message>
 
 /// 键盘：↑↓ 选择、Enter 启动（组合态禁止，见 ime_composing）、Esc 关菜单/隐藏、
 /// Alt+1..9 启动对应行（对齐前端 index<9 提示）；热键录制态优先捕获。
-fn on_key(state: &mut State, key: Key, mods: Modifiers) -> Task<Message> {
+fn on_key(state: &mut State, key: Key, physical: Physical, mods: Modifiers) -> Task<Message> {
     if state.hotkey_recording {
         return hotkey_record_key(state, key, mods);
     }
+
+    // Alt+1..9：兼容 modifiers.alt() / 本地 alt_down / 逻辑字符 / 物理 Digit|Numpad
+    let alt_idx = alt_digit_index(&key, physical, mods, state.alt_down);
+    if let Some(i) = alt_idx {
+        if !state.ime_composing && !state.results.is_empty() {
+            // 回滚 text_input 可能插入的数字
+            if let Some(q) = state.query_at_alt.clone() {
+                if state.query != q {
+                    state.query = q;
+                    state.refresh_results();
+                }
+            } else if state.query.chars().all(|c| c.is_ascii_digit())
+                && physical_digit_code(physical).is_some()
+            {
+                state.query.clear();
+                state.refresh_results();
+            }
+            plog(&format!(
+                "alt-n idx={i} alt_down={} mods_alt={} key={key:?} phys={physical:?}",
+                state.alt_down,
+                mods.alt()
+            ));
+            state.selected = i.min(state.results.len().saturating_sub(1));
+            return launch_selected(state);
+        }
+    }
+
     match key {
         Key::Named(Named::Escape) if !state.ime_composing => {
             // 前端行为：菜单开着时 Esc 只关菜单；设置页开着时 Esc 回搜索
@@ -1009,19 +1186,14 @@ fn on_key(state: &mut State, key: Key, mods: Modifiers) -> Task<Message> {
         Key::Named(Named::ArrowUp) => move_selection(state, -1),
         Key::Named(Named::ArrowDown) => move_selection(state, 1),
         Key::Named(Named::Enter) if !state.ime_composing => launch_selected(state),
+        Key::Named(Named::Alt) => Task::none(),
         Key::Named(name) => {
             plog(&format!("key named {name:?} ignored"));
             Task::none()
         }
         Key::Character(c) => {
-            if mods.alt() {
-                if let Some(digit) = c.chars().next().and_then(|ch| ch.to_digit(10)) {
-                    if digit >= 1 && !state.ime_composing {
-                        return Task::done(Message::LaunchIndex((digit - 1) as usize));
-                    }
-                }
-            }
-            plog(&format!("key char '{c}'"));
+            // 普通输入交给 text_input；这里只记日志（避免与 QueryChanged 双处理）
+            let _ = c;
             Task::none()
         }
         _ => Task::none(),
@@ -1262,7 +1434,6 @@ impl State {
     fn refresh_results(&mut self) {
         let t0 = Instant::now();
         let q_norm = search::normalize_for_index(&self.query);
-        let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(db) = &self.history {
             self.pinned = db.pinned_ids().into_iter().collect();
         }
@@ -1277,6 +1448,7 @@ impl State {
                     )
                 })
                 .unwrap_or_default();
+            let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
             search::order_by_recent(&index.apps, &recent, &pinned, search::MAX_RESULTS)
         } else {
             let user_targets: Vec<search::UserTarget> = self
@@ -1292,13 +1464,33 @@ impl State {
                         .collect()
                 })
                 .unwrap_or_default();
-            let mut hits =
-                search::search(&index.apps, &self.query, &user_targets, search::MAX_RESULTS);
-
-            // 内置：Kite 设置 + Windows 系统设置页（css 对齐前端顺序：内置在前）
-            let mut builtins = app::builtin::collect_builtin_hits(&q_norm, &self.icon_dir);
-            builtins.append(&mut hits);
-            hits = builtins;
+            // 克隆同代索引 Arc 后立即释放锁，匹配/IPC 不持全局锁
+            let retrieval = {
+                let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
+                index.retrieval.clone()
+            };
+            // 应用 + 系统入口统一多路召回（快照同代索引，不按来源截断前排）
+            // 系统入口图标已在快照准备阶段写入，按键路径不再提取/校验
+            let mut hits = if let Some(ret) = retrieval {
+                search::search_with_index(
+                    &ret,
+                    &self.query,
+                    &user_targets,
+                    search::MAX_RESULTS,
+                )
+            } else {
+                let (apps, system_entries) = {
+                    let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
+                    (index.apps.clone(), index.system_entries.clone())
+                };
+                search::search_with_system(
+                    &apps,
+                    &system_entries,
+                    &self.query,
+                    &user_targets,
+                    search::MAX_RESULTS,
+                )
+            };
 
             // 链接识别：网址 → 列已装浏览器直达（偏好优先）
             let preferred = self.history.as_ref().and_then(|h| h.preferred_browser());
