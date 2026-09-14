@@ -122,7 +122,7 @@ fn search_hit(
         "websearch",
     );
     item.icon_src = Some(b.exe.to_string_lossy().to_string());
-    item.icon = crate::system::icons::cache_icon(icon_dir, &item.id, item.icon_src.as_deref());
+    item.icon = cached_browser_icon(b, icon_dir);
     SearchResult {
         item,
         score,
@@ -244,12 +244,18 @@ fn browser_hit(b: &Browser, url: &str, score: i32, icon_dir: &std::path::Path) -
         "browser",
     );
     item.icon_src = Some(b.exe.to_string_lossy().to_string());
-    item.icon = crate::system::icons::cache_icon(icon_dir, &item.id, item.icon_src.as_deref());
+    item.icon = cached_browser_icon(b, icon_dir);
     SearchResult {
         item,
         score,
         matched_by: "url".into(),
     }
+}
+
+fn cached_browser_icon(b: &Browser, icon_dir: &std::path::Path) -> Option<String> {
+    let source = b.exe.to_string_lossy();
+    let key = format!("browser-icon:{}:{}", b.id, source.to_lowercase());
+    crate::system::icons::cache_icon(icon_dir, &key, Some(&source))
 }
 
 fn default_hit(url: &str) -> SearchResult {
@@ -272,6 +278,26 @@ fn default_hit(url: &str) -> SearchResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_icon_is_reused_across_queries_and_urls() {
+        let dir = std::env::temp_dir().join(format!("kite-web-icons-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let browser = Browser {
+            id: "test-browser".into(),
+            name: "Test Browser".into(),
+            exe: std::env::current_exe().unwrap(),
+        };
+
+        let first = search_hit(&browser, "first", 920, &dir, None);
+        let second = search_hit(&browser, "second", 920, &dir, None);
+        let url = browser_hit(&browser, "https://example.com", 980, &dir);
+        assert!(first.item.icon.is_some());
+        assert_eq!(first.item.icon, second.item.icon);
+        assert_eq!(first.item.icon, url.item.icon);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn id_roundtrip() {

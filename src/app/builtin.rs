@@ -297,10 +297,8 @@ fn system_tool_hits(query_norm: &str, icon_dir: &Path) -> Vec<SearchResult> {
             "builtin-system",
         );
         item.attach_search_fields();
-        if matches!(tool.target, SystemToolTarget::SystemFile(_)) {
-            item.icon_src = Some(target);
-            item.icon = icons::cache_icon(icon_dir, &item.id, item.icon_src.as_deref());
-        }
+        item.icon_src = Some(target);
+        item.icon = icons::cache_icon(icon_dir, &item.id, item.icon_src.as_deref());
         hits.push(SearchResult {
             item,
             score,
@@ -311,12 +309,26 @@ fn system_tool_hits(query_norm: &str, icon_dir: &Path) -> Vec<SearchResult> {
     hits
 }
 
+/// 英文按单词前缀匹配，避免 `ter` 命中 Internet / printer 这类无关尾部。
+/// 中文仍允许片段匹配；完整名称包含在较长查询中时也继续召回。
+fn matches_name_or_keyword(text: &str, query: &str) -> bool {
+    if text == query || query.contains(text) {
+        return true;
+    }
+    if query.is_ascii() {
+        text.split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| !word.is_empty() && word.starts_with(query))
+    } else {
+        text.contains(query)
+    }
+}
+
 fn match_system_tool(query_norm: &str, tool: &SystemTool) -> Option<i32> {
     let name_norm = tool.name.to_lowercase();
     if name_norm == query_norm {
         return Some(900);
     }
-    if name_norm.contains(query_norm) || query_norm.contains(&name_norm) {
+    if matches_name_or_keyword(&name_norm, query_norm) {
         return Some(860);
     }
     let (full, initials) = pinyin_of(tool.name);
@@ -328,9 +340,7 @@ fn match_system_tool(query_norm: &str, tool: &SystemTool) -> Option<i32> {
     }
     if tool.keywords.iter().any(|keyword| {
         let keyword = keyword.to_lowercase();
-        keyword == query_norm
-            || keyword.contains(query_norm)
-            || query_norm.contains(keyword.as_str())
+        matches_name_or_keyword(&keyword, query_norm)
     }) {
         return Some(820);
     }
@@ -342,7 +352,7 @@ fn match_page(query_norm: &str, page: &WinPage) -> Option<i32> {
     if name_norm == query_norm {
         return Some(900);
     }
-    if name_norm.contains(query_norm) || query_norm.contains(&name_norm) {
+    if matches_name_or_keyword(&name_norm, query_norm) {
         return Some(860);
     }
     let (full, ini) = pinyin_of(page.name);
@@ -354,7 +364,7 @@ fn match_page(query_norm: &str, page: &WinPage) -> Option<i32> {
     }
     if page.keywords.iter().any(|k| {
         let k = k.to_lowercase();
-        k == query_norm || k.contains(query_norm) || query_norm.contains(k.as_str())
+        matches_name_or_keyword(&k, query_norm)
     }) {
         return Some(820);
     }
@@ -422,8 +432,10 @@ mod tests {
         let dir = tmp_dir();
         let recycle = collect_builtin_hits("回收站", &dir);
         assert!(
-            recycle.iter().any(|h| h.item.target == "shell:RecycleBinFolder"),
-            "回收站应作为可启动的系统工具返回"
+            recycle
+                .iter()
+                .any(|h| h.item.target == "shell:RecycleBinFolder" && h.item.icon.is_some()),
+            "回收站应作为带系统图标的可启动工具返回"
         );
 
         let control = collect_builtin_hits("control panel", &dir);
@@ -440,6 +452,25 @@ mod tests {
         assert!(
             hits.iter().any(|h| h.item.name == "注册表编辑器"),
             "注册表应返回注册表编辑器"
+        );
+    }
+
+    #[test]
+    fn english_word_suffix_does_not_crowd_out_app_results() {
+        let dir = tmp_dir();
+        assert!(
+            collect_builtin_hits("ter", &dir).is_empty(),
+            "ter 不应召回 Internet、printer、computer 等词尾"
+        );
+        assert!(
+            collect_builtin_hits("internet", &dir)
+                .iter()
+                .any(|h| h.item.name == "Windows · 网络和 Internet")
+        );
+        assert!(
+            collect_builtin_hits("print", &dir)
+                .iter()
+                .any(|h| h.item.name == "打印机")
         );
     }
 }

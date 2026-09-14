@@ -6,15 +6,17 @@ use std::path::Path;
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SelectObject,
+    CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC,
     BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
 };
 use windows::Win32::UI::Shell::{
-    ExtractIconExW, SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON,
-    SHGFI_USEFILEATTRIBUTES,
+    ExtractIconExW, SHGetFileInfoW, SHGetStockIconInfo, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON,
+    SHGFI_USEFILEATTRIBUTES, SHGSI_ICON,
+    SHGSI_LARGEICON, SHSTOCKICONID, SHSTOCKICONINFO, SIID_MYNETWORK, SIID_NETWORKCONNECT,
+    SIID_PRINTER, SIID_RECYCLER, SIID_SOFTWARE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyIcon, GetIconInfo, LoadImageW, HICON, IMAGE_ICON, LR_LOADFROMFILE,
@@ -43,9 +45,59 @@ pub fn classify(path: &Path) -> SourceKind {
     }
 }
 
+/// Shell namespace targets such as `shell:RecycleBinFolder` do not exist as
+/// filesystem paths but can still be resolved by SHGetFileInfoW.
+pub fn is_virtual_shell_path(path: &Path) -> bool {
+    path.to_string_lossy()
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("shell:")
+}
+
 /// shell 提取链：SHGetFileInfo 大图标 → ExtractIconEx 主图标 → 小图标。
 pub fn extract_shell_icon(path: &Path) -> Option<Vec<u8>> {
-    unsafe { extract_shell_icon_win32(path) }
+    unsafe {
+        if is_virtual_shell_path(path) {
+            // Built-in folders have a dedicated stock icon, which is more
+            // reliable than asking the Shell to resolve a namespace URI.
+            if let Some(png) = stock_icon_id(path).and_then(|id| extract_stock_icon(id)) {
+                return Some(png);
+            }
+            return extract_shell_icon_win32(path);
+        }
+        extract_shell_icon_win32(path)
+    }
+}
+
+/// Return a stable system icon for built-in Shell namespace targets that do
+/// not have a filesystem path. The stock icon API avoids showing Kite's
+/// first-character placeholder when SHGetFileInfo cannot resolve a virtual
+/// namespace path directly.
+fn stock_icon_id(path: &Path) -> Option<SHSTOCKICONID> {
+    let value = path.to_string_lossy().trim().to_ascii_lowercase();
+    match value.as_str() {
+        "shell:recyclebinfolder" => Some(SIID_RECYCLER),
+        "shell:controlpanelfolder" => Some(SIID_SOFTWARE),
+        "shell:connectionsfolder" => Some(SIID_NETWORKCONNECT),
+        "shell:printersfolder" => Some(SIID_PRINTER),
+        "shell:administrative tools" => Some(SIID_SOFTWARE),
+        "shell:mynetworkplaces" => Some(SIID_MYNETWORK),
+        _ => None,
+    }
+}
+
+unsafe fn extract_stock_icon(id: SHSTOCKICONID) -> Option<Vec<u8>> {
+    let mut info = SHSTOCKICONINFO {
+        cbSize: std::mem::size_of::<SHSTOCKICONINFO>() as u32,
+        ..Default::default()
+    };
+    SHGetStockIconInfo(id, SHGSI_ICON | SHGSI_LARGEICON, &mut info).ok()?;
+    if info.hIcon.is_invalid() {
+        return None;
+    }
+    let png = hicon_to_png(info.hIcon);
+    let _ = DestroyIcon(info.hIcon);
+    png
 }
 
 /// 带资源索引/ID 提取（lnk icon_location 的 `,N` / `,-ID` 后缀；负数是资源 ID）。
@@ -55,7 +107,8 @@ pub fn extract_shell_icon_indexed(path: &Path, index: Option<i32>) -> Option<Vec
         return extract_shell_icon(path);
     };
     unsafe {
-        let pcw = windows::core::PCWSTR(wide_path(path).as_ptr());
+        let wide = wide_path(path);
+        let pcw = windows::core::PCWSTR(wide.as_ptr());
         let mut large = [HICON::default(); 1];
         let n = ExtractIconExW(pcw, index, Some(large.as_mut_ptr()), None, 1);
         if n > 0 && !large[0].is_invalid() {
@@ -131,7 +184,8 @@ fn wide_path(path: &Path) -> Vec<u16> {
 }
 
 unsafe fn extract_shell_icon_win32(path: &Path) -> Option<Vec<u8>> {
-    let pcw = windows::core::PCWSTR(wide_path(path).as_ptr());
+    let wide = wide_path(path);
+    let pcw = windows::core::PCWSTR(wide.as_ptr());
 
     // 1) Shell 大图标（多数 exe/ico 可用）
     let mut shfi = std::mem::zeroed::<SHFILEINFOW>();
@@ -233,7 +287,6 @@ pub(crate) unsafe fn hicon_to_png(hicon: HICON) -> Option<Vec<u8>> {
     };
 
     let mut pixels = vec![0u8; (width * 4) as usize * height as usize];
-    let selected = SelectObject(mem_dc, HGDIOBJ(src_bmp.0));
     let got = GetDIBits(
         mem_dc,
         src_bmp,
@@ -243,7 +296,47 @@ pub(crate) unsafe fn hicon_to_png(hicon: HICON) -> Option<Vec<u8>> {
         &mut bmi,
         DIB_RGB_COLORS,
     );
-    let _ = SelectObject(mem_dc, selected);
+
+    // Some legacy/color HICONs expose a color bitmap whose alpha channel is
+    // entirely zero. Treating that as a valid image writes a transparent PNG
+    // (the visible icon then looks like a failed load). Rebuild the alpha
+    // channel from the AND mask before releasing the GDI bitmaps.
+    if got != 0
+        && !use_mask
+        && pixels.chunks_exact(4).all(|px| px[3] <= 8)
+        && !mask_bmp.is_invalid()
+    {
+        let mut mask_bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0 as u32,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut mask_pixels = vec![0u8; (width * 4) as usize * height as usize];
+        let got_mask = GetDIBits(
+            mem_dc,
+            mask_bmp,
+            0,
+            height as u32,
+            Some(mask_pixels.as_mut_ptr() as *mut _),
+            &mut mask_bmi,
+            DIB_RGB_COLORS,
+        );
+        if got_mask != 0 {
+            for (color, mask) in pixels.chunks_exact_mut(4).zip(mask_pixels.chunks_exact(4)) {
+                let mask_value = mask[0].max(mask[1]).max(mask[2]);
+                // AND-mask 0 means the color pixel is visible; 1 is transparent.
+                color[3] = if mask_value < 128 { 255 } else { 0 };
+            }
+        }
+    }
+
     let _ = DeleteDC(mem_dc);
     let _ = ReleaseDC(Some(HWND::default()), hdc_screen);
     let _ = DeleteObject(HGDIOBJ(color_bmp.0));
@@ -268,6 +361,21 @@ pub(crate) unsafe fn hicon_to_png(hicon: HICON) -> Option<Vec<u8>> {
         }
     }
 
+    // A malformed/legacy icon may have no usable alpha or mask. Keep useful
+    // RGB visible rather than caching an all-transparent PNG; all-zero data
+    // is just another extraction failure and should try the next source.
+    if pixels.chunks_exact(4).all(|px| px[3] <= 8) {
+        if pixels
+            .chunks_exact(4)
+            .all(|px| px[0] <= 8 && px[1] <= 8 && px[2] <= 8)
+        {
+            return None;
+        }
+        for px in pixels.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+    }
+
     let img = image::RgbaImage::from_raw(width as u32, height as u32, pixels)?;
     let img = super::crop_and_fill(&img);
     super::encode_png(&img)
@@ -286,5 +394,12 @@ mod tests {
         assert_eq!(classify(Path::new("C:\\a\\app.EXE")), SourceKind::Shell);
         assert_eq!(classify(Path::new("C:\\a\\shell32.dll")), SourceKind::Shell);
         assert_eq!(classify(Path::new("no-ext")), SourceKind::Shell);
+    }
+
+    #[test]
+    fn extracts_existing_executable_icon() {
+        let path = std::env::current_exe().expect("test executable path");
+        let png = extract_shell_icon(&path).expect("existing executable should have a shell icon");
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
     }
 }

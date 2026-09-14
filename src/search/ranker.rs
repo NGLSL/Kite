@@ -12,6 +12,35 @@ pub const SCORE_SUBSTRING: i32 = 550;
 pub const SCORE_FUZZY_MAX: i32 = 450;
 
 use crate::model::SearchResult;
+use std::collections::HashSet;
+use std::path::Path;
+
+// App Paths 只有 exe 文件名。若同一安装目录已有可搜索的开始菜单/桌面入口，
+// 让这个更易辨认的入口排在前面，但保留原始 exe 供用户直接启动。
+const RAW_APP_PATH_DISCOUNT: i32 = SCORE_NAME_EXACT - SCORE_PREFIX + 1;
+
+pub fn prefer_friendly_install_entries(hits: &mut [SearchResult]) {
+    let friendly_dirs: HashSet<String> = hits
+        .iter()
+        .filter(|h| matches!(h.item.source.as_str(), "start-menu" | "desktop"))
+        .filter_map(|h| Path::new(&h.item.target).parent())
+        // 不将 Program Files 等公共父目录误判为同一款应用。
+        .filter(|dir| dir.components().count() >= 4)
+        .map(|dir| {
+            let normalized = normalize_windows_path(&dir.to_string_lossy());
+            format!("{}\\", normalized.trim_end_matches('\\'))
+        })
+        .collect();
+    for hit in hits.iter_mut().filter(|h| h.item.source == "app-paths") {
+        let target = normalize_windows_path(&hit.item.target);
+        if target
+            .match_indices('\\')
+            .any(|(end, _)| friendly_dirs.contains(&target[..=end]))
+        {
+            hit.score -= RAW_APP_PATH_DISCOUNT;
+        }
+    }
+}
 
 pub fn rank_and_truncate(hits: Vec<SearchResult>, top_n: usize) -> Vec<SearchResult> {
     // 先生成小写键再排序：比较器里不做 to_lowercase，避免 O(n log n) 次分配
@@ -31,6 +60,10 @@ pub fn rank_and_truncate(hits: Vec<SearchResult>, top_n: usize) -> Vec<SearchRes
     });
     keyed.truncate(top_n);
     keyed.into_iter().map(|(_, _, _, h)| h).collect()
+}
+
+fn normalize_windows_path(path: &str) -> String {
+    path.replace('/', "\\").to_lowercase()
 }
 
 /// 编辑距离 → fuzzy 分数。

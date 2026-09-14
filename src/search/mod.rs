@@ -53,7 +53,8 @@ pub fn search(
             .collect();
     }
 
-    let hits = matcher::collect_candidates(apps, &q, user_alias_targets);
+    let mut hits = matcher::collect_candidates(apps, &q, user_alias_targets);
+    ranker::prefer_friendly_install_entries(&mut hits);
     ranker::rank_and_truncate(hits, max_results)
 }
 
@@ -165,6 +166,19 @@ mod tests {
             None,
             None,
             "test",
+        );
+        it.attach_search_fields();
+        it
+    }
+
+    fn sourced_item(name: &str, target: &str, source: &str) -> AppItem {
+        let mut it = AppItem::scanned(
+            format!("{source}:{target}"),
+            name.into(),
+            target.into(),
+            None,
+            None,
+            source,
         );
         it.attach_search_fields();
         it
@@ -283,6 +297,40 @@ mod tests {
         let prefix = crate::search::ranker::SCORE_PREFIX
             + crate::history::HISTORY_BOOST_MAX;
         assert!(exact > prefix);
+    }
+
+    #[test]
+    fn friendly_shortcut_ranks_above_raw_app_path_in_same_installation() {
+        let raw = sourced_item(
+            "wps",
+            r"D:\Program Files\WPS Office\12.1.0\office6\wps.exe",
+            "app-paths",
+        );
+        let shortcut = sourced_item(
+            "WPS Office",
+            r"D:\Program Files\WPS Office\ksolaunch.exe",
+            "start-menu",
+        );
+
+        let hits = search(&[raw, shortcut], "wps", &[], TOP_N);
+        assert_eq!(hits.len(), 2, "原始入口应继续可搜索");
+        assert_eq!(hits[0].item.name, "WPS Office");
+        assert_eq!(hits[1].item.name, "wps");
+        assert!(hits[0].score > hits[1].score);
+        assert_eq!(rerank(hits.clone(), TOP_N)[1].score, hits[1].score);
+    }
+
+    #[test]
+    fn source_preference_applies_to_other_apps_and_preserves_unrelated_exact_match() {
+        let raw = sourced_item("aurora", r"D:\Apps\Aurora\bin\aurora.exe", "app-paths");
+        let friendly = sourced_item("Aurora Studio", r"d:\apps\aurora\launcher.exe", "desktop");
+        let hits = search(&[raw.clone(), friendly], "aurora", &[], TOP_N);
+        assert_eq!(hits[0].item.name, "Aurora Studio");
+        assert_eq!(hits[1].item.name, "aurora");
+
+        let unrelated = sourced_item("Aurora Remote", r"D:\Apps\Remote\launcher.exe", "desktop");
+        let hits = search(&[raw, unrelated], "aurora", &[], TOP_N);
+        assert_eq!(hits[0].item.name, "aurora", "无同安装目录的友好入口时保留精确匹配");
     }
 
     #[test]

@@ -659,7 +659,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::Rescan => {
             plog("rescan requested from tray");
             let index = state.index.clone();
-            let dir = state.data_dir.clone();
+            let dir = state.icon_dir.clone();
             let tx = EVENT_TX.get().expect("event tx").clone();
             std::thread::spawn(move || backend::build_index(index, dir, tx));
             Task::none()
