@@ -80,6 +80,10 @@ Kite 的产品定位和工程实践参考了以下开源启动器项目：
 - [LaunchyQt](https://github.com/samsonwang/LaunchyQt)
 - [Flow Launcher](https://github.com/Flow-Launcher/Flow.Launcher)
 
+## 相关社区
+
+感谢 [LINUX DO](https://linux.do/) 社区对开源项目的支持。
+
 ## 许可证
 
 本项目使用 [Apache License 2.0](LICENSE) 发布。
