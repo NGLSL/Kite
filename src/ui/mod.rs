@@ -937,6 +937,21 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::FullIndexReady(n) => {
             plog(&format!("full index ready n={n}"));
             state.index_ready = true;
+            // 旧含 source 的 id 迁移到 stable id，保留 Pin/历史/Alias
+            if let Some(db) = &mut state.history {
+                let items: Vec<(String, String, Option<String>)> = {
+                    let g = state.index.lock().unwrap_or_else(|e| e.into_inner());
+                    g.apps
+                        .iter()
+                        .map(|a| (a.id.clone(), a.target.clone(), a.args.clone()))
+                        .collect()
+                };
+                let moved = db.migrate_legacy_ids_for_items(&items);
+                if moved > 0 {
+                    plog(&format!("identity remap moved={moved}"));
+                }
+                state.pinned = db.pinned_ids().into_iter().collect();
+            }
             state.refresh_results();
             Task::none()
         }

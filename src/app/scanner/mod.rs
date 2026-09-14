@@ -337,11 +337,7 @@ fn collect_from_dir(
             };
             if let Some((target, args, working_dir, icon_src)) = resolved {
                 let name = app_display_name(&file_name);
-                let id = hash_id(&[
-                    &normalize_path_key(&target),
-                    args.as_deref().unwrap_or(""),
-                    source,
-                ]);
+                let id = util::stable_item_id(&target, args.as_deref());
                 let item = AppItem::scanned(id, name, target, args, working_dir, source);
                 out.push((item, icon_src));
                 n += 1;
@@ -349,7 +345,7 @@ fn collect_from_dir(
         } else if ext == "exe" {
             let target = path.to_string_lossy().to_string();
             let name = app_display_name(&file_name);
-            let id = hash_id(&[&normalize_path_key(&target), source]);
+            let id = util::stable_item_id(&target, None);
             let working_dir = path.parent().map(|p| p.to_string_lossy().to_string());
             let icon_src = Some(target.clone());
             let item = AppItem::scanned(id, name, target, None, working_dir, source);

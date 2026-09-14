@@ -21,6 +21,37 @@ pub fn hash_id(parts: &[&str]) -> String {
     h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// 稳定启动身份 id：只依赖规范化 target + 原始 args，与展示来源无关。
+/// 同一程序在桌面/开始菜单/App Paths 间迁移时 Pin、历史、Alias 可继续命中。
+pub fn stable_item_id(target: &str, args: Option<&str>) -> String {
+    hash_id(&[
+        &normalize_path_key(target),
+        args.unwrap_or(""),
+    ])
+}
+
+/// 旧版 id（含 source）：用于一次性迁移历史到 stable id。
+pub fn legacy_item_id(target: &str, args: Option<&str>, source: &str) -> String {
+    hash_id(&[
+        &normalize_path_key(target),
+        args.unwrap_or(""),
+        source,
+    ])
+}
+
+/// 常见扫描 source 枚举，覆盖旧 id 可能取值。
+pub const KNOWN_SOURCES: &[&str] = &[
+    "start-menu",
+    "desktop",
+    "app-paths",
+    "scoop",
+    "uwp",
+    "builtin",
+    "builtin-system",
+    "win-settings",
+    "test",
+];
+
 pub fn normalize_path_key(path: &str) -> String {
     path.replace('/', "\\").to_lowercase()
 }

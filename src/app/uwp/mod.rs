@@ -24,7 +24,7 @@ use windows::Win32::UI::Shell::{
     SIGDN_NORMALDISPLAY,
 };
 
-use super::scanner::util::{hash_id, normalize_path_key};
+use super::scanner::util::stable_item_id;
 use crate::model::AppItem;
 
 type RawItem = (AppItem, Option<String>);
@@ -120,7 +120,7 @@ fn collect_apps_folder(source: &str, out: &mut Vec<RawItem>) {
         let icon_src = resolve_uwp_icon(&install, &logo);
 
         let target = format!("shell:AppsFolder\\{aumid}");
-        let id = hash_id(&[&normalize_path_key(&target), source]);
+        let id = stable_item_id(&target, None);
         let item = AppItem::scanned(id, name, target, None, None, source);
         out.push((item, icon_src));
     }
