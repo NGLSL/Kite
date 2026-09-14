@@ -14,14 +14,21 @@ use sha2::{Digest, Sha256};
 static VALIDATED_ICON_CACHE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 /// 将图标 PNG 缓存到 `icon_dir`，返回绝对路径。
-/// `icon_src` 为首选源（lnk 的 icon_location / UWP logo / exe 路径）；失败时再试 target。
-pub fn cache_icon(icon_dir: &Path, id: &str, icon_src: Option<&str>) -> Option<String> {
-    let candidates = collect_candidates(icon_src);
+/// `icon_src` 为首选源（lnk 的 icon_location 可为 `path,index`）；
+/// `target_fallback` 为启动 target，优先源失败或无效时再试。
+pub fn cache_icon(
+    icon_dir: &Path,
+    id: &str,
+    icon_src: Option<&str>,
+    target_fallback: Option<&str>,
+) -> Option<String> {
+    let candidates = collect_candidates(icon_src, target_fallback);
     if candidates.is_empty() {
         return None;
     }
     std::fs::create_dir_all(icon_dir).ok()?;
-    let out = icon_dir.join(format!("{}.png", hash_file_name(id)));
+    // Schema bump：策略修正后让旧版「内容有效但语义错误」的 PNG 自动重提。
+    let out = icon_dir.join(format!("{}.png", hash_file_name(&format!("v2:{id}"))));
     if out.exists() {
         if !source_newer_than_cache(&out, &candidates) && is_trusted_cached_icon(&out) {
             return Some(out.to_string_lossy().to_string());
@@ -153,14 +160,32 @@ fn remember_cached_icon(path: &Path) {
     }
 }
 
-/// 图标源候选：首选传入路径（lnk 的 icon_location 常带 `,N` 索引后缀，拆开处理）。
-fn collect_candidates(icon_src: Option<&str>) -> Vec<(PathBuf, Option<i32>)> {
+/// 图标源候选：首选 icon_location（`path,index`），再追加启动 target 回退。
+fn collect_candidates(icon_src: Option<&str>, target_fallback: Option<&str>) -> Vec<(PathBuf, Option<i32>)> {
     let mut list = Vec::new();
+    let push_unique = |raw: &str, list: &mut Vec<(PathBuf, Option<i32>)>| {
+        let s = raw.trim().trim_matches('"');
+        if s.is_empty() {
+            return;
+        }
+        let (path, index) = split_icon_index(s);
+        let expanded = expand_env_path(&path);
+        if list.iter().any(|(p, _)| p == &expanded) {
+            return;
+        }
+        list.push((expanded, index));
+    };
     if let Some(s) = icon_src {
-        let s = s.trim().trim_matches('"');
+        push_unique(s, &mut list);
+    }
+    if let Some(t) = target_fallback {
+        // 回退 target 不带资源序号
+        let s = t.trim().trim_matches('"');
         if !s.is_empty() {
-            let (path, index) = split_icon_index(s);
-            list.push((expand_env_path(&path), index));
+            let expanded = expand_env_path(s);
+            if !list.iter().any(|(p, _)| p == &expanded) {
+                list.push((expanded, None));
+            }
         }
     }
     list
@@ -279,6 +304,24 @@ mod tests {
     }
 
     #[test]
+    fn collect_candidates_prefer_icon_src_then_target() {
+        let c = collect_candidates(
+            Some(r"C:\app\ProductIcon,3"),
+            Some(r"C:\app\App.exe"),
+        );
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0].0.to_string_lossy(), r"C:\app\ProductIcon");
+        assert_eq!(c[0].1, Some(3));
+        assert_eq!(c[1].0.to_string_lossy(), r"C:\app\App.exe");
+        assert_eq!(c[1].1, None);
+
+        // 同路径不重复
+        let c = collect_candidates(Some(r"C:\app\app.exe,0"), Some(r"C:\app\app.exe"));
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].1, Some(0));
+    }
+
+    #[test]
     fn crop_keeps_content_centered() {
         // 8x8 全透明画布中心画 2x2 不透明块 → 裁边后居中放大到 64
         let mut img = RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 0]));
@@ -305,7 +348,7 @@ mod tests {
     fn cache_shell_namespace_icon() {
         let dir = std::env::temp_dir().join(format!("kite-shell-icon-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let cached = cache_icon(&dir, "shell:recycle-bin", Some("shell:RecycleBinFolder"));
+        let cached = cache_icon(&dir, "shell:recycle-bin", Some("shell:RecycleBinFolder"), None);
         assert!(cached.is_some(), "shell namespace icon should be extracted");
         let path = cached.unwrap();
         let bytes = std::fs::read(&path).expect("cached shell icon");
@@ -316,7 +359,7 @@ mod tests {
             ("printers", "shell:PrintersFolder"),
             ("admin", "shell:Administrative Tools"),
         ] {
-            let cached = cache_icon(&dir, id, Some(target)).expect("shell target icon");
+            let cached = cache_icon(&dir, id, Some(target), None).expect("shell target icon");
             let bytes = std::fs::read(cached).expect("cached shell target icon");
             let img = image::load_from_memory(&bytes)
                 .expect("shell target PNG")
@@ -336,12 +379,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let id = "transparent-cache";
-        let out = dir.join(format!("{}.png", hash_file_name(id)));
+        let out = dir.join(format!("{}.png", hash_file_name(&format!("v2:{id}"))));
         let blank = RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 0]));
         std::fs::write(&out, encode_png(&blank).unwrap()).unwrap();
 
         let source = std::env::current_exe().unwrap();
-        let cached = cache_icon(&dir, id, source.to_str());
+        let cached = cache_icon(&dir, id, source.to_str(), None);
         assert!(cached.is_some(), "invalid cached icon should be extracted again");
         let bytes = std::fs::read(cached.unwrap()).unwrap();
         let img = image::load_from_memory(&bytes).unwrap().to_rgba8();
@@ -357,7 +400,7 @@ mod tests {
         let source = dir.join("source.png");
         let red = RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]));
         std::fs::write(&source, encode_png(&red).unwrap()).unwrap();
-        let cached = cache_icon(&dir, "changing-source", source.to_str()).unwrap();
+        let cached = cache_icon(&dir, "changing-source", source.to_str(), None).unwrap();
 
         let blue = RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 255, 255]));
         std::fs::write(&source, encode_png(&blue).unwrap()).unwrap();
@@ -368,7 +411,7 @@ mod tests {
             .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
             .unwrap();
 
-        let refreshed = cache_icon(&dir, "changing-source", source.to_str()).unwrap();
+        let refreshed = cache_icon(&dir, "changing-source", source.to_str(), None).unwrap();
         let image = image::open(refreshed).unwrap().to_rgba8();
         assert_eq!(image.get_pixel(32, 32).0, [0, 0, 255, 255]);
         let _ = std::fs::remove_dir_all(&dir);

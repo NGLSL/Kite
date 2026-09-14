@@ -255,7 +255,7 @@ fn browser_hit(b: &Browser, url: &str, score: i32, icon_dir: &std::path::Path) -
 fn cached_browser_icon(b: &Browser, icon_dir: &std::path::Path) -> Option<String> {
     let source = b.exe.to_string_lossy();
     let key = format!("browser-icon:{}:{}", b.id, source.to_lowercase());
-    crate::system::icons::cache_icon(icon_dir, &key, Some(&source))
+    crate::system::icons::cache_icon(icon_dir, &key, Some(&source), None)
 }
 
 fn default_hit(url: &str) -> SearchResult {

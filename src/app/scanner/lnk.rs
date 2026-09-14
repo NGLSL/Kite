@@ -11,7 +11,8 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 
-/// 将 .lnk 解析为 (target, args, working_dir, icon_path)。
+/// 将 .lnk 解析为 (target, args, working_dir, icon_src)。
+/// `icon_src` 为 `path,index`（index 可为负资源 ID）；路径为空时退回 target。
 /// 单文件失败/panic 不拖垮整次扫描。
 pub fn resolve_lnk(path: &Path) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parse_lnk(path)));
@@ -56,12 +57,16 @@ fn parse_lnk(
         let _ = link.GetWorkingDirectory(&mut wd_buf);
         let working_dir = non_empty(wide_to_string(&wd_buf));
 
-        // 图标源优先 .lnk 的 icon_location；为空则退回 target
+        // 图标源优先 .lnk 的 icon_location；路径与序号一并下传（`path,index`）。
+        // 序号 0 也保留，避免后续解析再次丢失；空路径退回 target。
         let mut icon_buf = [0u16; 1024];
         let mut icon_idx = 0i32;
         let _ = link.GetIconLocation(&mut icon_buf, &mut icon_idx);
         let icon_raw = non_empty(wide_to_string(&icon_buf));
-        let icon = icon_raw.or_else(|| Some(target.clone()));
+        let icon = match icon_raw {
+            Some(raw) => Some(format!("{raw},{icon_idx}")),
+            None => Some(target.clone()),
+        };
 
         Some((target, args, working_dir, icon))
     }

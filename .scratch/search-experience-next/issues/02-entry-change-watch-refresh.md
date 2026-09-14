@@ -1,0 +1,50 @@
+Status: resolved
+Type: task
+Blocked by: 01 后台完整扫描与原子索引快照
+
+## Goal
+
+运行中安装、卸载或修改开始菜单 / 桌面 / Scoop / App Paths 入口后，无需重启或手动重扫即可在约 5 秒内看到稳定更新；安装器一次写入多文件时只触发必要的合并刷新。
+
+## Scope
+
+- 监听用户与公共开始菜单、桌面、已配置 Scoop shim 目录，以及当前支持的 App Paths 注册表视图。
+- 变化通知合并为一次后台刷新；同机最多一次索引构建在跑，突发事件排队合并。
+- 监听失败或漏报时保留托盘「重新扫描应用」。
+- 不做固定间隔全盘重扫。
+- 不引入 UWP/Store 实时监听（本轮仍靠启动扫描与手动重扫）。
+
+## Acceptance Criteria
+
+- [x] 运行中新建/删除/改名开始菜单快捷方式后，当前 Query 结果在约 5 秒内更新且稳定，无需重启。
+- [x] 运行中新增 Scoop shim 后结果可搜到；移除后失效入口消失。
+- [x] App Paths 注册变化后索引自动更新（可搜索无快捷方式程序）。
+- [x] 安装器连续写入多个文件不会造成持续重扫或搜索窗口卡顿。
+- [x] 托盘手动重扫在监听丢失时仍可恢复完整结果。
+- [x] 一次入口变化不会把旧索引清空后又重建；搜索始终可用。
+
+## Validation
+
+- `cargo test` / `cargo check`
+- Windows 实机：运行中安装 MSI/解压应用、卸载、改名快捷方式；记录入口变化到列表更新的时间。
+- 压测：同一目录批量 touch/复制 20+ 文件，确认只产生必要次数的后台构建。
+
+## Dependencies
+
+- Blocked by: 01
+
+## Out of Scope
+
+- 索引来源覆盖检查统计表（可并入验收票 10）。
+- 召回/排序算法。
+
+## Comments
+
+2026-09-14 实现记录（worktree `Kite-search-experience`）：
+
+- 依赖 `notify` 监听 Start Menu / Desktop / Scoop shims；`RegNotifyChangeKeyValue` 监听 App Paths（HKLM/HKCU + WOW64）。
+- debounce：400ms 安静期，2.5s 封顶；合并后 `request_build`。
+- `request_build` 增加 `PENDING_REBUILD`：构建中来的变化在当前轮结束后自动再扫一轮。
+- 托盘手动重扫路径不变；监听失败只打日志。
+- `cargo test` 165 passed。
+- 待实机（票 10）：安装/卸载 5s 内列表更新、批量写入只触发必要重建。

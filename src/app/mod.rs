@@ -5,6 +5,7 @@ pub mod builtin;
 mod launcher;
 pub mod scanner;
 pub mod uwp;
+pub mod watch;
 pub mod web;
 
 pub use launcher::launch;

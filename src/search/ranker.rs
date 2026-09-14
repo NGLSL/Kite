@@ -3,10 +3,21 @@
 /// 用户 Alias（Phase 3+；常量先占位）。
 pub const SCORE_USER_ALIAS_EXACT: i32 = 1100;
 pub const SCORE_NAME_EXACT: i32 = 1000;
+/// 连写精确（todo ↔ To Do）；低于真实名称精确，高于普通前缀。
+pub const SCORE_COMPACT_EXACT: i32 = 920;
+/// 有序多词命中（visual code / vs code）。
+pub const SCORE_TOKEN_SEQ: i32 = 880;
 pub const SCORE_BUILTIN_ALIAS_EXACT: i32 = 950;
+pub const SCORE_WORD_EXACT: i32 = 850;
 pub const SCORE_PREFIX: i32 = 800;
+/// 连写包含（限制短 Query 误召回，见 matcher 最小长度）。
+pub const SCORE_COMPACT_SUBSTRING: i32 = 780;
 pub const SCORE_PINYIN_EXACT: i32 = 750;
 pub const SCORE_PINYIN_INITIAL: i32 = 700;
+/// 单词前缀（含 Camel 拆词后的 terminal ← ter）。
+pub const SCORE_WORD_PREFIX: i32 = 720;
+/// 英文多词首字母缩写（ndm → Neat Download Manager）；低于真实词匹配。
+pub const SCORE_ACRONYM: i32 = 680;
 pub const SCORE_SUBSTRING: i32 = 550;
 /// Fuzzy 上限；具体分由编辑距离映射。
 pub const SCORE_FUZZY_MAX: i32 = 450;

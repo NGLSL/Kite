@@ -46,7 +46,7 @@ const ALIAS_TO_NAMES: &[(&str, &[&str])] = &[
     // ── 终端 / 远程 ──
     ("cmd", &["命令提示符", "cmd"]),
     ("powershell", &["powershell"]),
-    ("wt", &["terminal"]),
+    ("wt", &["windows terminal"]),
     ("cmder", &["cmder"]),
     ("tabby", &["tabby"]),
     ("mobaxterm", &["mobaxterm"]),
@@ -162,6 +162,10 @@ const ALIAS_TO_NAMES: &[(&str, &[&str])] = &[
     ("hwinfo", &["hwinfo"]),
     ("aida64", &["aida64"]),
     ("diskgenius", &["diskgenius"]),
+    // ── 受控跨语言品牌同义称呼（非算法特例；须已入索引） ──
+    ("雷蛇", &["razer"]),
+    ("罗技", &["logitech"]),
+    ("赛睿", &["steelseries"]),
 ];
 
 #[cfg(test)]

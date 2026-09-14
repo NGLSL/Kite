@@ -1,12 +1,16 @@
 //! 历史加权：把 Usage / Recency / Query History 映射为排序加分。
 //! 原则（PRD §41–42）：
-//! - MatchScore 仍是主信号
-//! - 历史总加分有上限，不得让 Prefix 压过 Name Exact
-//! - 不做纯 LRU
+//! - MatchScore 仍是主信号，先按基础相关性分层
+//! - 历史只在同层（或相近质量）候选间调整顺序，不得把无关弱匹配推到明确匹配之上
+//! - 历史总加分有上限；不做纯 LRU
 
 use std::collections::{HashMap, HashSet};
 
 use crate::model::SearchResult;
+use crate::search::ranker::{
+    SCORE_ACRONYM, SCORE_COMPACT_EXACT, SCORE_COMPACT_SUBSTRING, SCORE_FUZZY_MAX, SCORE_NAME_EXACT,
+    SCORE_PINYIN_EXACT, SCORE_PREFIX, SCORE_SUBSTRING, SCORE_WORD_PREFIX,
+};
 use crate::storage::{QueryPairStats, UsageStats};
 
 /// 历史总加分上限。须 < (SCORE_NAME_EXACT - SCORE_PREFIX) = 200。
@@ -19,9 +23,41 @@ pub const PIN_BOOST: i32 = 180;
 const FREQUENCY_CAP: i32 = 50;
 const RECENCY_CAP: i32 = 40;
 
+/// 基础相关性层级：数值越小质量越高。历史只在同层内调整顺序。
+pub fn quality_tier(base_score: i32) -> i32 {
+    use crate::search::ranker::{
+        SCORE_BUILTIN_ALIAS_EXACT, SCORE_COMPACT_EXACT, SCORE_COMPACT_SUBSTRING, SCORE_FUZZY_MAX,
+        SCORE_NAME_EXACT, SCORE_PINYIN_EXACT, SCORE_PINYIN_INITIAL, SCORE_PREFIX, SCORE_SUBSTRING,
+        SCORE_TOKEN_SEQ, SCORE_USER_ALIAS_EXACT, SCORE_WORD_EXACT, SCORE_WORD_PREFIX, SCORE_ACRONYM,
+    };
+    if base_score >= SCORE_USER_ALIAS_EXACT {
+        0
+    } else if base_score >= SCORE_NAME_EXACT {
+        1
+    } else if base_score >= SCORE_BUILTIN_ALIAS_EXACT || base_score >= SCORE_COMPACT_EXACT {
+        2
+    } else if base_score >= SCORE_TOKEN_SEQ || base_score >= SCORE_WORD_EXACT {
+        3
+    } else if base_score >= SCORE_PREFIX {
+        4
+    } else if base_score >= SCORE_COMPACT_SUBSTRING
+        || base_score >= SCORE_PINYIN_EXACT
+        || base_score >= SCORE_PINYIN_INITIAL
+    {
+        5
+    } else if base_score >= SCORE_WORD_PREFIX || base_score >= SCORE_ACRONYM {
+        6
+    } else if base_score >= SCORE_SUBSTRING {
+        7
+    } else if base_score >= SCORE_FUZZY_MAX / 2 {
+        8
+    } else {
+        9
+    }
+}
+
 /// 个性化加分统一入口（Match 仍是主信号）：历史（Usage/Recency/Query 配对）+ 固定。
-/// 固定与历史取较大者、不叠加，保证 Prefix+个人化(800+180) 仍低于 Name Exact(1000)。
-/// `usage`/`pairs`/`pinned` 缺行按默认值（0 加分）。
+/// 先按 base score 分层，再在层内用历史/Pin 调整顺序，最后按 (tier, score) 重排。
 pub fn apply_boosts(
     hits: &mut [SearchResult],
     usage: HashMap<String, UsageStats>,
@@ -30,18 +66,28 @@ pub fn apply_boosts(
     now: i64,
     pinned: &HashSet<String>,
 ) {
-    for hit in hits {
+    let mut keyed: Vec<(i32, i32, SearchResult)> = Vec::with_capacity(hits.len());
+    for hit in hits.iter() {
+        let base = hit.score;
+        let tier = quality_tier(base);
         let is_pinned = pinned.contains(&hit.item.id);
         let u = usage.get(&hit.item.id).cloned().unwrap_or_default();
         let p = pairs.get(&hit.item.id).cloned().unwrap_or_default();
         let history = history_boost(query_norm, &u, &p, now);
         let boost = if is_pinned { PIN_BOOST.max(history) } else { history };
-        hit.score += boost;
+        let mut hit = hit.clone();
+        hit.score = base + boost;
         if is_pinned {
             hit.matched_by = format!("{}+pin", hit.matched_by);
         } else if boost > 0 {
             hit.matched_by = format!("{}+history", hit.matched_by);
         }
+        keyed.push((tier, hit.score, hit));
+    }
+    // 同层内按加分后分数降序；层号小 = 质量高，优先
+    keyed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+    for (slot, (_, _, hit)) in hits.iter_mut().zip(keyed.into_iter()) {
+        *slot = hit;
     }
 }
 
@@ -177,9 +223,11 @@ mod tests {
         let mut hits = vec![hit("a"), hit("b")];
         let pinned: HashSet<String> = ["b".to_string()].into_iter().collect();
         apply_boosts(&mut hits, HashMap::new(), HashMap::new(), "q", 1, &pinned);
-        assert_eq!(hits[0].score, 100, "未固定不加分");
-        assert_eq!(hits[1].score, 100 + PIN_BOOST, "无历史时固定项获得 PIN_BOOST");
-        assert!(hits[1].matched_by.ends_with("+pin"));
+        assert_eq!(hits[0].item.id, "b", "固定项在同层内应排到前面");
+        assert_eq!(hits[0].score, 100 + PIN_BOOST, "无历史时固定项获得 PIN_BOOST");
+        assert!(hits[0].matched_by.ends_with("+pin"));
+        assert_eq!(hits[1].item.id, "a");
+        assert_eq!(hits[1].score, 100, "未固定不加分");
     }
 
     #[test]
@@ -216,5 +264,72 @@ mod tests {
         apply_boosts(&mut hits, HashMap::new(), HashMap::new(), "q", 1, &HashSet::new());
         assert_eq!(hits[0].score, 100);
         assert_eq!(hits[0].matched_by, "test");
+    }
+
+    #[test]
+    fn history_cannot_lift_substring_above_word_prefix() {
+        use crate::search::ranker::{SCORE_SUBSTRING, SCORE_WORD_PREFIX};
+        let mut weak = hit("weak");
+        weak.score = SCORE_SUBSTRING;
+        let mut strong = hit("strong");
+        strong.score = SCORE_WORD_PREFIX;
+        let mut usage = HashMap::new();
+        usage.insert(
+            "weak".to_string(),
+            UsageStats {
+                launch_count: 50,
+                last_used_at: 1_700_000_000,
+            },
+        );
+        let mut pairs = HashMap::new();
+        pairs.insert(
+            "weak".to_string(),
+            QueryPairStats {
+                count: 30,
+                last_used_at: 1_700_000_000,
+            },
+        );
+        let mut hits = vec![weak, strong];
+        apply_boosts(&mut hits, usage, pairs, "ter", 1_700_086_400, &HashSet::new());
+        assert_eq!(
+            hits[0].item.id, "strong",
+            "更高基础相关性的 word-prefix 不得被弱 substring+历史压过"
+        );
+    }
+
+    #[test]
+    fn history_reorders_within_same_tier() {
+        use crate::search::ranker::SCORE_WORD_PREFIX;
+        let mut a = hit("xterminal");
+        a.score = SCORE_WORD_PREFIX;
+        let mut b = hit("terminal");
+        b.score = SCORE_WORD_PREFIX;
+        let mut usage = HashMap::new();
+        usage.insert(
+            "xterminal".to_string(),
+            UsageStats {
+                launch_count: 8,
+                last_used_at: 1_700_000_000,
+            },
+        );
+        let mut pairs = HashMap::new();
+        pairs.insert(
+            "xterminal".to_string(),
+            QueryPairStats {
+                count: 5,
+                last_used_at: 1_700_000_000,
+            },
+        );
+        let mut hits = vec![b, a];
+        apply_boosts(&mut hits, usage, pairs, "ter", 1_700_086_400, &HashSet::new());
+        assert_eq!(hits[0].item.id, "xterminal", "同层内历史应把更常用项提到前面");
+    }
+
+    #[test]
+    fn quality_tier_orders_exact_before_fuzzy() {
+        use crate::search::ranker::{SCORE_FUZZY_MAX, SCORE_NAME_EXACT, SCORE_PREFIX, SCORE_SUBSTRING};
+        assert!(quality_tier(SCORE_NAME_EXACT) < quality_tier(SCORE_PREFIX));
+        assert!(quality_tier(SCORE_PREFIX) < quality_tier(SCORE_SUBSTRING));
+        assert!(quality_tier(SCORE_SUBSTRING) < quality_tier(SCORE_FUZZY_MAX / 2));
     }
 }

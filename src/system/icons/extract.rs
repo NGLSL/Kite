@@ -41,8 +41,27 @@ pub fn classify(path: &Path) -> SourceKind {
     {
         Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp") => SourceKind::Image,
         Some("ico") => SourceKind::Ico,
-        _ => SourceKind::Shell,
+        _ => {
+            // MSI 安装的快捷方式图标源常是无扩展名但文件头为 ICO（00 00 01 00）。
+            if looks_like_ico_file(path) {
+                return SourceKind::Ico;
+            }
+            SourceKind::Shell
+        }
     }
+}
+
+/// 按文件头识别无扩展名 ICO（ICONDIR reserved=0, type=1）。
+pub fn looks_like_ico_file(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    if f.read_exact(&mut magic).is_err() {
+        return false;
+    }
+    magic == [0x00, 0x00, 0x01, 0x00]
 }
 
 /// Shell namespace targets such as `shell:RecycleBinFolder` do not exist as
@@ -58,8 +77,11 @@ pub fn is_virtual_shell_path(path: &Path) -> bool {
 pub fn extract_shell_icon(path: &Path) -> Option<Vec<u8>> {
     unsafe {
         if is_virtual_shell_path(path) {
-            // Built-in folders have a dedicated stock icon, which is more
-            // reliable than asking the Shell to resolve a namespace URI.
+            // Prefer resolving the live Shell namespace object so Control Panel
+            // and friends show the real system icon, not a generic stock glyph.
+            if let Some(png) = extract_shell_icon_win32(path) {
+                return Some(png);
+            }
             if let Some(png) = stock_icon_id(path).and_then(|id| extract_stock_icon(id)) {
                 return Some(png);
             }
@@ -394,6 +416,19 @@ mod tests {
         assert_eq!(classify(Path::new("C:\\a\\app.EXE")), SourceKind::Shell);
         assert_eq!(classify(Path::new("C:\\a\\shell32.dll")), SourceKind::Shell);
         assert_eq!(classify(Path::new("no-ext")), SourceKind::Shell);
+    }
+
+    #[test]
+    fn extensionless_ico_magic_is_classified_as_ico() {
+        let dir = std::env::temp_dir().join(format!("kite-ico-magic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ProductIcon");
+        // Minimal ICONDIR header: reserved=0, type=1, count=1
+        std::fs::write(&path, [0x00u8, 0x00, 0x01, 0x00, 0x01, 0x00]).unwrap();
+        assert!(looks_like_ico_file(&path));
+        assert_eq!(classify(&path), SourceKind::Ico);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -5,10 +5,19 @@ use std::borrow::Cow;
 use crate::model::{AppItem, SearchResult};
 use crate::search::alias;
 use crate::search::fuzzy::fuzzy_match;
+use crate::search::normalizer::{compact, split_camel, tokens};
 use crate::search::ranker::{
-    SCORE_BUILTIN_ALIAS_EXACT, SCORE_NAME_EXACT, SCORE_PINYIN_EXACT, SCORE_PINYIN_INITIAL,
-    SCORE_PREFIX, SCORE_SUBSTRING, SCORE_USER_ALIAS_EXACT,
+    SCORE_ACRONYM, SCORE_BUILTIN_ALIAS_EXACT, SCORE_COMPACT_EXACT, SCORE_COMPACT_SUBSTRING,
+    SCORE_NAME_EXACT, SCORE_PINYIN_EXACT, SCORE_PINYIN_INITIAL, SCORE_PREFIX, SCORE_SUBSTRING,
+    SCORE_TOKEN_SEQ, SCORE_USER_ALIAS_EXACT, SCORE_WORD_EXACT, SCORE_WORD_PREFIX,
 };
+
+/// 连写包含最短 Query 长度：避免 `to` 等短片段误召回大量应用。
+const MIN_COMPACT_SUBSTR_LEN: usize = 3;
+/// 单词前缀最短 Query 长度。
+const MIN_WORD_PREFIX_LEN: usize = 2;
+/// 英文首字母缩写最短 Query 长度。
+const MIN_ACRONYM_LEN: usize = 2;
 
 /// 用户 Alias 的一行匹配素材：优先按稳定 id 命中，旧行（无 id）退回名称包含。
 pub struct UserTarget {
@@ -51,6 +60,7 @@ fn match_item(item: &AppItem, q: &str, user_targets: &[UserTarget]) -> Option<Se
     // 预计算字段直接借用；缺省时才临时规范化（Cow 避免每键全量分配）
     let name = cow_normalized(item.normalized_name.as_str(), &item.name);
     let display = cow_normalized(item.normalized_display.as_str(), &item.display_name);
+    let q_compact = compact(q);
     // 内置 Alias 每 Query 只解析一次（单表数据源）
     let alias_targets = alias::targets_for(q);
 
@@ -89,6 +99,57 @@ fn match_item(item: &AppItem, q: &str, user_targets: &[UserTarget]) -> Option<Se
         }
     }
 
+    // 2b) Compact：todo ↔ To Do / Microsoft To Do
+    if q_compact.len() >= 2 {
+        for candidate in [name.as_ref(), display.as_ref()] {
+            let c = compact(candidate);
+            if c == q_compact {
+                best = take_best(best, SCORE_COMPACT_EXACT, "compact-exact");
+            } else if q_compact.len() >= MIN_COMPACT_SUBSTR_LEN && c.contains(&q_compact) {
+                best = take_best(best, SCORE_COMPACT_SUBSTRING, "compact-substring");
+            }
+        }
+    }
+
+    // 2c) 词边界：exact / prefix，以及 Camel 拆词（XTerminal → terminal）
+    let name_tokens: Vec<String> = {
+        let mut t: Vec<String> = tokens(name.as_ref())
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+        for raw in [&item.name, &item.display_name] {
+            for part in split_camel(raw) {
+                if !t.contains(&part) {
+                    t.push(part);
+                }
+            }
+        }
+        t
+    };
+    for tok in &name_tokens {
+        if tok == q {
+            best = take_best(best, SCORE_WORD_EXACT, "word-exact");
+        } else if q.len() >= MIN_WORD_PREFIX_LEN && tok.starts_with(q) {
+            best = take_best(best, SCORE_WORD_PREFIX, "word-prefix");
+        }
+    }
+
+    // 2d) 有序多词：visual code / vs code（vs 可匹配连续词首字母）
+    if tokens(q).len() >= 2 && ordered_token_match(q, name.as_ref()) {
+        best = take_best(best, SCORE_TOKEN_SEQ, "token-seq");
+    }
+
+    // 2e) 英文多词首字母：ndm → Neat Download Manager
+    if q.len() >= MIN_ACRONYM_LEN {
+        for candidate in [name.as_ref(), display.as_ref()] {
+            let ac = word_acronym(candidate);
+            if !ac.is_empty() && ac == q {
+                best = take_best(best, SCORE_ACRONYM, "acronym");
+                break;
+            }
+        }
+    }
+
     // 3) 拼音
     if !item.pinyin.is_empty() {
         if item.pinyin == q {
@@ -107,7 +168,9 @@ fn match_item(item: &AppItem, q: &str, user_targets: &[UserTarget]) -> Option<Se
 
     // 4) Fuzzy 兜底
     if best.is_none() {
-        if let Some((score, _)) = fuzzy_name_or_tokens(q, &name).or_else(|| fuzzy_name_or_tokens(q, &display)) {
+        if let Some((score, _)) =
+            fuzzy_name_or_tokens(q, &name).or_else(|| fuzzy_name_or_tokens(q, &display))
+        {
             best = take_best(best, score, "fuzzy");
         }
     }
@@ -120,6 +183,57 @@ fn match_item(item: &AppItem, q: &str, user_targets: &[UserTarget]) -> Option<Se
     })
 }
 
+/// 多词英文名首字母：`neat download manager` → `ndm`。单段名不产生缩写。
+fn word_acronym(name: &str) -> String {
+    let toks = tokens(name);
+    if toks.len() < 2 {
+        return String::new();
+    }
+    toks.iter().filter_map(|t| t.chars().next()).collect()
+}
+
+/// Query 各词按序匹配名称词：整词、前缀，或连续若干词的首字母串（vs → visual studio）。
+fn ordered_token_match(q: &str, name: &str) -> bool {
+    let q_tokens = tokens(q);
+    let n_tokens = tokens(name);
+    if q_tokens.is_empty() || n_tokens.is_empty() {
+        return false;
+    }
+    let mut ni = 0usize;
+    for &qt in &q_tokens {
+        let mut matched = false;
+        while ni < n_tokens.len() {
+            let nt = n_tokens[ni];
+            if nt == qt || nt.starts_with(qt) {
+                ni += 1;
+                matched = true;
+                break;
+            }
+            // 连续词首字母拼接（至少 2 词，长度与 qt 相同）
+            if qt.chars().count() >= 2 {
+                let mut acc = String::new();
+                let mut j = ni;
+                while j < n_tokens.len() && acc.chars().count() < qt.chars().count() {
+                    if let Some(c) = n_tokens[j].chars().next() {
+                        acc.push(c);
+                    }
+                    j += 1;
+                }
+                if acc == qt && j > ni + 1 {
+                    ni = j;
+                    matched = true;
+                    break;
+                }
+            }
+            ni += 1;
+        }
+        if !matched {
+            return false;
+        }
+    }
+    true
+}
+
 fn fuzzy_name_or_tokens(q: &str, name: &str) -> Option<(i32, usize)> {
     if let Some(hit) = fuzzy_match(q, name) {
         return Some(hit);
@@ -127,4 +241,32 @@ fn fuzzy_name_or_tokens(q: &str, name: &str) -> Option<(i32, usize)> {
     name.split_whitespace()
         .filter_map(|tok| fuzzy_match(q, tok))
         .max_by_key(|(score, _)| *score)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordered_match_visual_code() {
+        assert!(ordered_token_match("visual code", "visual studio code"));
+    }
+
+    #[test]
+    fn ordered_match_vs_code_via_initials() {
+        assert!(ordered_token_match("vs code", "visual studio code"));
+    }
+
+    #[test]
+    fn ordered_match_rejects_wrong_order() {
+        assert!(!ordered_token_match("zzz code", "visual studio code"));
+        assert!(!ordered_token_match("code visual", "visual studio code"));
+    }
+
+    #[test]
+    fn word_acronym_multi_word_only() {
+        assert_eq!(word_acronym("neat download manager"), "ndm");
+        assert_eq!(word_acronym("visual studio code"), "vsc");
+        assert!(word_acronym("chrome").is_empty());
+    }
 }

@@ -1,0 +1,266 @@
+{
+  "version": 1,
+  "notes": "固定评估样本。fixture 身份稳定，期望指向 id 而非可能重名的显示名。known-gap 样本计入指标报告但不在 CI 硬失败，用于票 07/08 合入前记录基线缺口。",
+  "fixtures": {
+    "default": {
+      "apps": [
+        { "id": "fx-chrome", "name": "Google Chrome", "target": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "source": "start-menu" },
+        { "id": "fx-chrome-remote", "name": "Chrome Remote Desktop", "target": "C:\\Program Files\\Chrome Remote Desktop\\crd.exe", "source": "start-menu" },
+        { "id": "fx-vscode", "name": "Visual Studio Code", "target": "C:\\Users\\dev\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe", "source": "start-menu" },
+        { "id": "fx-vs", "name": "Visual Studio", "target": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\devenv.exe", "source": "start-menu" },
+        { "id": "fx-wechat", "name": "微信", "target": "C:\\Program Files\\Tencent\\WeChat\\WeChat.exe", "source": "start-menu" },
+        { "id": "fx-wechat-dev", "name": "微信开发者工具", "target": "C:\\Program Files (x86)\\Tencent\\微信web开发者工具\\wechatdevtools.exe", "source": "start-menu" },
+        { "id": "fx-wecom", "name": "企业微信", "target": "C:\\Program Files\\WXWork\\WXWork.exe", "source": "start-menu" },
+        { "id": "fx-idea", "name": "IntelliJ IDEA", "target": "C:\\Program Files\\JetBrains\\IntelliJ IDEA\\bin\\idea64.exe", "source": "start-menu" },
+        { "id": "fx-notepad", "name": "Notepad", "target": "C:\\Windows\\System32\\notepad.exe", "source": "start-menu" },
+        { "id": "fx-nemusic", "name": "网易云音乐", "target": "C:\\Program Files (x86)\\Netease\\CloudMusic\\cloudmusic.exe", "source": "start-menu" },
+        { "id": "fx-steam", "name": "Steam", "target": "C:\\Program Files (x86)\\Steam\\steam.exe", "source": "start-menu" },
+        { "id": "fx-calc", "name": "计算器", "target": "C:\\Windows\\System32\\calc.exe", "source": "start-menu" },
+        { "id": "fx-terminal", "name": "Windows Terminal", "target": "C:\\Users\\dev\\AppData\\Local\\Microsoft\\WindowsApps\\wt.exe", "source": "start-menu" },
+        { "id": "fx-todo", "name": "Microsoft To Do", "target": "C:\\Program Files\\WindowsApps\\Microsoft.Todos\\Todo.exe", "source": "uwp" },
+        { "id": "fx-ndm", "name": "Neat Download Manager", "target": "C:\\Program Files\\Neat Download Manager\\NDM.exe", "source": "start-menu" },
+        { "id": "fx-razer", "name": "Razer Synapse", "target": "C:\\Program Files (x86)\\Razer\\Synapse3\\WPFUI\\Framework\\Razer Synapse 3\\Razer Synapse.exe", "source": "start-menu" },
+        { "id": "fx-xterminal", "name": "XTerminal", "target": "C:\\Program Files\\XTerminal\\XTerminal.exe", "source": "start-menu" },
+        { "id": "fx-pwsh", "name": "PowerShell", "target": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "args": null, "source": "start-menu" },
+        { "id": "fx-pwsh-dev", "name": "Developer PowerShell", "target": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "args": "-NoExit -Command Enter-VsDevShell", "source": "start-menu" },
+        { "id": "fx-wps", "name": "WPS Office", "target": "D:\\Program Files\\WPS Office\\ksolaunch.exe", "source": "start-menu" },
+        { "id": "fx-wps-raw", "name": "wps", "target": "D:\\Program Files\\WPS Office\\12.1.0\\office6\\wps.exe", "source": "app-paths" },
+        { "id": "fx-regedit", "name": "注册表编辑器", "target": "C:\\Windows\\regedit.exe", "source": "start-menu" },
+        { "id": "fx-cmd", "name": "命令提示符", "target": "C:\\Windows\\System32\\cmd.exe", "source": "start-menu" },
+        { "id": "fx-git-bash", "name": "Git Bash", "target": "C:\\Program Files\\Git\\git-bash.exe", "source": "start-menu" },
+        { "id": "fx-notepadpp", "name": "Notepad++", "target": "C:\\Program Files\\Notepad++\\notepad++.exe", "source": "start-menu" },
+        { "id": "fx-taskmgr", "name": "任务管理器", "target": "C:\\Windows\\System32\\Taskmgr.exe", "source": "start-menu" },
+        { "id": "fx-control", "name": "控制面板", "target": "shell:::{26EE0668-A00A-4530-B89D-247C3C76FC01}", "source": "builtin" },
+        { "id": "fx-recycle", "name": "回收站", "target": "shell:::{645FF040-5081-101B-9F08-00AA002F954E}", "source": "builtin" }
+      ]
+    }
+  },
+  "cases": [
+    {
+      "id": "exact-chrome",
+      "query": "chrome",
+      "fixture": "default",
+      "expected_top": "fx-chrome",
+      "expected_in_top5": ["fx-chrome", "fx-chrome-remote"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "prefix-vis-short-name",
+      "query": "vis",
+      "fixture": "default",
+      "expected_top": "fx-vs",
+      "expected_in_top5": ["fx-vs", "fx-vscode"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "exact-wechat-zh",
+      "query": "微信",
+      "fixture": "default",
+      "expected_top": "fx-wechat",
+      "expected_in_top5": ["fx-wechat", "fx-wechat-dev", "fx-wecom"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "pinyin-weixin",
+      "query": "weixin",
+      "fixture": "default",
+      "expected_top": "fx-wechat",
+      "expected_in_top5": ["fx-wechat"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "pinyin-initial-wx",
+      "query": "wx",
+      "fixture": "default",
+      "expected_top": "fx-wechat",
+      "expected_in_top5": ["fx-wechat", "fx-wechat-dev", "fx-wecom"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "alias-vsc",
+      "query": "vsc",
+      "fixture": "default",
+      "expected_top": "fx-vscode",
+      "expected_in_top5": ["fx-vscode"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "alias-wt-terminal",
+      "query": "wt",
+      "fixture": "default",
+      "expected_top": "fx-terminal",
+      "expected_in_top5": ["fx-terminal"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "alias-calc",
+      "query": "calc",
+      "fixture": "default",
+      "expected_top": "fx-calc",
+      "expected_in_top5": ["fx-calc"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "friendly-over-raw-wps",
+      "query": "wps",
+      "fixture": "default",
+      "expected_top": "fx-wps",
+      "expected_in_top5": ["fx-wps", "fx-wps-raw"],
+      "forbidden_top": ["fx-wps-raw"],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "exact-system-notepad-not-todo-noise",
+      "query": "notepad",
+      "fixture": "default",
+      "expected_top": "fx-notepad",
+      "expected_in_top5": ["fx-notepad", "fx-notepadpp"],
+      "forbidden_top": ["fx-todo"],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "distinct-args-powershell-dev",
+      "query": "developer powershell",
+      "fixture": "default",
+      "expected_top": "fx-pwsh-dev",
+      "expected_in_top5": ["fx-pwsh-dev"],
+      "forbidden_top": ["fx-pwsh"],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "todo-compact-gap",
+      "query": "todo",
+      "fixture": "default",
+      "expected_top": "fx-todo",
+      "expected_in_top5": ["fx-todo"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "todo-space",
+      "query": "to do",
+      "fixture": "default",
+      "expected_top": "fx-todo",
+      "expected_in_top5": ["fx-todo"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "visual-code-token-gap",
+      "query": "visual code",
+      "fixture": "default",
+      "expected_top": "fx-vscode",
+      "expected_in_top5": ["fx-vscode"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "vs-code-token-gap",
+      "query": "vs code",
+      "fixture": "default",
+      "expected_top": "fx-vscode",
+      "expected_in_top5": ["fx-vscode"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "ter-word-prefix-gap",
+      "query": "ter",
+      "fixture": "default",
+      "expected_top": "fx-xterminal",
+      "expected_in_top5": ["fx-xterminal", "fx-terminal"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "ndm-acronym-gap",
+      "query": "ndm",
+      "fixture": "default",
+      "expected_top": "fx-ndm",
+      "expected_in_top5": ["fx-ndm"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "ndm-download-still-works",
+      "query": "neat",
+      "fixture": "default",
+      "expected_top": "fx-ndm",
+      "expected_in_top5": ["fx-ndm"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "leishe-crosslang-gap",
+      "query": "雷蛇",
+      "fixture": "default",
+      "expected_top": "fx-razer",
+      "expected_in_top5": ["fx-razer"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "razer-english",
+      "query": "razer",
+      "fixture": "default",
+      "expected_top": "fx-razer",
+      "expected_in_top5": ["fx-razer"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "short-query-not-crowded-by-todo",
+      "query": "to",
+      "fixture": "default",
+      "expected_top": null,
+      "expected_in_top5": [],
+      "forbidden_top": ["fx-control", "fx-recycle"],
+      "history": "none",
+      "status": "required",
+      "notes": "短 Query 不禁止召回 todo，但禁止系统虚拟入口抢占首位。expected_top 为 null 表示不锁定第一位。"
+    },
+    {
+      "id": "history-ter-boosts-similar-tier",
+      "query": "ter",
+      "fixture": "default",
+      "expected_top": "fx-xterminal",
+      "expected_in_top5": ["fx-xterminal"],
+      "forbidden_top": ["fx-control", "fx-recycle"],
+      "history": {
+        "pairs": { "ter": ["fx-xterminal", "fx-xterminal", "fx-xterminal"] },
+        "usage": { "fx-xterminal": 5 }
+      },
+      "status": "known-gap",
+      "gap_ticket": "09",
+      "notes": "票 07 落地 word-prefix 后，票 09 用 History 把相近层内 XTerminal 稳到首位。eval harness 尚未注入 history；由 history 模块单测覆盖同层重排。"
+    }
+  ]
+}

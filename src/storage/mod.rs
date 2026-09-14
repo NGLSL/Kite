@@ -127,6 +127,121 @@ impl HistoryDb {
         Ok(())
     }
 
+    /// 将旧 item_id 的 Usage / Query History / Pin / Alias 迁移到 new_id。
+    /// 仅在确认 launch identity 相同（由调用方保证）时调用；不把历史转给不同 target。
+    pub fn remap_item_id(&mut self, old_id: &str, new_id: &str) -> rusqlite::Result<bool> {
+        if old_id == new_id || old_id.is_empty() || new_id.is_empty() {
+            return Ok(false);
+        }
+        let mut moved = false;
+
+        // usage：合并计数，保留较新 last_used_at
+        let existing: Option<(i64, i64)> = self
+            .conn
+            .query_row(
+                "SELECT launch_count, last_used_at FROM usage_history WHERE item_id = ?1",
+                params![old_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
+        if let Some((count, last)) = existing {
+            moved = true;
+            self.conn.execute(
+                "INSERT INTO usage_history (item_id, launch_count, last_used_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(item_id) DO UPDATE SET
+                   launch_count = usage_history.launch_count + excluded.launch_count,
+                   last_used_at = max(usage_history.last_used_at, excluded.last_used_at)",
+                params![new_id, count, last],
+            )?;
+            self.conn
+                .execute("DELETE FROM usage_history WHERE item_id = ?1", params![old_id])?;
+        }
+
+        // query_history：按 (query, item_id) 合并
+        let pairs: Vec<(String, i64, i64)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT query, count, last_used_at FROM query_history WHERE item_id = ?1",
+            )?;
+            let rows = stmt.query_map(params![old_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+            })?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        for (query, count, last) in pairs {
+            moved = true;
+            self.conn.execute(
+                "INSERT INTO query_history (query, item_id, count, last_used_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(query, item_id) DO UPDATE SET
+                   count = query_history.count + excluded.count,
+                   last_used_at = max(query_history.last_used_at, excluded.last_used_at)",
+                params![query, new_id, count, last],
+            )?;
+        }
+        self.conn
+            .execute("DELETE FROM query_history WHERE item_id = ?1", params![old_id])?;
+
+        // pin：只改 id，保留 pinned_at
+        let pinned: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT pinned_at FROM pinned WHERE item_id = ?1",
+                params![old_id],
+                |r| r.get(0),
+            )
+            .ok();
+        if let Some(at) = pinned {
+            moved = true;
+            self.conn.execute(
+                "INSERT INTO pinned (item_id, pinned_at) VALUES (?1, ?2)
+                 ON CONFLICT(item_id) DO UPDATE SET pinned_at = max(pinned.pinned_at, excluded.pinned_at)",
+                params![new_id, at],
+            )?;
+            self.conn
+                .execute("DELETE FROM pinned WHERE item_id = ?1", params![old_id])?;
+        }
+
+        // user_aliases.target_id
+        let n = self.conn.execute(
+            "UPDATE user_aliases SET target_id = ?1 WHERE target_id = ?2",
+            params![new_id, old_id],
+        )?;
+        if n > 0 {
+            moved = true;
+        }
+
+        Ok(moved)
+    }
+
+    /// 索引发布后：把 legacy id（含 source）迁移到 stable id。
+    pub fn migrate_legacy_ids_for_items(
+        &mut self,
+        items: &[(String, String, Option<String>)], // (stable_id, target, args)
+    ) -> usize {
+        use crate::app::scanner::util::{legacy_item_id, KNOWN_SOURCES};
+        let mut migrated = 0usize;
+        for (stable, target, args) in items {
+            for source in KNOWN_SOURCES {
+                let legacy = legacy_item_id(target, args.as_deref(), source);
+                if legacy == *stable {
+                    continue;
+                }
+                match self.remap_item_id(&legacy, stable) {
+                    Ok(true) => migrated += 1,
+                    Ok(false) => {}
+                    Err(e) => {
+                        crate::log::info(&format!("id remap {legacy} -> {stable} failed: {e}"));
+                    }
+                }
+            }
+        }
+        if migrated > 0 {
+            crate::log::info(&format!("migrated {migrated} legacy item ids to stable ids"));
+        }
+        migrated
+    }
+
     /// 最近启动的应用 id，按 last_used_at 降序。
     pub fn recent_ids(&self, limit: usize) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
@@ -345,5 +460,71 @@ mod tests {
         db.save_setting("history_recording", "1").unwrap();
         db.record_launch("app-a", "aa", 200).unwrap();
         assert_eq!(db.recent_ids(10).unwrap(), vec!["app-a".to_string()]);
+    }
+
+    #[test]
+    fn remap_item_id_moves_history_pin_and_alias() {
+        let mut db = temp_db();
+        db.record_launch("old-id", "q", 100).unwrap();
+        db.pin_item("old-id", 50).unwrap();
+        db.set_alias("oa", Some("old-id"), "Old App").unwrap();
+
+        let moved = db.remap_item_id("old-id", "new-id").unwrap();
+        assert!(moved);
+        assert!(db.recent_ids(10).unwrap().contains(&"new-id".to_string()));
+        assert!(!db.recent_ids(10).unwrap().contains(&"old-id".to_string()));
+        assert!(db.pinned_ids().contains(&"new-id".to_string()));
+        let alias = db
+            .list_aliases()
+            .unwrap()
+            .into_iter()
+            .find(|a| a.alias == "oa")
+            .expect("alias remains");
+        assert_eq!(alias.target_id.as_deref(), Some("new-id"));
+        let pairs = db.query_pair_snapshot("q", &["new-id".into()]);
+        assert!(pairs.contains_key("new-id"));
+    }
+
+    #[test]
+    fn remap_does_not_invent_history_for_different_target() {
+        let mut db = temp_db();
+        // 空库 remap 到 new-id：不凭空创建历史
+        let moved = db.remap_item_id("ghost", "new-id").unwrap();
+        assert!(!moved);
+        assert!(db.recent_ids(10).unwrap().is_empty());
+        assert!(db.pinned_ids().is_empty());
+    }
+
+    #[test]
+    fn migrate_legacy_ids_for_items_uses_known_sources() {
+        use crate::app::scanner::util::{legacy_item_id, stable_item_id};
+        let mut db = temp_db();
+        let target = r"C:\Apps\Foo\foo.exe";
+        let stable = stable_item_id(target, None);
+        let legacy = legacy_item_id(target, None, "start-menu");
+        assert_ne!(legacy, stable);
+        db.record_launch(&legacy, "foo", 100).unwrap();
+        db.pin_item(&legacy, 10).unwrap();
+
+        let n = db.migrate_legacy_ids_for_items(&[(stable.clone(), target.into(), None)]);
+        assert!(n >= 1);
+        assert!(db.pinned_ids().contains(&stable));
+        assert!(db.recent_ids(5).unwrap().contains(&stable));
+    }
+
+    #[test]
+    fn stable_id_ignores_display_source() {
+        use crate::app::scanner::util::{legacy_item_id, stable_item_id};
+        let t = r"C:\Tools\app.exe";
+        assert_eq!(stable_item_id(t, None), stable_item_id(t, None));
+        assert_ne!(
+            legacy_item_id(t, None, "desktop"),
+            legacy_item_id(t, None, "start-menu")
+        );
+        assert_eq!(
+            stable_item_id(t, Some("-x")),
+            stable_item_id(t, Some("-x"))
+        );
+        assert_ne!(stable_item_id(t, None), stable_item_id(t, Some("-x")));
     }
 }

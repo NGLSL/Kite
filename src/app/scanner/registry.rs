@@ -10,7 +10,7 @@ use windows::Win32::System::Registry::{
     HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, REG_SZ,
 };
 
-use super::util::{hash_id, normalize_path_key, wide};
+use super::util::wide;
 use crate::model::AppItem;
 
 type RawItem = (AppItem, Option<String>);
@@ -67,7 +67,7 @@ fn collect_hive(
                     .map(|p| p.to_string_lossy().to_string());
                 let icon_src = Some(target.clone());
                 let item = AppItem::scanned(
-                    hash_id(&[&normalize_path_key(&target), source]),
+                    super::util::stable_item_id(&target, None),
                     name,
                     target,
                     None,
