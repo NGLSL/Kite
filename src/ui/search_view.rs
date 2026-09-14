@@ -21,7 +21,6 @@ pub(crate) const BORDER: Color = color!(0xD1_D5_DB);
 pub(crate) const WINDOW_BORDER: Color = color!(0x9C_A3_AF);
 pub(crate) const TEXT: Color = color!(0x11_18_27);
 pub(crate) const TEXT_MUTED: Color = color!(0x6B_72_80);
-pub(crate) const PATH_COLOR: Color = color!(0x9C_A3_AF);
 pub(crate) const ACCENT_BG: Color = color!(0xEF_F6_FF);
 pub(crate) const MARK: Color = color!(0x25_63_EB);
 /// item-icon 背景：color-mix(text 5%, white)
@@ -209,7 +208,7 @@ fn results_area(state: &State) -> Element<'_, Message> {
         .into()
 }
 
-/// 单行结果（css .item）：52px 高、radius 10、icon 34、名称 15/500、路径 12、
+/// 单行结果（css .item）：52px 高、radius 10、icon 34、名称 15/500、
 /// 右侧 Alt+N 提示；active 时 accent 背景 + mark 描边 + 左侧 3px mark 竖条。
 fn item_row<'a>(
     state: &State,
@@ -242,13 +241,12 @@ fn item_row<'a>(
             ..container::Style::default()
         });
 
-    let body = column![
-        text(r.item.display_name.clone()).size(15.0).font(name_font()).color(TEXT),
-        text(secondary_label(&r.item.target)).size(12.0).color(PATH_COLOR),
-    ]
-    .spacing(3.0)
-    // flex:1 —— 把 Alt+N 提示推到行最右（css .item-body { flex: 1 }）
-    .width(Length::Fill);
+    // 结果只展示用户可识别的名称；AUMID、exe 名和路径仍保存在 item 中供启动和右键操作。
+    let body = text(r.item.display_name.clone())
+        .size(15.0)
+        .font(name_font())
+        .color(TEXT)
+        .width(Length::Fill);
 
     let hint_text = if i < 9 {
         if pinned {
@@ -455,15 +453,6 @@ impl canvas::Program<Message> for Magnifier {
 
 fn first_char(s: &str) -> String {
     s.chars().next().map(|c| c.to_string()).unwrap_or_default()
-}
-
-/// css secondaryLabel：取 target 最后一段文件名。
-fn secondary_label(target: &str) -> String {
-    let t = target.replace('/', "\\");
-    match t.rfind('\\') {
-        Some(i) => t[i + 1..].to_string(),
-        None => t,
-    }
 }
 
 // container/text_input 等类型仅用于签名约束的引用，避免未使用告警
