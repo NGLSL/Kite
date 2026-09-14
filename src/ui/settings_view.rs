@@ -5,8 +5,9 @@ use iced::font::Weight;
 use iced::widget::{button, column, container, mouse_area, row, scrollable, space::Space, text, text_input};
 use iced::{alignment, border, color, Background, Border, Color, Element, Font, Length, Padding};
 
+use super::font::{name_font, ui_font};
 use super::search_view::{
-    BG_ELEVATED, BG_PANEL, BORDER, MARK, NAME_FONT, TEXT, TEXT_MUTED, WINDOW_BORDER,
+    BG_ELEVATED, BG_PANEL, BORDER, MARK, TEXT, TEXT_MUTED, WINDOW_BORDER,
 };
 use super::{Message, Section, State};
 
@@ -56,7 +57,7 @@ pub fn settings_view(state: &State) -> Element<'_, Message> {
 fn nav_panel(state: &State) -> Element<'_, Message> {
     let logo = container(text("K").size(15.0).color(color!(0xFF_FF_FF)).font(Font {
         weight: Weight::Bold,
-        ..Font::DEFAULT
+        ..ui_font()
     }))
     .width(32.0)
     .height(32.0)
@@ -71,7 +72,7 @@ fn nav_panel(state: &State) -> Element<'_, Message> {
     let brand = row![
         logo,
         column![
-            text("Kite").size(13.0).font(NAME_FONT).color(TEXT),
+            text("Kite").size(13.0).font(name_font()).color(TEXT),
             text("设置").size(11.0).color(TEXT_MUTED),
         ]
         .spacing(1.0)
@@ -100,10 +101,10 @@ fn nav_panel(state: &State) -> Element<'_, Message> {
                     .font(if on {
                         Font {
                             weight: Weight::Semibold,
-                            ..Font::DEFAULT
+                            ..ui_font()
                         }
                     } else {
-                        Font::DEFAULT
+                        ui_font()
                     }),
             )
             .width(Length::Fill)
@@ -152,7 +153,7 @@ fn nav_panel(state: &State) -> Element<'_, Message> {
 fn header(section: Section) -> Element<'static, Message> {
     let title = text(section.label()).size(20.0).color(TEXT).font(Font {
         weight: Weight::Semibold,
-        ..Font::DEFAULT
+        ..ui_font()
     });
     // 标题栏固定高 53（与左侧品牌区一致，分隔线对齐），整条可拖拽
     let strip = container(title)
@@ -188,7 +189,7 @@ fn flow_row(
 ) -> Element<'static, Message> {
     container(
         row![
-            column![text(title).size(13.5).color(TEXT).font(NAME_FONT), text(hint).size(12.0).color(TEXT_MUTED)]
+            column![text(title).size(13.5).color(TEXT).font(name_font()), text(hint).size(12.0).color(TEXT_MUTED)]
                 .spacing(2.0)
                 .width(Length::Fill),
             control,
@@ -321,7 +322,7 @@ fn hotkey_card(state: &State) -> Element<'_, Message> {
     let recording = state.hotkey_recording;
     let chip = container(text(state.hotkey_label.clone()).size(13.0).color(TEXT).font(Font {
         weight: Weight::Semibold,
-        ..Font::DEFAULT
+        ..ui_font()
     }))
     .padding([5.0, 10.0])
     .style(|_t| container::Style {
@@ -455,7 +456,7 @@ fn alias_card(state: &State) -> Element<'_, Message> {
                 ..button::Style::default()
             });
     let form = column![
-        text("添加别名").size(13.0).color(TEXT).font(NAME_FONT),
+        text("添加别名").size(13.0).color(TEXT).font(name_font()),
         row![
             column![text("别名").size(11.0).color(TEXT_MUTED), alias_input].spacing(4.0).width(110.0),
             column![text("目标应用").size(11.0).color(TEXT_MUTED), target_input].spacing(4.0).width(Length::Fill),
@@ -525,7 +526,7 @@ fn alias_card(state: &State) -> Element<'_, Message> {
     // 现有别名列表：独立成卡片，和候选结果保持明确的视觉层级。
     if state.aliases.is_empty() {
         sections.push(container(column![
-            text("已添加别名").size(13.0).color(TEXT).font(NAME_FONT),
+            text("已添加别名").size(13.0).color(TEXT).font(name_font()),
             text("暂无别名。输入别名并选择目标应用后添加。").size(12.0).color(TEXT_MUTED),
         ].spacing(8.0)).width(Length::Fill).padding([12.0, 14.0]).style(|_t| container::Style {
             background: Some(Background::Color(BG_ELEVATED)),
@@ -533,13 +534,13 @@ fn alias_card(state: &State) -> Element<'_, Message> {
             ..container::Style::default()
         }).into());
     } else {
-        let mut list = column![text("已添加别名").size(13.0).color(TEXT).font(NAME_FONT)].spacing(8.0);
+        let mut list = column![text("已添加别名").size(13.0).color(TEXT).font(name_font())].spacing(8.0);
         for a in &state.aliases {
             let alias = a.alias.clone();
             list = list.push(
                 container(
                     row![
-                        container(text(a.alias.clone()).size(13.0).color(MARK).font(NAME_FONT))
+                        container(text(a.alias.clone()).size(13.0).color(MARK).font(name_font()))
                             .padding([2.0, 8.0])
                             .style(|_t| container::Style {
                                 background: Some(Background::Color(Color { a: 0.10, ..MARK })),

@@ -23,6 +23,7 @@ use crate::{app, history, log, search, storage, system};
 use crate::system::hotkey::parse_raw;
 
 mod backend;
+mod font;
 mod settings_view;
 mod search_view;
 mod tray;
@@ -125,6 +126,7 @@ pub fn run() -> iced::Result {
         ..Settings::default()
     })
     .theme(poc_theme)
+    .default_font(font::ui_font())
     .subscription(subscription)
     .run()
 }

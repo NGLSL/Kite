@@ -1,17 +1,17 @@
 //! 原型 UI：按 Kite 前端（src/features/search/search.css + styles/global.css）1:1 复刻。
 //! 设计 token 与前端 CSS 变量一致（浅色主题）。
 
-use iced::font::Weight;
 use iced::widget::text_input;
 use iced::widget::{
     button, canvas, column, container, image, mouse_area, row, scrollable, space::Space, stack,
     text, Id as WidgetId, Button, MouseArea, Scrollable,
 };
 use iced::{
-    alignment, border, color, Background, Border, Color, Element, Font, Length, Padding,
+    alignment, border, color, Background, Border, Color, Element, Length, Padding,
     Theme,
 };
 
+use super::font::name_font;
 use super::{Message, MenuAction, State};
 
 // ── 设计 token（global.css）──
@@ -31,11 +31,6 @@ pub(crate) const ICON_BG: Color = color!(0xF1_F2_F4);
 pub const ROW_STEP: f32 = 54.0;
 pub const SCROLL_ID: &str = "poc-results";
 const INPUT_ID: &str = "poc-input";
-
-pub(crate) const NAME_FONT: Font = Font {
-    weight: Weight::Medium,
-    ..Font::DEFAULT
-};
 
 pub fn input_id() -> WidgetId {
     WidgetId::new(INPUT_ID)
@@ -184,7 +179,7 @@ fn results_area(state: &State) -> Element<'_, Message> {
             return Space::new().width(Length::Fill).height(Length::Fill).into();
         }
         let empty = column![
-            text(title).size(14.0).color(TEXT).font(NAME_FONT),
+            text(title).size(14.0).color(TEXT).font(name_font()),
             text(sub).size(12.0).color(TEXT_MUTED),
         ]
         .spacing(6.0)
@@ -232,7 +227,7 @@ fn item_row<'a>(
             .into(),
         None => text(first_char(&r.item.display_name))
             .size(14.0)
-            .font(NAME_FONT)
+            .font(name_font())
             .color(TEXT_MUTED)
             .into(),
     };
@@ -248,7 +243,7 @@ fn item_row<'a>(
         });
 
     let body = column![
-        text(r.item.display_name.clone()).size(15.0).font(NAME_FONT).color(TEXT),
+        text(r.item.display_name.clone()).size(15.0).font(name_font()).color(TEXT),
         text(secondary_label(&r.item.target)).size(12.0).color(PATH_COLOR),
     ]
     .spacing(3.0)

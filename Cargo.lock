@@ -1386,10 +1386,11 @@ dependencies = [
 
 [[package]]
 name = "kite"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "base64",
  "dirs",
+ "fontdb",
  "iced",
  "iced_core",
  "image",

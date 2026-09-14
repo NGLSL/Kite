@@ -1,6 +1,6 @@
 [package]
 name = "kite"
-version = "0.2.3"
+version = "0.2.4"
 description = "Lightweight Windows launcher"
 license = "Apache-2.0"
 authors = ["Kite Authors"]
@@ -27,6 +27,7 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 # 原生 UI：tiny-skia 软渲染（无 wgpu/GPU 依赖），unconditional-rendering 消除局部重绘残影
 iced_core = "0.14"
 iced = { version = "0.14", default-features = false, features = ["tiny-skia", "crisp", "thread-pool", "image", "canvas", "unconditional-rendering"] }
+fontdb = "0.23"
 tray-icon = { version = "0.25", default-features = false }
 
 [profile.release]
