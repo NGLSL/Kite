@@ -16,6 +16,8 @@ pub const SCORE_PINYIN_EXACT: i32 = 750;
 pub const SCORE_PINYIN_INITIAL: i32 = 700;
 /// 单词前缀（含 Camel 拆词后的 terminal ← ter）。
 pub const SCORE_WORD_PREFIX: i32 = 720;
+/// 英文多词首字母缩写（ndm → Neat Download Manager）；低于真实词匹配。
+pub const SCORE_ACRONYM: i32 = 680;
 pub const SCORE_SUBSTRING: i32 = 550;
 /// Fuzzy 上限；具体分由编辑距离映射。
 pub const SCORE_FUZZY_MAX: i32 = 450;

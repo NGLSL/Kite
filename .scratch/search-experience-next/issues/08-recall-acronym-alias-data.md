@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: resolved
 Type: task
 Blocked by: 06 搜索评估基线
 
@@ -16,11 +16,11 @@ Blocked by: 06 搜索评估基线
 
 ## Acceptance Criteria
 
-- [ ] 固定样本中 `ndm` 能召回 Neat Download Manager（名称已在索引时）。
-- [ ] `雷蛇` 能召回已索引的 Razer 应用；无 Razer 索引时不返回虚假项。
-- [ ] 用户自定义 Alias 与自动缩写冲突时，用户 Alias 仍优先。
-- [ ] 通用缩写不把无关短名应用全部打进首屏（基线对比）。
-- [ ] 相对票 06 基线相关样本改善或持平，无明显回退。
+- [x] 固定样本中 `ndm` 能召回 Neat Download Manager（名称已在索引时）。
+- [x] `雷蛇` 能召回已索引的 Razer 应用；无 Razer 索引时不返回虚假项。
+- [x] 用户自定义 Alias 与自动缩写冲突时，用户 Alias 仍优先。
+- [x] 通用缩写不把无关短名应用全部打进首屏（基线对比）。
+- [x] 相对票 06 基线相关样本改善或持平，无明显回退。
 
 ## Validation
 
@@ -38,3 +38,9 @@ Blocked by: 06 搜索评估基线
 - LLM/向量召回。
 
 ## Comments
+
+2026-09-14 实现记录：
+
+- `word_acronym`：≥2 词英文名首字母精确匹配，分 SCORE_ACRONYM=680。
+- 受控别名：雷蛇→razer、罗技→logitech、赛睿→steelseries（仅匹配已索引名称片段）。
+- 评估样本 ndm / 雷蛇 升为 required；`cargo test` 176 passed。

@@ -204,8 +204,7 @@
       "expected_in_top5": ["fx-ndm"],
       "forbidden_top": [],
       "history": "none",
-      "status": "known-gap",
-      "gap_ticket": "08"
+      "status": "required"
     },
     {
       "id": "ndm-download-still-works",
@@ -225,8 +224,7 @@
       "expected_in_top5": ["fx-razer"],
       "forbidden_top": [],
       "history": "none",
-      "status": "known-gap",
-      "gap_ticket": "08"
+      "status": "required"
     },
     {
       "id": "razer-english",

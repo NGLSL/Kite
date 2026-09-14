@@ -162,6 +162,10 @@ const ALIAS_TO_NAMES: &[(&str, &[&str])] = &[
     ("hwinfo", &["hwinfo"]),
     ("aida64", &["aida64"]),
     ("diskgenius", &["diskgenius"]),
+    // ── 受控跨语言品牌同义称呼（非算法特例；须已入索引） ──
+    ("雷蛇", &["razer"]),
+    ("罗技", &["logitech"]),
+    ("赛睿", &["steelseries"]),
 ];
 
 #[cfg(test)]

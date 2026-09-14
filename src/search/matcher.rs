@@ -7,15 +7,17 @@ use crate::search::alias;
 use crate::search::fuzzy::fuzzy_match;
 use crate::search::normalizer::{compact, split_camel, tokens};
 use crate::search::ranker::{
-    SCORE_BUILTIN_ALIAS_EXACT, SCORE_COMPACT_EXACT, SCORE_COMPACT_SUBSTRING, SCORE_NAME_EXACT,
-    SCORE_PINYIN_EXACT, SCORE_PINYIN_INITIAL, SCORE_PREFIX, SCORE_SUBSTRING, SCORE_TOKEN_SEQ,
-    SCORE_USER_ALIAS_EXACT, SCORE_WORD_EXACT, SCORE_WORD_PREFIX,
+    SCORE_ACRONYM, SCORE_BUILTIN_ALIAS_EXACT, SCORE_COMPACT_EXACT, SCORE_COMPACT_SUBSTRING,
+    SCORE_NAME_EXACT, SCORE_PINYIN_EXACT, SCORE_PINYIN_INITIAL, SCORE_PREFIX, SCORE_SUBSTRING,
+    SCORE_TOKEN_SEQ, SCORE_USER_ALIAS_EXACT, SCORE_WORD_EXACT, SCORE_WORD_PREFIX,
 };
 
 /// 连写包含最短 Query 长度：避免 `to` 等短片段误召回大量应用。
 const MIN_COMPACT_SUBSTR_LEN: usize = 3;
 /// 单词前缀最短 Query 长度。
 const MIN_WORD_PREFIX_LEN: usize = 2;
+/// 英文首字母缩写最短 Query 长度。
+const MIN_ACRONYM_LEN: usize = 2;
 
 /// 用户 Alias 的一行匹配素材：优先按稳定 id 命中，旧行（无 id）退回名称包含。
 pub struct UserTarget {
@@ -137,6 +139,17 @@ fn match_item(item: &AppItem, q: &str, user_targets: &[UserTarget]) -> Option<Se
         best = take_best(best, SCORE_TOKEN_SEQ, "token-seq");
     }
 
+    // 2e) 英文多词首字母：ndm → Neat Download Manager
+    if q.len() >= MIN_ACRONYM_LEN {
+        for candidate in [name.as_ref(), display.as_ref()] {
+            let ac = word_acronym(candidate);
+            if !ac.is_empty() && ac == q {
+                best = take_best(best, SCORE_ACRONYM, "acronym");
+                break;
+            }
+        }
+    }
+
     // 3) 拼音
     if !item.pinyin.is_empty() {
         if item.pinyin == q {
@@ -168,6 +181,15 @@ fn match_item(item: &AppItem, q: &str, user_targets: &[UserTarget]) -> Option<Se
         score,
         matched_by: matched_by.to_string(),
     })
+}
+
+/// 多词英文名首字母：`neat download manager` → `ndm`。单段名不产生缩写。
+fn word_acronym(name: &str) -> String {
+    let toks = tokens(name);
+    if toks.len() < 2 {
+        return String::new();
+    }
+    toks.iter().filter_map(|t| t.chars().next()).collect()
 }
 
 /// Query 各词按序匹配名称词：整词、前缀，或连续若干词的首字母串（vs → visual studio）。
@@ -239,5 +261,12 @@ mod tests {
     fn ordered_match_rejects_wrong_order() {
         assert!(!ordered_token_match("zzz code", "visual studio code"));
         assert!(!ordered_token_match("code visual", "visual studio code"));
+    }
+
+    #[test]
+    fn word_acronym_multi_word_only() {
+        assert_eq!(word_acronym("neat download manager"), "ndm");
+        assert_eq!(word_acronym("visual studio code"), "vsc");
+        assert!(word_acronym("chrome").is_empty());
     }
 }
