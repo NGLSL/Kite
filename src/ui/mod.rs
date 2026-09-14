@@ -227,10 +227,13 @@ enum Message {
     /// 检查 GitHub 更新（关于页）。
     CheckUpdate,
     DownloadUpdate,
-    /// 更新检查结果：Ok(latest)（含"已是最新"）或 Err(原因)。
-    UpdateResult(Result<(String, Option<String>), String>),
+    UpdateInstallerLaunched,
+    /// GitHub Release 检查结果。
+    UpdateResult(Result<system::update::CheckResult, String>),
     /// 打开发布页。
     OpenReleases,
+    /// 打开 Kite 的 GitHub 仓库。
+    OpenRepository,
     /// 全局快捷键被其他程序占用；应用仍可通过托盘打开并重新设置快捷键。
     HotkeyUnavailable(String),
     /// 快捷键线程确认本次改键是否真正注册成功。
@@ -288,7 +291,7 @@ struct State {
     hotkey_recording: bool,
     /// 更新检查：None=未检查；Some(Ok(latest))=完成；Some(Err(e))=失败。
     update_status: Option<Result<String, String>>,
-    update_url: Option<String>,
+    update_asset: Option<system::update::InstallerAsset>,
     update_checking: bool,
     /// 唤起轮次，埋点对齐用。
     epoch: u64,
@@ -453,7 +456,7 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         flash: None,
         hotkey_recording: false,
         update_status: None,
-        update_url: None,
+        update_asset: None,
         update_checking: false,
         epoch: 0,
     };
@@ -679,46 +682,9 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             state.update_checking = true;
             state.update_status = None;
-            state.update_url = None;
+            state.update_asset = None;
             std::thread::spawn(|| {
-                // 系统自带 curl，避免为一次性检查引入 HTTP 依赖
-                let out = std::process::Command::new("curl")
-                    .args([
-                        "-s",
-                        "--max-time",
-                        "10",
-                        "-H",
-                        "Accept: application/vnd.github+json",
-                        "https://api.github.com/repos/NGLSL/Kite/releases/latest",
-                    ])
-                    .output();
-                let result = match out {
-                    Ok(o) if o.status.success() => {
-                        let body = String::from_utf8_lossy(&o.stdout);
-                        let latest = body
-                            .split("\"tag_name\"")
-                            .nth(1)
-                            .and_then(|s| s.split('"').nth(1))
-                            .map(|s| s.to_string());
-                        match latest {
-                            Some(tag) if !tag.is_empty() => {
-                                let asset = body
-                                    .split("\"browser_download_url\"")
-                                    .filter_map(|s| s.split('"').nth(1))
-                                    .find(|u| u.ends_with("kite-setup.exe"))
-                                    .map(str::to_string);
-                                if is_newer_version(env!("CARGO_PKG_VERSION"), &tag) {
-                                    Ok((tag, asset))
-                                } else {
-                                    Ok(("latest".to_string(), None))
-                                }
-                            }
-                            _ => Err("仓库暂无发布（GitHub 无 releases）".to_string()),
-                        }
-                    }
-                    Ok(o) => Err(format!("GitHub 返回 {}", o.status)),
-                    Err(e) => Err(format!("网络请求失败: {e}")),
-                };
+                let result = system::update::check_latest(env!("CARGO_PKG_VERSION"));
                 let _ = EVENT_TX
                     .get()
                     .expect("event tx")
@@ -728,34 +694,71 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::UpdateResult(r) => {
             state.update_checking = false;
-            state.update_url = r.as_ref().ok().and_then(|(_, u)| u.clone());
-            let status = r.map(|(tag, _)| tag);
-            state.update_status = Some(status);
+            state.update_asset = None;
+            state.update_status = Some(match r {
+                Ok(system::update::CheckResult::UpToDate) => Ok("latest".to_string()),
+                Ok(system::update::CheckResult::Available { tag, installer }) => {
+                    state.update_asset = installer;
+                    Ok(tag)
+                }
+                Err(e) => Err(e),
+            });
             Task::none()
         }
+        Message::UpdateInstallerLaunched => {
+            state.update_checking = false;
+            flash(state, "安装器已打开，请按提示完成安装")
+        }
         Message::DownloadUpdate => {
-            let Some(url) = state.update_url.clone() else {
+            if state.update_checking {
+                return Task::none();
+            }
+            let Some(asset) = state.update_asset.clone() else {
                 return flash(state, "没有可用的更新下载地址");
             };
             state.update_checking = true;
             std::thread::spawn(move || {
-                let path = std::env::temp_dir().join("kite-update.exe");
-                let ok = std::process::Command::new("curl")
-                    .args(["-L", "-f", "--max-time", "120", "-sS", "-o"])
-                    .arg(&path).arg(&url).status().ok().is_some_and(|s| s.success())
-                    && path.metadata().map(|m| m.len() > 100_000).unwrap_or(false);
-                if ok {
-                    let _ = std::process::Command::new(&path).spawn();
-                    std::process::exit(0);
+                let result = system::update::download_verified(&asset).and_then(|path| {
+                    plog(&format!("update installer verified path={path:?}"));
+                    app::uwp::launch_runas(&path.to_string_lossy(), "", None)
+                });
+                if result.is_ok() {
+                    plog("update installer launched");
+                    let _ = EVENT_TX
+                        .get()
+                        .expect("event tx")
+                        .unbounded_send(Message::UpdateInstallerLaunched);
+                    return;
                 }
-                let _ = EVENT_TX.get().expect("event tx").unbounded_send(Message::UpdateResult(Err("更新下载失败".into())));
+                plog(&format!("update automatic install failed: {:?}", result.err()));
+                let fallback = app::uwp::launch_shell_path(system::update::LATEST_RELEASE_URL);
+                plog(&format!("update fallback releases err={fallback:?}"));
+                let error = if fallback.is_ok() {
+                    "自动安装失败，已打开 GitHub 最新发布页，请手动安装".to_string()
+                } else {
+                    "自动安装失败，打开 GitHub 最新发布页也失败".to_string()
+                };
+                let _ = EVENT_TX.get().expect("event tx").unbounded_send(Message::UpdateResult(Err(error)));
             });
             Task::none()
         }
         Message::OpenReleases => {
-            let r = app::uwp::launch_shell_path("https://github.com/NGLSL/Kite/releases");
+            let r = app::uwp::launch_shell_path(system::update::LATEST_RELEASE_URL);
             plog(&format!("open releases err={r:?}"));
-            Task::none()
+            if r.is_err() {
+                flash(state, "打开 GitHub 最新发布页失败")
+            } else {
+                Task::none()
+            }
+        }
+        Message::OpenRepository => {
+            let r = app::uwp::launch_shell_path(system::update::REPOSITORY_URL);
+            plog(&format!("open repository err={r:?}"));
+            if r.is_err() {
+                flash(state, "打开 Kite 仓库失败")
+            } else {
+                Task::none()
+            }
         }
         Message::HotkeyUnavailable(spec) => {
             plog(&format!("hotkey unavailable: {spec}"));
@@ -923,25 +926,6 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
     }
-}
-
-/// 宽松 semver 比较（对齐前端 update.ts）：忽略 v 前缀，逐段数字比较。
-fn is_newer_version(current: &str, latest: &str) -> bool {
-    let nums = |v: &str| -> Vec<u32> {
-        v.trim()
-            .trim_start_matches(['v', 'V'])
-            .split('.')
-            .map(|n| n.parse().unwrap_or(0))
-            .collect()
-    };
-    let (a, b) = (nums(current), nums(latest));
-    for i in 0..3 {
-        let diff = b.get(i).copied().unwrap_or(0) as i64 - a.get(i).copied().unwrap_or(0) as i64;
-        if diff != 0 {
-            return diff > 0;
-        }
-    }
-    false
 }
 
 /// 上下文菜单动作（对齐 commands::result_action + 前端复制项）。
