@@ -11,9 +11,10 @@ use serde::{Deserialize, Serialize};
 use super::util::normalize_path_key;
 
 /// 与 lnk::resolve_lnk 的四元组一致：(target, args, working_dir, icon_src)。
+/// icon_src 自 v2 起可能为 `path,index`；旧缓存丢序号，升级 version 强制重解析。
 pub type ResolvedLnk = (String, Option<String>, Option<String>, Option<String>);
 
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct CacheFile {

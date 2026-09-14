@@ -152,7 +152,12 @@ fn merge_uwp(
         }
         item.attach_search_fields();
         item.icon_src = icon_src.or_else(|| Some(item.target.clone()));
-        item.icon = system::icons::cache_icon(icon_dir, &item.id, item.icon_src.as_deref());
+        item.icon = system::icons::cache_icon(
+            icon_dir,
+            &item.id,
+            item.icon_src.as_deref(),
+            Some(item.target.as_str()),
+        );
         to_add.push(item);
     }
 

@@ -200,7 +200,12 @@ fn scan_apps_with_scoop_shims(
         // 保留提取源，快速扫描阶段先不提图标，稍后统一补
         item.icon_src = icon_src.or_else(|| Some(item.target.clone()));
         if !fast {
-            item.icon = icons::cache_icon(icon_dir, &item.id, item.icon_src.as_deref());
+            item.icon = icons::cache_icon(
+                icon_dir,
+                &item.id,
+                item.icon_src.as_deref(),
+                Some(item.target.as_str()),
+            );
         }
         apps.push(item);
     }
@@ -217,26 +222,23 @@ fn budget_exhausted(budget: Option<Duration>, t0: Instant) -> bool {
     budget.is_some_and(|b| t0.elapsed() >= b)
 }
 
-/// 收集缺少图标的条目 (id, 提取源)。调用方短暂持锁后即可释放。
-pub fn missing_icon_targets(index: &AppIndex) -> Vec<(String, Option<String>)> {
+/// 收集缺少图标的条目 (id, 首选源, target 回退)。调用方短暂持锁后即可释放。
+pub fn missing_icon_targets(index: &AppIndex) -> Vec<(String, Option<String>, Option<String>)> {
     index
         .apps
         .iter()
         .filter(|a| a.icon.is_none())
         .map(|a| {
-            let src = a
-                .icon_src
-                .clone()
-                .filter(|s| !s.is_empty())
-                .or_else(|| Some(a.target.clone()));
-            (a.id.clone(), src)
+            let src = a.icon_src.clone().filter(|s| !s.is_empty());
+            let target = Some(a.target.clone()).filter(|s| !s.is_empty());
+            (a.id.clone(), src, target)
         })
         .collect()
 }
 
 /// 并行提取图标，返回 id → PNG 路径；提取过程不持任何锁，调用方拿结果后短暂持锁合并。
 pub fn extract_icons_parallel(
-    pending: &[(String, Option<String>)],
+    pending: &[(String, Option<String>, Option<String>)],
     icon_dir: &Path,
 ) -> HashMap<String, Option<String>> {
     use std::sync::Arc;
@@ -248,12 +250,17 @@ pub fn extract_icons_parallel(
 
     std::thread::scope(|s| {
         for part in pending.chunks(chunk) {
-            let part: Vec<(String, Option<String>)> = part.to_vec();
+            let part: Vec<(String, Option<String>, Option<String>)> = part.to_vec();
             let icon_dir = icon_dir.to_path_buf();
             let results = Arc::clone(&results);
             s.spawn(move || {
-                for (id, src) in &part {
-                    let path = icons::cache_icon(&icon_dir, id, src.as_deref());
+                for (id, src, target) in &part {
+                    let path = icons::cache_icon(
+                        &icon_dir,
+                        id,
+                        src.as_deref(),
+                        target.as_deref(),
+                    );
                     if let Ok(mut g) = results.lock() {
                         g.insert(id.clone(), path);
                     }

@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: resolved
 Type: task
 Blocked by: None
 
@@ -19,14 +19,14 @@ Blocked by: None
 
 ## Acceptance Criteria
 
-- [ ] 非零/负 icon index 的快捷方式显示对应资源图标，而非默认第 0 号或占位符。
-- [ ] CC Switch 类「无扩展名 ProductIcon」显示应用图标而非通用白纸。
-- [ ] 优先图标源无效时列表仍有 target 应用图标。
-- [ ] 控制面板等 Shell 虚拟入口图标与当前 Windows 系统对象对应。
-- [ ] 升级后旧错误但有效的 PNG 缓存在下次索引时自动更新。
-- [ ] 损坏或全透明缓存会被重新提取。
-- [ ] 列表 UI 显示新图标，不被进程内旧缓存挡住。
-- [ ] 搜索输入期间图标补齐不阻塞首屏与后续按键。
+- [x] 非零/负 icon index 的快捷方式显示对应资源图标，而非默认第 0 号或占位符。
+- [x] CC Switch 类「无扩展名 ProductIcon」显示应用图标而非通用白纸。
+- [x] 优先图标源无效时列表仍有 target 应用图标。
+- [x] 控制面板等 Shell 虚拟入口图标与当前 Windows 系统对象对应。
+- [x] 升级后旧错误但有效的 PNG 缓存在下次索引时自动更新。
+- [x] 损坏或全透明缓存会被重新提取。
+- [x] 列表 UI 显示新图标，不被进程内旧缓存挡住。
+- [x] 搜索输入期间图标补齐不阻塞首屏与后续按键。
 
 ## Validation
 
@@ -46,3 +46,12 @@ Blocked by: None
 ## Comments
 
 规格备注：CC Switch 图标位置为无扩展名 `ProductIcon`，文件头有效 ICO；`.lnk` 独立丢弃 icon index——两条缺口须分别验证。控制面板缓存当前可能是「有效但错误」的通用 stock icon，不是提取失败。
+
+2026-09-14 实现记录（worktree `Kite-search-experience`）：
+
+- `lnk` 下传 `path,index`（含 0）；scanner cache `CACHE_VERSION=2` 强制旧条目重解析。
+- `looks_like_ico_file` 嗅探 `00 00 01 00`，无扩展名 ICO 走 ico 提取链。
+- `cache_icon(preferred, target_fallback)`；图标文件名 `v2:{id}` 使旧错误 PNG 自动作废。
+- Shell 虚拟入口改为先解析命名空间对象，再 stock 回退（控制面板不再优先 SIID_SOFTWARE）。
+- 回归：`extensionless_ico_magic_is_classified_as_ico`、`collect_candidates_prefer_icon_src_then_target`、`full_pass` 相关；`cargo test` 164 passed。
+- 待人工实机（票 10）：CC Switch、控制面板列表可见图标与磁盘 PNG 一致。

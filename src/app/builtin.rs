@@ -250,7 +250,12 @@ fn windows_settings_hits(query_norm: &str, icon_dir: &Path) -> Vec<SearchResult>
         );
         item.icon_src = Some(settings_exe.clone());
         item.attach_search_fields();
-        item.icon = icons::cache_icon(icon_dir, &item.id, item.icon_src.as_deref());
+        item.icon = icons::cache_icon(
+            icon_dir,
+            &item.id,
+            item.icon_src.as_deref(),
+            None,
+        );
         hits.push(SearchResult {
             item,
             score,
@@ -298,7 +303,12 @@ fn system_tool_hits(query_norm: &str, icon_dir: &Path) -> Vec<SearchResult> {
         );
         item.attach_search_fields();
         item.icon_src = Some(target);
-        item.icon = icons::cache_icon(icon_dir, &item.id, item.icon_src.as_deref());
+        item.icon = icons::cache_icon(
+            icon_dir,
+            &item.id,
+            item.icon_src.as_deref(),
+            None,
+        );
         hits.push(SearchResult {
             item,
             score,
