@@ -9,6 +9,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use iced::keyboard::{key::Named, Key, Modifiers};
+use iced::keyboard::key::{Code, Physical};
 use iced::widget::operation::scroll_to;
 use iced::widget::scrollable::AbsoluteOffset;
 use iced::widget::Id as WidgetId;
@@ -171,7 +172,8 @@ fn boot_entry() -> (State, Task<Message>) {
 enum Message {
     /// 全局快捷键触发；携带接收线程的单调时间戳（埋点起点）。
     Hotkey(Instant),
-    KeyPressed(Key, Modifiers),
+    /// 按键：逻辑键 + 物理键 + 修饰键（Alt+N 在 Windows 上逻辑键常被改写，需物理键兜底）。
+    KeyPressed(Key, Physical, Modifiers),
     /// IME 组合态变化（true = 候选期间）。
     Composing(bool),
     /// IME 提交了文本（埋点用，插入由 text_input 自行处理）。
@@ -533,10 +535,14 @@ fn keyboard_message_app(event: iced::event::Event) -> Option<Message> {
 
 fn keyboard_message(event: iced::event::Event, recording: bool) -> Option<Message> {
     match event {
-        iced::event::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
-            if recording || app_key(&key, modifiers) =>
+        iced::event::Event::Keyboard(keyboard::Event::KeyPressed {
+            key,
+            physical_key,
+            modifiers,
+            ..
+        }) if recording || app_key(&key, physical_key, modifiers) =>
         {
-            Some(Message::KeyPressed(key, modifiers))
+            Some(Message::KeyPressed(key, physical_key, modifiers))
         }
         iced::event::Event::InputMethod(im) => match im {
             iced_core::input_method::Event::Opened => Some(Message::Composing(true)),
@@ -555,7 +561,7 @@ fn keyboard_message(event: iced::event::Event, recording: bool) -> Option<Messag
     }
 }
 
-fn app_key(key: &Key, mods: Modifiers) -> bool {
+fn app_key(key: &Key, physical: Physical, mods: Modifiers) -> bool {
     match key {
         Key::Named(
             Named::Escape | Named::ArrowUp | Named::ArrowDown | Named::Enter,
@@ -563,7 +569,83 @@ fn app_key(key: &Key, mods: Modifiers) -> bool {
         Key::Character(c) => {
             mods.alt() && c.chars().next().is_some_and(|ch| ch.is_ascii_digit())
         }
-        _ => false,
+        _ => mods.alt() && alt_digit_index(key, physical, mods).is_some(),
+    }
+}
+
+/// Alt+1..9 → 结果下标。Windows 上 Alt 会改写逻辑键，优先物理键位。
+fn alt_digit_index(key: &Key, physical: Physical, mods: Modifiers) -> Option<usize> {
+    if !mods.alt() {
+        return None;
+    }
+    let from_char = |c: &str| {
+        c.chars()
+            .next()
+            .and_then(|ch| ch.to_digit(10))
+            .filter(|d| *d >= 1)
+            .map(|d| (d - 1) as usize)
+    };
+    if let Key::Character(c) = key {
+        if let Some(i) = from_char(c) {
+            return Some(i);
+        }
+    }
+    let code = match physical {
+        Physical::Code(code) => code,
+        Physical::Unidentified(_) => return None,
+    };
+    match code {
+        Code::Digit1 | Code::Numpad1 => Some(0),
+        Code::Digit2 | Code::Numpad2 => Some(1),
+        Code::Digit3 | Code::Numpad3 => Some(2),
+        Code::Digit4 | Code::Numpad4 => Some(3),
+        Code::Digit5 | Code::Numpad5 => Some(4),
+        Code::Digit6 | Code::Numpad6 => Some(5),
+        Code::Digit7 | Code::Numpad7 => Some(6),
+        Code::Digit8 | Code::Numpad8 => Some(7),
+        Code::Digit9 | Code::Numpad9 => Some(8),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod alt_digit_tests {
+    use super::*;
+    use iced::keyboard::Modifiers;
+
+    #[test]
+    fn physical_digit_with_alt_maps_to_index() {
+        let mods = Modifiers::ALT;
+        let key = Key::Unidentified;
+        assert_eq!(
+            alt_digit_index(&key, Physical::Code(Code::Digit1), mods),
+            Some(0)
+        );
+        assert_eq!(
+            alt_digit_index(&key, Physical::Code(Code::Numpad9), mods),
+            Some(8)
+        );
+        assert_eq!(
+            alt_digit_index(&key, Physical::Code(Code::Digit0), mods),
+            None
+        );
+    }
+
+    #[test]
+    fn character_digit_still_works() {
+        let mods = Modifiers::ALT;
+        let key: Key = Key::Character("3".into());
+        assert_eq!(
+            alt_digit_index(&key, Physical::Code(Code::KeyC), mods),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn without_alt_is_none() {
+        let mods = Modifiers::empty();
+        let key: Key = Key::Character("1".into());
+        assert_eq!(alt_digit_index(&key, Physical::Code(Code::Digit1), mods), None);
     }
 }
 
@@ -599,7 +681,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 }
             }
         }
-        Message::KeyPressed(key, mods) => on_key(state, key, mods),
+        Message::KeyPressed(key, physical, mods) => on_key(state, key, physical, mods),
         Message::Composing(active) => {
             if state.ime_composing != active {
                 plog(&format!("ime composing={active}"));
@@ -988,7 +1070,7 @@ fn menu_action(state: &mut State, i: usize, action: MenuAction) -> Task<Message>
 
 /// 键盘：↑↓ 选择、Enter 启动（组合态禁止，见 ime_composing）、Esc 关菜单/隐藏、
 /// Alt+1..9 启动对应行（对齐前端 index<9 提示）；热键录制态优先捕获。
-fn on_key(state: &mut State, key: Key, mods: Modifiers) -> Task<Message> {
+fn on_key(state: &mut State, key: Key, physical: Physical, mods: Modifiers) -> Task<Message> {
     if state.hotkey_recording {
         return hotkey_record_key(state, key, mods);
     }
@@ -1010,21 +1092,38 @@ fn on_key(state: &mut State, key: Key, mods: Modifiers) -> Task<Message> {
         Key::Named(Named::ArrowDown) => move_selection(state, 1),
         Key::Named(Named::Enter) if !state.ime_composing => launch_selected(state),
         Key::Named(name) => {
+            // Alt+数字在部分布局/IME 下 logical key 不是 Character，走物理键
+            if let Some(i) = alt_digit_index(&key, physical, mods) {
+                if !state.ime_composing {
+                    plog(&format!("alt-n via named/physical idx={i}"));
+                    return Task::done(Message::LaunchIndex(i));
+                }
+            }
             plog(&format!("key named {name:?} ignored"));
             Task::none()
         }
-        Key::Character(c) => {
+        Key::Character(ref c) => {
             if mods.alt() {
-                if let Some(digit) = c.chars().next().and_then(|ch| ch.to_digit(10)) {
-                    if digit >= 1 && !state.ime_composing {
-                        return Task::done(Message::LaunchIndex((digit - 1) as usize));
+                if let Some(i) = alt_digit_index(&key, physical, mods) {
+                    if !state.ime_composing {
+                        plog(&format!("alt-n via char '{c}' idx={i}"));
+                        return Task::done(Message::LaunchIndex(i));
                     }
                 }
+                plog(&format!("alt+char '{c}' not a launch digit"));
             }
             plog(&format!("key char '{c}'"));
             Task::none()
         }
-        _ => Task::none(),
+        _ => {
+            if let Some(i) = alt_digit_index(&key, physical, mods) {
+                if !state.ime_composing {
+                    plog(&format!("alt-n via fallback idx={i}"));
+                    return Task::done(Message::LaunchIndex(i));
+                }
+            }
+            Task::none()
+        }
     }
 }
 

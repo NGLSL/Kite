@@ -498,6 +498,41 @@ mod tests {
     }
 
     #[test]
+    fn single_letter_pinyin_initial_finds_control_panel() {
+        // k → 控制面板（kzmb）应可召回；名称前缀（Kite）仍可排更前
+        let apps = vec![
+            item("Kite"),
+            item("kdnet"),
+            item("控制面板"),
+            item("记事本"),
+        ];
+        let hits = search(&apps, "k", &[], TOP_N);
+        let names: Vec<_> = hits.iter().map(|h| h.item.name.as_str()).collect();
+        assert!(
+            names.contains(&"控制面板"),
+            "单字母 k 应召回控制面板: {names:?}"
+        );
+        assert!(
+            !names.contains(&"记事本"),
+            "记事本不应被 k 召回: {names:?}"
+        );
+        // 名称前缀优先于拼音首字母前缀
+        assert_eq!(hits[0].item.name, "Kite");
+    }
+
+    #[test]
+    fn system_tool_control_panel_via_single_letter() {
+        let apps = vec![item("Notepad")];
+        let entries = crate::app::builtin::materialize_system_entries(None);
+        let hits = search_with_system(&apps, &entries, "k", &[], TOP_N);
+        assert!(
+            hits.iter().any(|h| h.item.name == "控制面板"),
+            "系统入口控制面板应被 k 召回: {:?}",
+            hits.iter().map(|h| &h.item.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn exp_finds_file_explorer_via_word_and_name() {
         let apps = vec![item("File Explorer"), item("IEXPLORE")];
         let hits = search(&apps, "exp", &[], TOP_N);

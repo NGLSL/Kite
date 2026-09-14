@@ -207,7 +207,15 @@ pub fn collect(
                 }
             }
         }
-        // 词元前缀仍可能漏：对 1–2 字再补 term 前缀（已有）即可
+        // 拼音首字母前缀：k → 控制面板（kzmb）；名称首字符是汉字时 first_char 盖不到
+        if q.latin {
+            for doc in &index.docs {
+                if doc.pinyin_initials.starts_with(&q.raw_norm) {
+                    out.ids.insert(doc.id);
+                    out.stats.pinyin += 1;
+                }
+            }
+        }
     }
 
     out

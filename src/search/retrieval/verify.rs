@@ -236,8 +236,14 @@ fn verify_one(
     if !doc.pinyin_initials.is_empty() {
         if doc.pinyin_initials == q_raw {
             best = take_best(best, SCORE_PINYIN_INITIAL, "pinyin-initial");
-        } else if q_raw.chars().count() >= 2 && doc.pinyin_initials.starts_with(q_raw) {
-            best = take_best(best, SCORE_PINYIN_INITIAL - 40, "pinyin-initial-prefix");
+        } else if doc.pinyin_initials.starts_with(q_raw) {
+            // 单字母也允许前缀（k → 控制面板 kzmb）；分略低于多字母，避免压过名称前缀
+            let score = if q_raw.chars().count() == 1 {
+                SCORE_PINYIN_INITIAL - 60
+            } else {
+                SCORE_PINYIN_INITIAL - 40
+            };
+            best = take_best(best, score, "pinyin-initial-prefix");
         } else if q_raw.chars().count() >= 2 && doc.pinyin_initials.contains(q_raw) {
             best = take_best(best, SCORE_PINYIN_INITIAL_INNER, "pinyin-initial-inner");
         }
