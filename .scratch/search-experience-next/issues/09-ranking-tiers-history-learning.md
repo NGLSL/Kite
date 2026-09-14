@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: resolved
 Type: task
 Blocked by: 06 搜索评估基线
 
@@ -16,11 +16,11 @@ Blocked by: 06 搜索评估基线
 
 ## Acceptance Criteria
 
-- [ ] 多次用 `ter` 打开 XTerminal 后，它在相关性接近的终端候选前移，但无关弱匹配不因此进入首屏前列。
-- [ ] 明确 exact / word-prefix 匹配不会被低相关 substring/fuzzy + 历史压过。
-- [ ] 清空历史或暂停记录后，后续排序立即不再受益于旧加分。
-- [ ] Pin 保护边界仍满足：Prefix+个性化 < Name Exact 等不变量。
-- [ ] 相对票 06（及 07/08 若已合入）基线：Top1 与 MRR 改善或持平，重复入口数不恶化。
+- [x] 多次用 `ter` 打开 XTerminal 后，它在相关性接近的终端候选前移，但无关弱匹配不因此进入首屏前列。
+- [x] 明确 exact / word-prefix 匹配不会被低相关 substring/fuzzy + 历史压过。
+- [x] 清空历史或暂停记录后，后续排序立即不再受益于旧加分。
+- [x] Pin 保护边界仍满足：Prefix+个性化 < Name Exact 等不变量。
+- [x] 相对票 06（及 07/08 若已合入）基线：Top1 与 MRR 改善或持平，重复入口数不恶化。
 
 ## Validation
 
@@ -38,3 +38,11 @@ Blocked by: 06 搜索评估基线
 - 全量 LRU 排序。
 
 ## Comments
+
+2026-09-14 实现记录：
+
+- `quality_tier(base_score)`：user-alias / name-exact / compact / token / prefix / pinyin / word-prefix / substring / fuzzy 分层。
+- `apply_boosts` 先按基础分算层，层内用 History/Pin 调序，再按 (tier, score) 重排；History 不能跨层抬升弱匹配。
+- 单测：`history_cannot_lift_substring_above_word_prefix`、`history_reorders_within_same_tier`。
+- 清空/暂停历史行为沿用 storage 既有测试。
+- `cargo test` 179 passed。

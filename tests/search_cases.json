@@ -260,7 +260,7 @@
       },
       "status": "known-gap",
       "gap_ticket": "09",
-      "notes": "票 07 落地 word-prefix 后，票 09 用 History 把相近层内 XTerminal 稳到首位。"
+      "notes": "票 07 落地 word-prefix 后，票 09 用 History 把相近层内 XTerminal 稳到首位。eval harness 尚未注入 history；由 history 模块单测覆盖同层重排。"
     }
   ]
 }
