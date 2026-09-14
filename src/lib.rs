@@ -11,10 +11,29 @@ pub mod ui;
 
 /// 应用入口：原生 UI（iced + tiny-skia 软渲染，无 WebView2）。
 pub fn run() {
+    // Initialize file logging before elevation handling so bootstrap failures
+    // and a guarded de-elevation retry are visible even when the UI never starts.
+    let data_dir = dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("com.kite.launcher");
+    let _ = std::fs::create_dir_all(&data_dir);
+    log::init(log::default_path_under(&data_dir));
+    log::info(&format!(
+        "entry version={} pid={} elevated-check",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id()
+    ));
+
     match system::elevation::relaunch_if_elevated() {
-        Ok(true) => return,
+        Ok(true) => {
+            log::info("elevated bootstrap exiting after child launch");
+            return;
+        }
         Ok(false) => {}
         Err(error) => {
+            log::info(&format!(
+                "elevated launch could not be converted to a user launch: {error}"
+            ));
             eprintln!("kite: elevated launch could not be converted to a user launch: {error}");
         }
     }

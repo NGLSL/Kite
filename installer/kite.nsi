@@ -30,8 +30,9 @@ Function .onInit
   ReadRegStr $OldInstallDir HKLM "Software\Kite" "InstallLocation"
   StrCmp $OldInstallDir "" 0 +2
     ReadRegStr $OldInstallDir HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Kite" "InstallLocation"
-  ; 覆盖安装前结束正在运行的旧版，避免 kite.exe 被占用而复制失败。
-  ExecWait '"$SYSDIR\taskkill.exe" /F /T /IM kite.exe'
+  ; 覆盖安装前只结束 Kite 自身。不要启用进程树递归结束，避免连带
+  ; Kite 已经唤起的用户应用。
+  ExecWait '"$SYSDIR\taskkill.exe" /F /IM kite.exe'
   Sleep 300
 FunctionEnd
 

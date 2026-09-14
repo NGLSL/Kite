@@ -94,7 +94,8 @@ pub fn run() -> iced::Result {
     let _ = ICON_DIR.set(icon_dir.clone());
     log::init(data_dir.join("kite.log"));
     plog(&format!(
-        "start pid={} data_dir={:?} icon_dir={:?}",
+        "start version={} pid={} data_dir={:?} icon_dir={:?}",
+        env!("CARGO_PKG_VERSION"),
         std::process::id(),
         data_dir,
         icon_dir
@@ -228,6 +229,10 @@ enum Message {
     UpdateResult(Result<(String, Option<String>), String>),
     /// 打开发布页。
     OpenReleases,
+    /// 全局快捷键被其他程序占用；应用仍可通过托盘打开并重新设置快捷键。
+    HotkeyUnavailable(String),
+    /// 快捷键线程确认本次改键是否真正注册成功。
+    HotkeyRegistrationResult(String, Result<(), String>),
     IndexReady(usize),
     IconsFilled(usize),
     UwpMerged(usize),
@@ -308,7 +313,7 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
 
     // 快捷键线程：原生 RegisterHotKey（线程关联）+ 消息泵 + 改键命令轮询。
     // 注意：必须在本线程泵消息（GetMessageW），WM_HOTKEY 才会被投递；注册失败
-    // （如同键位已被 Kite 占用）直接退出（code=2）。
+    // 只禁用热键并保留托盘，用户仍可从设置页改键。
     let (hk_tx, hk_rx) = std::sync::mpsc::channel::<String>();
     let _ = HOTKEY_CMD.set(hk_tx);
     std::thread::spawn(move || {
@@ -325,11 +330,23 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
             .unwrap_or((default_mods, 0x20u32));
         let mut current = (HOT_KEY_MODIFIERS(saved_mods), saved_vk);
         unsafe {
-            if RegisterHotKey(None, ID, current.0, current.1).is_err() {
-                plog("hotkey register failed (Kite 正在运行?)");
-                std::process::exit(2);
-            }
-            plog(&format!("hotkey registered {saved_hotkey}"));
+            let mut registered = match RegisterHotKey(None, ID, current.0, current.1) {
+                Ok(()) => {
+                    plog(&format!("hotkey registered {saved_hotkey}"));
+                    true
+                }
+                Err(error) => {
+                    plog(&format!(
+                        "hotkey register failed for {saved_hotkey}; hotkey disabled; error={error}"
+                    ));
+                    // Keep the worker alive so settings can register a new key.
+                    let _ = EVENT_TX
+                        .get()
+                        .expect("event tx")
+                        .unbounded_send(Message::HotkeyUnavailable(saved_hotkey.clone()));
+                    false
+                }
+            };
             let mut msg = MSG::default();
             loop {
                 // 泵全部待处理消息
@@ -344,17 +361,36 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
                     let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
-                // 设置页改键：注销旧键 → 注册新键（失败回退旧键）
+                // 设置页改键：注销旧键 → 注册新键（失败回退旧键）。
+                // 初始键位被占用时 registered=false，仍可在此处改键。
                 if let Ok(spec) = hk_rx.try_recv() {
                     if let Some((mods, vk)) = parse_raw(&spec) {
-                        let _ = UnregisterHotKey(None, ID);
-                        if RegisterHotKey(None, ID, HOT_KEY_MODIFIERS(mods), vk).is_ok() {
-                            current = (HOT_KEY_MODIFIERS(mods), vk);
-                            plog(&format!("hotkey re-registered: {spec}"));
-                        } else {
-                            let _ = RegisterHotKey(None, ID, current.0, current.1);
-                            plog(&format!("hotkey register failed, keep old: {spec}"));
+                        let old_registered = registered;
+                        if registered {
+                            let _ = UnregisterHotKey(None, ID);
+                            registered = false;
                         }
+                        let result = match RegisterHotKey(None, ID, HOT_KEY_MODIFIERS(mods), vk) {
+                            Ok(()) => {
+                                current = (HOT_KEY_MODIFIERS(mods), vk);
+                                registered = true;
+                                plog(&format!("hotkey re-registered: {spec}"));
+                                Ok(())
+                            }
+                            Err(error) => {
+                                if old_registered {
+                                    registered = RegisterHotKey(None, ID, current.0, current.1).is_ok();
+                                }
+                                plog(&format!(
+                                    "hotkey register failed for {spec}; old_restored={registered}; error={error}"
+                                ));
+                                Err(error.to_string())
+                            }
+                        };
+                        let _ = EVENT_TX
+                            .get()
+                            .expect("event tx")
+                            .unbounded_send(Message::HotkeyRegistrationResult(spec, result));
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -577,7 +613,11 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::WindowReady(id) => {
             plog(&format!("window ready id={:?}", id.map(|i| i.to_string())));
             state.window_id = id;
-            Task::none()
+            if state.settings_open {
+                id.map(settings_window_task).unwrap_or_else(Task::none)
+            } else {
+                Task::none()
+            }
         }
         Message::QueryChanged(q) => {
             state.query = q;
@@ -715,6 +755,29 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             plog(&format!("open releases err={r:?}"));
             Task::none()
         }
+        Message::HotkeyUnavailable(spec) => {
+            plog(&format!("hotkey unavailable: {spec}"));
+            let show = open_settings(state);
+            state.settings_section = Section::Hotkey;
+            Task::batch([
+                show,
+                flash(state, &format!("快捷键 {spec} 已被占用，请更换组合键")),
+            ])
+        }
+        Message::HotkeyRegistrationResult(spec, result) => match result {
+            Ok(()) => {
+                if let Some(db) = &mut state.history {
+                    let _ = db.save_setting("hotkey", &spec);
+                }
+                state.hotkey = spec.clone();
+                state.hotkey_label = system::hotkey::display_label(&spec);
+                flash(state, "快捷键已更新")
+            }
+            Err(error) => {
+                plog(&format!("hotkey change rejected: {spec}; error={error}"));
+                flash(state, &format!("快捷键 {spec} 无法使用，请换一个组合键"))
+            }
+        },
         Message::OpenSettings => open_settings(state),
         Message::CloseSettings => close_settings(state),
         Message::SettingsSection(s) => {
@@ -755,15 +818,10 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             if parse_raw(&spec).is_none() {
                 return flash(state, "无法解析该快捷键");
             }
-            if let Some(tx) = HOTKEY_CMD.get() {
-                let _ = tx.send(spec.clone());
+            match HOTKEY_CMD.get().map(|tx| tx.send(spec)) {
+                Some(Ok(())) => flash(state, "正在应用快捷键…"),
+                _ => flash(state, "快捷键服务不可用，请重启 Kite"),
             }
-            if let Some(db) = &mut state.history {
-                let _ = db.save_setting("hotkey", &spec);
-            }
-            state.hotkey = spec.clone();
-            state.hotkey_label = system::hotkey::display_label(&spec);
-            flash(state, "快捷键已更新")
         }
         Message::AliasInputChanged(s) => {
             state.alias_input = s;
@@ -1074,6 +1132,7 @@ fn flash(state: &mut State, msg: &str) -> Task<Message> {
 /// 打开设置：载入设置与别名，窗口切到 720×520（对齐 set_settings_mode）。
 fn open_settings(state: &mut State) -> Task<Message> {
     state.settings_open = true;
+    state.hidden = false;
     state.settings_section = Section::General;
     state.menu = None;
     if let Some(db) = &state.history {
@@ -1087,11 +1146,17 @@ fn open_settings(state: &mut State) -> Task<Message> {
     load_aliases(state);
     plog("settings open");
     state.window_id
-        .map(|id| Task::batch([
-            window::set_level(id, window::Level::Normal),
-            window::resize(id, iced::Size::new(720.0, 520.0)),
-        ]))
+        .map(settings_window_task)
         .unwrap_or_else(Task::none)
+}
+
+fn settings_window_task(id: window::Id) -> Task<Message> {
+    Task::batch([
+        window::set_level(id, window::Level::Normal),
+        window::set_mode(id, window::Mode::Windowed),
+        window::resize(id, iced::Size::new(720.0, 520.0)),
+        window::gain_focus(id),
+    ])
 }
 
 /// 关闭设置：窗口切回搜索尺寸并聚焦输入框。

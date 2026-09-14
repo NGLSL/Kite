@@ -28,6 +28,7 @@ type SetSearchW = unsafe extern "system" fn(*const u16);
 type SetRequestFlags = unsafe extern "system" fn(u32);
 type SetMax = unsafe extern "system" fn(u32);
 type QueryW = unsafe extern "system" fn(i32) -> i32;
+type GetMajorVersion = unsafe extern "system" fn() -> u32;
 type GetLastError = unsafe extern "system" fn() -> u32;
 type GetNumResults = unsafe extern "system" fn() -> u32;
 type GetResultPathW = unsafe extern "system" fn(u32) -> *const u16;
@@ -44,6 +45,7 @@ struct Sdk {
     set_request_flags: SetRequestFlags,
     set_max: SetMax,
     query: QueryW,
+    get_major_version: GetMajorVersion,
     get_last_error: GetLastError,
     get_num_results: GetNumResults,
     get_result_path: GetResultPathW,
@@ -96,6 +98,7 @@ unsafe fn build_sdk(h: HMODULE) -> Option<Sdk> {
         set_request_flags: sym(h, b"Everything_SetRequestFlags\0")?,
         set_max: sym(h, b"Everything_SetMax\0")?,
         query: sym(h, b"Everything_QueryW\0")?,
+        get_major_version: sym(h, b"Everything_GetMajorVersion\0")?,
         get_last_error: sym(h, b"Everything_GetLastError\0")?,
         get_num_results: sym(h, b"Everything_GetNumResults\0")?,
         get_result_path: sym(h, b"Everything_GetResultPathW\0")?,
@@ -142,6 +145,18 @@ pub fn search_files(query: &str, max: usize) -> Vec<EverythingHit> {
     let _guard = QUERY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
     unsafe {
+        // QueryW(TRUE) waits for the Everything IPC server and can block for
+        // several seconds when Everything is not installed or not running.
+        // Probe the SDK first; Flow Launcher uses the same version/error check.
+        // This keeps the UI thread out of the blocking query path.
+        (sdk.get_major_version)();
+        if (sdk.get_last_error)() == ERROR_IPC {
+            if !IPC_MISS_LOGGED.swap(true, Ordering::Relaxed) {
+                crate::log::info("everything not running; file search skipped");
+            }
+            return Vec::new();
+        }
+
         let wide: Vec<u16> = OsStr::new(q)
             .encode_wide()
             .chain(std::iter::once(0))
@@ -201,6 +216,7 @@ unsafe fn ptr_to_string(p: *const u16) -> String {
 mod tests {
     use super::*;
     use std::path::Path;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn empty_query_short_circuits() {
@@ -244,6 +260,27 @@ mod tests {
         }
         // 本机 Everything 在运行时应有命中;此处仅打印,避免强依赖外部进程
         eprintln!("sdk smoke hits={}", hits.len());
+    }
+
+    #[test]
+    fn missing_everything_does_not_wait_for_ipc() {
+        // 回归检查引擎未运行时不会进入 QueryW(TRUE) 的多秒 IPC 等待；
+        // 引擎正在运行的机器跳过此环境测试，避免把真实索引耗时算进去。
+        crate::system::resources::init(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let Some(sdk) = sdk() else { return };
+        unsafe {
+            (sdk.get_major_version)();
+            if (sdk.get_last_error)() != ERROR_IPC {
+                return;
+            }
+        }
+        let started = Instant::now();
+        let _ = search_files("we", 5);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "missing Everything probe took {:?}",
+            started.elapsed()
+        );
     }
 
     fn locate_dll() -> Option<PathBuf> {
