@@ -21,12 +21,13 @@ Kite 通过全局快捷键呼出搜索窗口，输入应用名称、别名或拼
 ## 功能
 
 - 全局快捷键唤起和隐藏搜索窗口
-- 扫描开始菜单、桌面、注册表 App Paths 和 Windows packaged apps
+- 扫描开始菜单、桌面、Scoop shims、注册表 App Paths 和 Windows packaged apps
 - 支持 `.lnk`、`.exe`、UWP 应用、别名、中文、拼音和拼音首字母搜索
 - Exact、Prefix、Substring、Fuzzy 多路召回和统一排序
 - 启动历史、固定结果、设置和系统托盘
 - 应用图标提取与失败降级
 - 可选 Everything 文件搜索
+- 可搜索回收站、控制面板、注册表编辑器等常用 Windows 系统工具
 
 ## 系统要求
 
