@@ -1262,7 +1262,6 @@ impl State {
     fn refresh_results(&mut self) {
         let t0 = Instant::now();
         let q_norm = search::normalize_for_index(&self.query);
-        let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(db) = &self.history {
             self.pinned = db.pinned_ids().into_iter().collect();
         }
@@ -1277,6 +1276,7 @@ impl State {
                     )
                 })
                 .unwrap_or_default();
+            let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
             search::order_by_recent(&index.apps, &recent, &pinned, search::MAX_RESULTS)
         } else {
             let user_targets: Vec<search::UserTarget> = self
@@ -1292,13 +1292,33 @@ impl State {
                         .collect()
                 })
                 .unwrap_or_default();
-            let mut hits =
-                search::search(&index.apps, &self.query, &user_targets, search::MAX_RESULTS);
-
-            // 内置：Kite 设置 + Windows 系统设置页（css 对齐前端顺序：内置在前）
-            let mut builtins = app::builtin::collect_builtin_hits(&q_norm, &self.icon_dir);
-            builtins.append(&mut hits);
-            hits = builtins;
+            // 克隆同代索引 Arc 后立即释放锁，匹配/IPC 不持全局锁
+            let retrieval = {
+                let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
+                index.retrieval.clone()
+            };
+            // 应用 + 系统入口统一多路召回（快照同代索引，不按来源截断前排）
+            // 系统入口图标已在快照准备阶段写入，按键路径不再提取/校验
+            let mut hits = if let Some(ret) = retrieval {
+                search::search_with_index(
+                    &ret,
+                    &self.query,
+                    &user_targets,
+                    search::MAX_RESULTS,
+                )
+            } else {
+                let (apps, system_entries) = {
+                    let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
+                    (index.apps.clone(), index.system_entries.clone())
+                };
+                search::search_with_system(
+                    &apps,
+                    &system_entries,
+                    &self.query,
+                    &user_targets,
+                    search::MAX_RESULTS,
+                )
+            };
 
             // 链接识别：网址 → 列已装浏览器直达（偏好优先）
             let preferred = self.history.as_ref().and_then(|h| h.preferred_browser());

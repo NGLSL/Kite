@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::{order_by_recent, search, MAX_RESULTS};
+use super::{order_by_recent, MAX_RESULTS};
 use crate::model::AppItem;
 
 const EN_NAMES: &[&str] = &[
@@ -119,9 +119,11 @@ fn report_search_latency() {
     println!("|---|---|---|---|---|---|---|");
     for n in [80usize, 2000] {
         let apps = synthetic_index(n);
+        // 生产路径：快照同代索引只建一次，测查询热路径
+        let index = super::RetrievalIndex::build(&apps, &[]);
         for (label, q) in QUERIES {
             bench_one(label, q, n, || {
-                let hits = search(&apps, q, &[], MAX_RESULTS);
+                let hits = super::search_with_index(&index, q, &[], MAX_RESULTS);
                 std::hint::black_box(&hits);
             });
         }
@@ -132,5 +134,9 @@ fn report_search_latency() {
             let hits = order_by_recent(&apps, &recent, &pinned, MAX_RESULTS);
             std::hint::black_box(&hits);
         });
+        // 索引构建耗时（快照发布路径，非每键）
+        let t0 = Instant::now();
+        let _ = super::RetrievalIndex::build(&apps, &[]);
+        println!("| {n} | index-build | (快照) | {} | | | |", t0.elapsed().as_micros());
     }
 }

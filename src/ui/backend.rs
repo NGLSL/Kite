@@ -185,6 +185,9 @@ fn merge_uwp(
             g.apps.push(item);
             added += 1;
         }
+        if added > 0 {
+            g.rebuild_retrieval();
+        }
     }
     added
 }

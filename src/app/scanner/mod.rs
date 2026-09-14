@@ -215,7 +215,21 @@ fn scan_apps_with_scoop_shims(
         t.elapsed()
     ));
 
-    AppIndex { apps }
+    // 系统入口随快照物化并补齐图标；检索索引与 apps+system 同代发布
+    let system_entries = crate::app::builtin::materialize_system_entries(Some(icon_dir));
+    let t_idx = Instant::now();
+    let mut index = AppIndex {
+        apps,
+        system_entries,
+        retrieval: None,
+    };
+    index.rebuild_retrieval();
+    crate::log::info(&format!(
+        "retrieval index docs={} built in {:?}",
+        index.apps.len() + index.system_entries.len(),
+        t_idx.elapsed()
+    ));
+    index
 }
 
 fn budget_exhausted(budget: Option<Duration>, t0: Instant) -> bool {
