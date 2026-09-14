@@ -46,7 +46,7 @@ const ALIAS_TO_NAMES: &[(&str, &[&str])] = &[
     // ── 终端 / 远程 ──
     ("cmd", &["命令提示符", "cmd"]),
     ("powershell", &["powershell"]),
-    ("wt", &["terminal"]),
+    ("wt", &["windows terminal"]),
     ("cmder", &["cmder"]),
     ("tabby", &["tabby"]),
     ("mobaxterm", &["mobaxterm"]),

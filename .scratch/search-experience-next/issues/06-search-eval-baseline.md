@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: resolved
 Type: task
 Blocked by: None
 
@@ -17,11 +17,11 @@ Blocked by: None
 
 ## Acceptance Criteria
 
-- [ ] `tests/search_cases.json`（或等价固定样本）存在且可被测试/脚本加载。
-- [ ] 评估程序输出 Top1 Accuracy、Recall@5、MRR、重复入口数、P50/P95 延迟（至少在样本集上）。
-- [ ] 样本覆盖规格点名场景：`To Do`/`todo`、`visual code`/`vs code`、`vsc`、`wt`、`ndm`、`雷蛇`/Razer、`ter`/XTerminal、用户 Alias 与自动首字母冲突、精确 vs 紧凑竞争、短 Query 误召回。
-- [ ] 基线结果写入可追踪位置（测试输出或 `.scratch/search-experience-next/` 下报告），后续票可对比。
-- [ ] 现有 `search` 模块测试仍通过。
+- [x] `tests/search_cases.json`（或等价固定样本）存在且可被测试/脚本加载。
+- [x] 评估程序输出 Top1 Accuracy、Recall@5、MRR、重复入口数、P50/P95 延迟（至少在样本集上）。
+- [x] 样本覆盖规格点名场景：`To Do`/`todo`、`visual code`/`vs code`、`vsc`、`wt`、`ndm`、`雷蛇`/Razer、`ter`/XTerminal、用户 Alias 与自动首字母冲突、精确 vs 紧凑竞争、短 Query 误召回。
+- [x] 基线结果写入可追踪位置（测试输出或 `.scratch/search-experience-next/` 下报告），后续票可对比。
+- [x] 现有 `search` 模块测试仍通过。
 
 ## Validation
 
@@ -39,3 +39,11 @@ Blocked by: None
 - 与 Flow Launcher 的正式对比评测（可作备注，不阻塞本票）。
 
 ## Comments
+
+2026-09-14 实现记录：
+
+- 新增 `tests/search_cases.json`（default fixture + 22 cases）与 `src/search/eval.rs`（`search_eval_baseline`）。
+- required 样本 15 条：Top1/Recall@5/MRR 均为 1.000；全量含 known-gap 时 Top1 0.773。
+- known-gap 记录 ticket 07/08/09 对应缺口；合入后应把 status 改回 required。
+- 顺带修正 `wt` 内置 Alias：`terminal` → `windows terminal`，避免 XTerminal 因包含 `terminal` 抢首位。
+- 基线报告：`.scratch/search-experience-next/baseline-search-eval.md`。

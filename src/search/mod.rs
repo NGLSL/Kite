@@ -3,6 +3,8 @@
 mod alias;
 #[cfg(test)]
 mod bench;
+#[cfg(test)]
+mod eval;
 mod fuzzy;
 mod matcher;
 mod normalizer;
