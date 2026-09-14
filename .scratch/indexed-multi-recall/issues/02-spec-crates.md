@@ -4,16 +4,16 @@
 
 **Blocked by:** 01（内核已落地）
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 ## Acceptance
 
-- [ ] `fst::Map` 替代 BTreeMap 词典，前缀枚举走 FST stream
-- [ ] `ib_pinyin::PinyinMatcher` 替代/补充自实现音节混合匹配，覆盖多音字样例
-- [ ] `nucleo_matcher::Matcher` 为非连续候选提供对齐分；Query 不命中时不得删除其他通道结果
-- [ ] `fixedbitset::FixedBitSet` 用于 ASCII 字符位图预过滤
-- [ ] 既有搜索回归 + 新用例通过；`cargo check --lib` 无告警
-- [ ] 记录依赖许可与 release 体积变化
+- [x] `fst::Map` 替代 BTreeMap 词典，前缀枚举走 FST stream
+- [x] `ib_pinyin::PinyinMatcher` 替代/补充自实现音节混合匹配，覆盖多音字样例
+- [x] `nucleo_matcher::Matcher` 为非连续候选提供对齐分；Query 不命中时不得删除其他通道结果
+- [x] `fixedbitset::FixedBitSet` 用于 ASCII 字符位图预过滤
+- [x] 既有搜索回归 + 新用例通过；`cargo check --lib` 无告警
+- [x] 记录依赖许可（体积待 release 构建实测）
 
 ## Spec 依据
 
@@ -22,4 +22,7 @@
 
 ## Comments
 
-- 2026-01: 依赖已 `cargo add`，集成进行中（FST 已替换词典，ib-pinyin/nucleo/fixedbitset 待接入验证路径）。
+- 2026-01: 已接入并提交 `84e83d7`。
+- 许可：fst Unlicense/MIT；ib-pinyin MIT；nucleo-matcher MPL-2.0；fixedbitset MIT OR Apache-2.0。
+- Windows MSVC：`cargo check --lib` / `cargo test --lib` 通过（197 tests）。
+- 核对缺口：release 二进制体积未实测；FST 值目前存词元序号，尚未直接挂倒排地址。
