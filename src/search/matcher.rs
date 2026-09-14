@@ -8,8 +8,9 @@ use crate::search::fuzzy::fuzzy_match;
 use crate::search::normalizer::{compact, split_camel, tokens};
 use crate::search::ranker::{
     SCORE_ACRONYM, SCORE_BUILTIN_ALIAS_EXACT, SCORE_COMPACT_EXACT, SCORE_COMPACT_SUBSTRING,
-    SCORE_NAME_EXACT, SCORE_PINYIN_EXACT, SCORE_PINYIN_INITIAL, SCORE_PREFIX, SCORE_SUBSTRING,
-    SCORE_TOKEN_SEQ, SCORE_USER_ALIAS_EXACT, SCORE_WORD_EXACT, SCORE_WORD_PREFIX,
+    SCORE_NAME_EXACT, SCORE_PINYIN_EXACT, SCORE_PINYIN_INITIAL, SCORE_PINYIN_INITIAL_INNER,
+    SCORE_PREFIX, SCORE_SUBSTRING, SCORE_TOKEN_SEQ, SCORE_USER_ALIAS_EXACT, SCORE_WORD_EXACT,
+    SCORE_WORD_PREFIX,
 };
 
 /// 连写包含最短 Query 长度：避免 `to` 等短片段误召回大量应用。
@@ -163,6 +164,9 @@ fn match_item(item: &AppItem, q: &str, user_targets: &[UserTarget]) -> Option<Se
             best = take_best(best, SCORE_PINYIN_INITIAL, "pinyin-initial");
         } else if q.len() >= 2 && item.pinyin_initials.starts_with(q) {
             best = take_best(best, SCORE_PINYIN_INITIAL - 40, "pinyin-initial-prefix");
+        } else if q.len() >= 2 && item.pinyin_initials.contains(q) {
+            // 词中首字母：kz 可命中「键盘控制」「向日葵远程控制」
+            best = take_best(best, SCORE_PINYIN_INITIAL_INNER, "pinyin-initial-inner");
         }
     }
 

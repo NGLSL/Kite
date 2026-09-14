@@ -443,4 +443,36 @@ mod tests {
             assert_eq!(hit.item.id, full[i].item.id, "第 {i} 页不一致");
         }
     }
+
+    #[test]
+    fn pinyin_initials_match_word_inside_name() {
+        // kz = 「控制」首字母：既应命中控制面板（前缀），也应命中名称中间/末尾含「控制」的应用
+        let apps = vec![
+            item("控制面板"),
+            item("向日葵远程控制"),
+            item("键盘控制鼠标设置"),
+            item("反馈中心"),
+            item("记事本"),
+        ];
+        let hits = search(&apps, "kz", &[], TOP_N);
+        let names: Vec<_> = hits.iter().map(|h| h.item.name.as_str()).collect();
+        assert!(names.contains(&"控制面板"), "前缀命中: {names:?}");
+        assert!(names.contains(&"向日葵远程控制"), "末尾控制: {names:?}");
+        assert!(names.contains(&"键盘控制鼠标设置"), "中间控制: {names:?}");
+        assert!(
+            !names.contains(&"记事本"),
+            "无关应用不应被 kz 召回: {names:?}"
+        );
+    }
+
+    #[test]
+    fn exp_finds_file_explorer_via_word_and_name() {
+        let apps = vec![item("File Explorer"), item("IEXPLORE")];
+        let hits = search(&apps, "exp", &[], TOP_N);
+        assert!(
+            hits.iter().any(|h| h.item.name == "File Explorer"),
+            "exp 应命中 File Explorer（explorer 词前缀）: {:?}",
+            hits.iter().map(|h| &h.item.name).collect::<Vec<_>>()
+        );
+    }
 }

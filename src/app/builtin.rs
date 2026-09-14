@@ -83,6 +83,21 @@ const WIN_PAGES: &[WinPage] = &[
 /// 内置结果提供；文件型目标只在当前系统确实存在时显示。
 const SYSTEM_TOOLS: &[SystemTool] = &[
     SystemTool {
+        id: "file-explorer",
+        name: "文件资源管理器",
+        target: SystemToolTarget::SystemFile("explorer.exe"),
+        args: None,
+        keywords: &[
+            "explorer",
+            "file explorer",
+            "exp",
+            "wenjianziyuanguanliqi",
+            "资源管理器",
+            "this pc",
+            "此电脑",
+        ],
+    },
+    SystemTool {
         id: "recycle-bin",
         name: "回收站",
         target: SystemToolTarget::Shell("shell:RecycleBinFolder"),

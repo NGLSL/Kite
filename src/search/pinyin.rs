@@ -50,4 +50,18 @@ mod tests {
         assert_eq!(full, "weixinkaifazhegongju");
         assert_eq!(ini, "wxkfzgj");
     }
+
+    #[test]
+    fn control_words_appear_inside_full_initials() {
+        let (_, kzmb) = precompute("控制面板");
+        assert_eq!(kzmb, "kzmb");
+        assert!(kzmb.starts_with("kz"));
+
+        let (_, xrkyckz) = precompute("向日葵远程控制");
+        assert_eq!(xrkyckz, "xrkyckz");
+        assert!(xrkyckz.contains("kz"), "「控制」首字母在整名末尾，不是前缀");
+
+        let (_, jpkzsbsz) = precompute("键盘控制鼠标设置");
+        assert!(jpkzsbsz.contains("kz"), "「控制」首字母在整名中间");
+    }
 }

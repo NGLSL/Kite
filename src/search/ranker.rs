@@ -14,6 +14,8 @@ pub const SCORE_PREFIX: i32 = 800;
 pub const SCORE_COMPACT_SUBSTRING: i32 = 780;
 pub const SCORE_PINYIN_EXACT: i32 = 750;
 pub const SCORE_PINYIN_INITIAL: i32 = 700;
+/// 拼音首字母中间命中（kz ← 键盘控制 / 向日葵远程控制）；低于前缀式首字母。
+pub const SCORE_PINYIN_INITIAL_INNER: i32 = 620;
 /// 单词前缀（含 Camel 拆词后的 terminal ← ter）。
 pub const SCORE_WORD_PREFIX: i32 = 720;
 /// 英文多词首字母缩写（ndm → Neat Download Manager）；低于真实词匹配。
