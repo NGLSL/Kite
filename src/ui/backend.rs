@@ -20,6 +20,8 @@ use super::{plog, Message};
 
 /// 单飞：true 表示已有构建在跑，新的请求合并跳过（完成后由调用方再触发）。
 static BUILDING: AtomicBool = AtomicBool::new(false);
+/// 构建期间又有变化：当前构建结束后再跑一轮。
+static PENDING_REBUILD: AtomicBool = AtomicBool::new(false);
 /// 构建代际：完成时仅当仍等于启动时记下的 generation 才发布，避免旧构建覆盖新状态。
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -28,15 +30,24 @@ pub fn is_building() -> bool {
     BUILDING.load(Ordering::SeqCst)
 }
 
-/// 触发一次完整重建：快扫首屏 + 后台完整补扫。已在跑时直接返回 false。
+/// 触发一次完整重建：快扫首屏 + 后台完整补扫。
+/// 已在跑时标记 pending，当前构建结束后自动再跑一轮。
 pub fn request_build(index: Arc<Mutex<AppIndex>>, icon_dir: PathBuf, tx: UnboundedSender<Message>) -> bool {
     if BUILDING.swap(true, Ordering::SeqCst) {
-        plog("index build already in flight; coalesced");
+        PENDING_REBUILD.store(true, Ordering::SeqCst);
+        plog("index build already in flight; queued pending rebuild");
         return false;
     }
     std::thread::spawn(move || {
-        let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-        build_index_inner(index, icon_dir, tx, generation);
+        loop {
+            PENDING_REBUILD.store(false, Ordering::SeqCst);
+            let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+            build_index_inner(index.clone(), icon_dir.clone(), tx.clone(), generation);
+            if !PENDING_REBUILD.swap(false, Ordering::SeqCst) {
+                break;
+            }
+            plog("pending entry change; rebuilding again");
+        }
         BUILDING.store(false, Ordering::SeqCst);
     });
     true

@@ -29,6 +29,7 @@ iced_core = "0.14"
 iced = { version = "0.14", default-features = false, features = ["tiny-skia", "crisp", "thread-pool", "image", "canvas", "unconditional-rendering"] }
 fontdb = "0.23"
 tray-icon = { version = "0.25", default-features = false }
+notify = { version = "7", default-features = false }
 
 [profile.release]
 codegen-units = 1

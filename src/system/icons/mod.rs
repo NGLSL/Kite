@@ -163,7 +163,7 @@ fn remember_cached_icon(path: &Path) {
 /// 图标源候选：首选 icon_location（`path,index`），再追加启动 target 回退。
 fn collect_candidates(icon_src: Option<&str>, target_fallback: Option<&str>) -> Vec<(PathBuf, Option<i32>)> {
     let mut list = Vec::new();
-    let mut push_unique = |raw: &str, list: &mut Vec<(PathBuf, Option<i32>)>| {
+    let push_unique = |raw: &str, list: &mut Vec<(PathBuf, Option<i32>)>| {
         let s = raw.trim().trim_matches('"');
         if s.is_empty() {
             return;

@@ -409,7 +409,14 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
     {
         let index = index.clone();
         let dir = icon_dir.clone();
-        backend::request_build(index, dir, tx.clone());
+        backend::request_build(index.clone(), dir.clone(), tx.clone());
+        // 入口变化监听：debounce 合并后触发重建
+        let w_index = index;
+        let w_dir = dir;
+        let w_tx = tx.clone();
+        app::watch::spawn_entry_watchers(move || {
+            backend::request_build(w_index.clone(), w_dir.clone(), w_tx.clone());
+        });
     }
 
     // 资源目录（Everything64.dll）：优先 exe 旁，落到仓库 resources
