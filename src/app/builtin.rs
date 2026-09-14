@@ -16,6 +16,19 @@ struct WinPage {
     keywords: &'static [&'static str],
 }
 
+enum SystemToolTarget {
+    Shell(&'static str),
+    SystemFile(&'static str),
+}
+
+struct SystemTool {
+    id: &'static str,
+    name: &'static str,
+    target: SystemToolTarget,
+    args: Option<&'static str>,
+    keywords: &'static [&'static str],
+}
+
 /// 常用系统设置页（中文名 + 英文/拼音关键词）。
 const WIN_PAGES: &[WinPage] = &[
     WinPage { name: "系统", uri: "ms-settings:system", keywords: &["system", "xitong", "关于", "系统信息"] },
@@ -66,7 +79,103 @@ const WIN_PAGES: &[WinPage] = &[
     WinPage { name: "剪贴板", uri: "ms-settings:clipboard", keywords: &["clipboard", "jiantieban"] },
 ];
 
-/// 查询命中内置项时返回（Kite 设置优先，其后 Windows 设置页）。
+/// Windows 常用管理入口。它们不一定出现在开始菜单里，因此作为稳定的
+/// 内置结果提供；文件型目标只在当前系统确实存在时显示。
+const SYSTEM_TOOLS: &[SystemTool] = &[
+    SystemTool {
+        id: "recycle-bin",
+        name: "回收站",
+        target: SystemToolTarget::Shell("shell:RecycleBinFolder"),
+        args: None,
+        keywords: &["recycle", "recycle bin", "trash", "huishouzhan"],
+    },
+    SystemTool {
+        id: "control-panel",
+        name: "控制面板",
+        target: SystemToolTarget::Shell("shell:ControlPanelFolder"),
+        args: None,
+        keywords: &["control", "control panel", "kongzhimianban"],
+    },
+    SystemTool {
+        id: "registry-editor",
+        name: "注册表编辑器",
+        target: SystemToolTarget::SystemFile("regedit.exe"),
+        args: None,
+        keywords: &["registry", "regedit", "zhucebiaobianjiqi", "注册表"],
+    },
+    SystemTool {
+        id: "task-manager",
+        name: "任务管理器",
+        target: SystemToolTarget::SystemFile("System32\\Taskmgr.exe"),
+        args: None,
+        keywords: &["taskmgr", "task manager", "renwuguanliqi"],
+    },
+    SystemTool {
+        id: "device-manager",
+        name: "设备管理器",
+        target: SystemToolTarget::SystemFile("System32\\devmgmt.msc"),
+        args: None,
+        keywords: &["devmgmt", "device manager", "shebeiguanliqi"],
+    },
+    SystemTool {
+        id: "services",
+        name: "服务",
+        target: SystemToolTarget::SystemFile("System32\\services.msc"),
+        args: None,
+        keywords: &["services", "service", "fuwu"],
+    },
+    SystemTool {
+        id: "event-viewer",
+        name: "事件查看器",
+        target: SystemToolTarget::SystemFile("System32\\eventvwr.msc"),
+        args: None,
+        keywords: &["event viewer", "eventvwr", "shijianchakanqi"],
+    },
+    SystemTool {
+        id: "computer-management",
+        name: "计算机管理",
+        target: SystemToolTarget::SystemFile("System32\\compmgmt.msc"),
+        args: None,
+        keywords: &["computer management", "compmgmt", "jisuanjiguanli"],
+    },
+    SystemTool {
+        id: "disk-management",
+        name: "磁盘管理",
+        target: SystemToolTarget::SystemFile("System32\\diskmgmt.msc"),
+        args: None,
+        keywords: &["disk management", "diskmgmt", "ciguanli"],
+    },
+    SystemTool {
+        id: "programs-and-features",
+        name: "程序和功能",
+        target: SystemToolTarget::SystemFile("System32\\control.exe"),
+        args: Some("/name Microsoft.ProgramsAndFeatures"),
+        keywords: &["programs and features", "appwiz", "chengxugongneng"],
+    },
+    SystemTool {
+        id: "network-connections",
+        name: "网络连接",
+        target: SystemToolTarget::Shell("shell:ConnectionsFolder"),
+        args: None,
+        keywords: &["network connections", "ncpa", "wangluolianjie"],
+    },
+    SystemTool {
+        id: "printers",
+        name: "打印机",
+        target: SystemToolTarget::Shell("shell:PrintersFolder"),
+        args: None,
+        keywords: &["printers", "printer", "dayinji"],
+    },
+    SystemTool {
+        id: "windows-tools",
+        name: "Windows 工具",
+        target: SystemToolTarget::Shell("shell:Administrative Tools"),
+        args: None,
+        keywords: &["windows tools", "administrative tools", "gongju"],
+    },
+];
+
+/// 查询命中内置项时返回（Kite 设置、Windows 设置页和常用系统工具）。
 pub fn collect_builtin_hits(query_norm: &str, icon_dir: &Path) -> Vec<SearchResult> {
     let mut hits = Vec::new();
     if let Some(mut h) = kite_settings_hit(query_norm) {
@@ -74,6 +183,7 @@ pub fn collect_builtin_hits(query_norm: &str, icon_dir: &Path) -> Vec<SearchResu
         hits.push(h);
     }
     hits.extend(windows_settings_hits(query_norm, icon_dir));
+    hits.extend(system_tool_hits(query_norm, icon_dir));
     hits
 }
 
@@ -150,6 +260,81 @@ fn windows_settings_hits(query_norm: &str, icon_dir: &Path) -> Vec<SearchResult>
     hits.sort_by(|a, b| b.score.cmp(&a.score));
     hits.truncate(6);
     hits
+}
+
+fn system_tool_hits(query_norm: &str, icon_dir: &Path) -> Vec<SearchResult> {
+    if query_norm.chars().count() < 2 && !query_norm.is_ascii() {
+        return Vec::new();
+    }
+
+    let system_root = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+    let mut hits = Vec::new();
+    for tool in SYSTEM_TOOLS {
+        let target = match tool.target {
+            SystemToolTarget::Shell(uri) => uri.to_string(),
+            SystemToolTarget::SystemFile(relative) => {
+                let path = system_root.join(relative);
+                if !path.is_file() {
+                    continue;
+                }
+                path.to_string_lossy().to_string()
+            }
+        };
+        let Some(score) = match_system_tool(query_norm, tool) else {
+            continue;
+        };
+        let mut item = AppItem::scanned(
+            format!("system-tool:{}", tool.id),
+            tool.name.into(),
+            target.clone(),
+            tool.args.map(str::to_string),
+            std::path::Path::new(&target)
+                .parent()
+                .filter(|p| p.is_dir())
+                .map(|p| p.to_string_lossy().to_string()),
+            "builtin-system",
+        );
+        item.attach_search_fields();
+        if matches!(tool.target, SystemToolTarget::SystemFile(_)) {
+            item.icon_src = Some(target);
+            item.icon = icons::cache_icon(icon_dir, &item.id, item.icon_src.as_deref());
+        }
+        hits.push(SearchResult {
+            item,
+            score,
+            matched_by: "builtin-system".into(),
+        });
+    }
+    hits.sort_by(|a, b| b.score.cmp(&a.score));
+    hits
+}
+
+fn match_system_tool(query_norm: &str, tool: &SystemTool) -> Option<i32> {
+    let name_norm = tool.name.to_lowercase();
+    if name_norm == query_norm {
+        return Some(900);
+    }
+    if name_norm.contains(query_norm) || query_norm.contains(&name_norm) {
+        return Some(860);
+    }
+    let (full, initials) = pinyin_of(tool.name);
+    if !full.is_empty() && (full == query_norm || full.starts_with(query_norm)) {
+        return Some(840);
+    }
+    if !initials.is_empty() && (initials == query_norm || initials.starts_with(query_norm)) {
+        return Some(830);
+    }
+    if tool.keywords.iter().any(|keyword| {
+        let keyword = keyword.to_lowercase();
+        keyword == query_norm
+            || keyword.contains(query_norm)
+            || query_norm.contains(keyword.as_str())
+    }) {
+        return Some(820);
+    }
+    None
 }
 
 fn match_page(query_norm: &str, page: &WinPage) -> Option<i32> {
@@ -230,5 +415,31 @@ mod tests {
         let dir = tmp_dir();
         let hits = collect_builtin_hits("zzzzqqq", &dir);
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn system_tools_include_recycle_bin_and_control_panel() {
+        let dir = tmp_dir();
+        let recycle = collect_builtin_hits("回收站", &dir);
+        assert!(
+            recycle.iter().any(|h| h.item.target == "shell:RecycleBinFolder"),
+            "回收站应作为可启动的系统工具返回"
+        );
+
+        let control = collect_builtin_hits("control panel", &dir);
+        assert!(
+            control.iter().any(|h| h.item.target == "shell:ControlPanelFolder"),
+            "控制面板应支持英文搜索"
+        );
+    }
+
+    #[test]
+    fn system_tools_include_registry_editor() {
+        let dir = tmp_dir();
+        let hits = collect_builtin_hits("注册表", &dir);
+        assert!(
+            hits.iter().any(|h| h.item.name == "注册表编辑器"),
+            "注册表应返回注册表编辑器"
+        );
     }
 }
