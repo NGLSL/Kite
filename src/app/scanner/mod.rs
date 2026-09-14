@@ -1,4 +1,4 @@
-//! 扫描开始菜单 / 桌面，解析快捷方式，去重。
+//! 扫描开始菜单 / 桌面 / Scoop shims，解析快捷方式，去重。
 //! 注意：不要 follow_links（开始菜单 junction 可能卡死）；快速扫描有时间预算。
 
 mod cache;
@@ -27,6 +27,14 @@ const MAX_TOTAL: usize = 1500;
 
 /// 完整扫描。`fast` 为 true 时只建列表、不提图标（首屏用）。
 pub fn scan_apps(icon_dir: &Path, fast: bool) -> AppIndex {
+    scan_apps_with_scoop_shims(icon_dir, fast, &[])
+}
+
+fn scan_apps_with_scoop_shims(
+    icon_dir: &Path,
+    fast: bool,
+    extra_scoop_shim_dirs: &[PathBuf],
+) -> AppIndex {
     let t0 = Instant::now();
     let budget = if fast { Some(FAST_BUDGET) } else { None };
     let mut raw: Vec<RawItem> = Vec::new();
@@ -38,8 +46,35 @@ pub fn scan_apps(icon_dir: &Path, fast: bool) -> AppIndex {
     let common_start = PathBuf::from(r"C:\ProgramData\Microsoft\Windows\Start Menu");
     let user_desktop = dirs::desktop_dir().unwrap_or_default();
     let public_desktop = PathBuf::from(r"C:\Users\Public\Desktop");
+    let user_home = dirs::home_dir();
+    let program_data = std::env::var_os("ProgramData").map(PathBuf::from);
+    let scoop_root = std::env::var_os("SCOOP").map(PathBuf::from);
+    let scoop_global_root = std::env::var_os("SCOOP_GLOBAL").map(PathBuf::from);
 
     crate::log::info(&format!("scan fast={fast} start"));
+
+    // Scoop exposes installed applications through its shims directory rather
+    // than Start Menu shortcuts. Scan this small, well-known directory first so
+    // the fast pass keeps package-managed apps available even when the larger
+    // Start Menu scan consumes its time budget.
+    let before = raw.len();
+    collect_scoop_shims(
+        user_home.as_deref(),
+        program_data.as_deref(),
+        scoop_root.as_deref(),
+        scoop_global_root.as_deref(),
+        extra_scoop_shim_dirs,
+        budget,
+        t0,
+        &mut raw,
+        &mut cache,
+    );
+    crate::log::info(&format!(
+        "scoop-shims: +{} -> total {} in {:?}",
+        raw.len() - before,
+        raw.len(),
+        t0.elapsed()
+    ));
 
     let steps: [(&str, PathBuf, &str); 4] = [
         ("user-start", user_start, "start-menu"),
@@ -242,6 +277,40 @@ fn collect_from_dir(
     }
 }
 
+fn collect_scoop_shims(
+    home: Option<&Path>,
+    program_data: Option<&Path>,
+    scoop_root: Option<&Path>,
+    scoop_global_root: Option<&Path>,
+    extra_shim_dirs: &[PathBuf],
+    budget: Option<Duration>,
+    t0: Instant,
+    out: &mut Vec<RawItem>,
+    cache: &mut ScanCache,
+) {
+    let mut roots = extra_shim_dirs.to_vec();
+    if let Some(home) = home {
+        roots.push(home.join("scoop").join("shims"));
+    }
+    if let Some(root) = scoop_root {
+        roots.push(root.join("shims"));
+    }
+    if let Some(root) = scoop_global_root {
+        roots.push(root.join("shims"));
+    }
+    if let Some(program_data) = program_data {
+        roots.push(program_data.join("scoop").join("shims"));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for root in roots {
+        if !seen.insert(normalize_path_key(&root.to_string_lossy())) {
+            continue;
+        }
+        collect_from_dir(&root, "scoop", budget, t0, out, cache);
+    }
+}
+
 fn dedupe(raw: Vec<RawItem>) -> Vec<RawItem> {
     let rank = |source: &str| match source {
         "start-menu" => 0,
@@ -270,4 +339,38 @@ fn dedupe(raw: Vec<RawItem>) -> Vec<RawItem> {
             .then_with(|| a.0.source.cmp(&b.0.source))
     });
     list
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kite-scanner-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn scoop_shims_are_indexed() {
+        let root = temp_dir("scoop");
+        let shims = root.join("scoop").join("shims");
+        std::fs::create_dir_all(&shims).unwrap();
+        let target = shims.join("ripgrep.exe");
+        std::fs::write(&target, b"fixture").unwrap();
+        let icon_dir = root.join("icons");
+        std::fs::create_dir_all(&icon_dir).unwrap();
+
+        let index = scan_apps_with_scoop_shims(&icon_dir, true, &[shims]);
+
+        assert!(
+            index
+                .apps
+                .iter()
+                .any(|item| item.target == target.to_string_lossy()),
+            "Scoop shim 应进入应用索引"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
