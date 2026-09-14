@@ -241,6 +241,8 @@ enum Message {
     IndexReady(usize),
     IconsFilled(usize),
     UwpMerged(usize),
+    /// 后台完整扫描完成并已原子替换快照。
+    FullIndexReady(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -403,11 +405,11 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         }
     });
 
-    // 索引线程：两阶段重建 + UWP 后台合并（对齐 state::rebuild_index，去 Tauri 化）
+    // 索引线程：快扫首屏 + 图标/UWP + 后台完整补扫（单飞）
     {
         let index = index.clone();
         let dir = icon_dir.clone();
-        std::thread::spawn(move || backend::build_index(index, dir, tx.clone()));
+        backend::request_build(index, dir, tx.clone());
     }
 
     // 资源目录（Everything64.dll）：优先 exe 旁，落到仓库 resources
@@ -661,7 +663,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             let index = state.index.clone();
             let dir = state.icon_dir.clone();
             let tx = EVENT_TX.get().expect("event tx").clone();
-            std::thread::spawn(move || backend::build_index(index, dir, tx));
+            backend::request_build(index, dir, tx);
             Task::none()
         }
         Message::Quit => {
@@ -922,6 +924,12 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::UwpMerged(n) => {
             plog(&format!("uwp merged n={n}"));
+            state.refresh_results();
+            Task::none()
+        }
+        Message::FullIndexReady(n) => {
+            plog(&format!("full index ready n={n}"));
+            state.index_ready = true;
             state.refresh_results();
             Task::none()
         }

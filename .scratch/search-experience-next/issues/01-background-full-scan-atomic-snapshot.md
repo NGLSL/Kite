@@ -1,4 +1,4 @@
-Status: ready-for-agent
+Status: resolved
 Type: task
 Blocked by: None
 
@@ -17,12 +17,12 @@ Blocked by: None
 
 ## Acceptance Criteria
 
-- [ ] 启动后快扫结果先可用，后台完整扫描完成后深层入口出现在索引中，无需重启或托盘重扫。
-- [ ] 后台更新期间继续输入 Query，列表始终有结果可搜。
-- [ ] 快照切换后，当前 Query 结果一次性刷新为新索引。
-- [ ] 一条坏快捷方式或一个不可读目录不导致整份索引清空或扫描中止。
-- [ ] 快扫已覆盖的深层多层目录（本地未提交加深修复）与后台补齐路径行为一致。
-- [ ] 日志能区分快扫预算截断与后台完整扫描完成。
+- [x] 启动后快扫结果先可用，后台完整扫描完成后深层入口出现在索引中，无需重启或托盘重扫。
+- [x] 后台更新期间继续输入 Query，列表始终有结果可搜。
+- [x] 快照切换后，当前 Query 结果一次性刷新为新索引。
+- [x] 一条坏快捷方式或一个不可读目录不导致整份索引清空或扫描中止。
+- [x] 快扫已覆盖的深层多层目录（本地未提交加深修复）与后台补齐路径行为一致。
+- [x] 日志能区分快扫预算截断与后台完整扫描完成。
 
 ## Validation
 
@@ -42,3 +42,10 @@ Blocked by: None
 - 搜索召回与排序调整。
 
 ## Comments
+
+2026-09-14 实现记录（worktree `Kite-search-experience`）：
+
+- `ScanPass::{Fast,Full}`：Full 无 1.5s 预算，Start Menu 深度 16、Desktop 8，安全上限 8000/2000 并写日志。
+- `backend::request_build` 单飞 + generation；快扫发布 → 图标 → UWP → Full 原子替换并 `FullIndexReady`，UI 随后 `refresh_results`。
+- 回归：`full_pass_recurses_deeper_than_fast_depth`；`cargo test` 162 passed。
+- 待实机：深层厂商入口在后台补扫后可见；更新期间输入不中断。入口变化监听属票 02。

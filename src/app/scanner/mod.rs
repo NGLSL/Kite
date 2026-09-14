@@ -28,19 +28,56 @@ const MAX_TOTAL: usize = 1500;
 /// 上限覆盖常见入口，同时继续受每目录、总量和快速扫描预算约束。
 const START_MENU_MAX_DEPTH: usize = 5;
 const OTHER_SOURCE_MAX_DEPTH: usize = 2;
+/// 后台完整扫描：不受快扫时间预算限制，递归更深；安全上限触发时写日志。
+const FULL_START_MENU_MAX_DEPTH: usize = 16;
+const FULL_OTHER_SOURCE_MAX_DEPTH: usize = 8;
+const FULL_MAX_PER_DIR: usize = 2000;
+const FULL_MAX_TOTAL: usize = 8000;
+
+/// 扫描档位：首屏快扫 vs 后台完整补扫。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanPass {
+    /// 有时间预算、浅层、不提图标、不含 UWP，尽早发布首屏索引。
+    Fast,
+    /// 无时间预算、深层递归、含 UWP 与图标，原子替换快照。
+    Full,
+}
 
 /// 完整扫描。`fast` 为 true 时只建列表、不提图标（首屏用）。
 pub fn scan_apps(icon_dir: &Path, fast: bool) -> AppIndex {
-    scan_apps_with_scoop_shims(icon_dir, fast, &[])
+    let pass = if fast { ScanPass::Fast } else { ScanPass::Full };
+    scan_apps_pass(icon_dir, pass, &[])
+}
+
+/// 按档位扫描；完整档可作为后台第二遍原子替换首屏快照。
+pub fn scan_apps_pass(icon_dir: &Path, pass: ScanPass, extra_scoop_shim_dirs: &[PathBuf]) -> AppIndex {
+    scan_apps_with_scoop_shims(icon_dir, pass, extra_scoop_shim_dirs)
 }
 
 fn scan_apps_with_scoop_shims(
     icon_dir: &Path,
-    fast: bool,
+    pass: ScanPass,
     extra_scoop_shim_dirs: &[PathBuf],
 ) -> AppIndex {
+    let fast = pass == ScanPass::Fast;
     let t0 = Instant::now();
     let budget = if fast { Some(FAST_BUDGET) } else { None };
+    let start_depth = if fast {
+        START_MENU_MAX_DEPTH
+    } else {
+        FULL_START_MENU_MAX_DEPTH
+    };
+    let other_depth = if fast {
+        OTHER_SOURCE_MAX_DEPTH
+    } else {
+        FULL_OTHER_SOURCE_MAX_DEPTH
+    };
+    let max_per_dir = if fast {
+        MAX_PER_DIR
+    } else {
+        FULL_MAX_PER_DIR
+    };
+    let max_total = if fast { MAX_TOTAL } else { FULL_MAX_TOTAL };
     let mut raw: Vec<RawItem> = Vec::new();
     let mut cache = ScanCache::load(icon_dir);
 
@@ -55,7 +92,7 @@ fn scan_apps_with_scoop_shims(
     let scoop_root = std::env::var_os("SCOOP").map(PathBuf::from);
     let scoop_global_root = std::env::var_os("SCOOP_GLOBAL").map(PathBuf::from);
 
-    crate::log::info(&format!("scan fast={fast} start"));
+    crate::log::info(&format!("scan pass={pass:?} start"));
 
     // Scoop exposes installed applications through its shims directory rather
     // than Start Menu shortcuts. Scan this small, well-known directory first so
@@ -70,6 +107,9 @@ fn scan_apps_with_scoop_shims(
         extra_scoop_shim_dirs,
         budget,
         t0,
+        other_depth,
+        max_per_dir,
+        max_total,
         &mut raw,
         &mut cache,
     );
@@ -81,15 +121,21 @@ fn scan_apps_with_scoop_shims(
     ));
 
     let steps: [(&str, PathBuf, &str, usize); 4] = [
-        ("user-start", user_start, "start-menu", START_MENU_MAX_DEPTH),
-        ("common-start", common_start, "start-menu", START_MENU_MAX_DEPTH),
-        ("user-desktop", user_desktop, "desktop", OTHER_SOURCE_MAX_DEPTH),
-        ("public-desktop", public_desktop, "desktop", OTHER_SOURCE_MAX_DEPTH),
+        ("user-start", user_start, "start-menu", start_depth),
+        ("common-start", common_start, "start-menu", start_depth),
+        ("user-desktop", user_desktop, "desktop", other_depth),
+        ("public-desktop", public_desktop, "desktop", other_depth),
     ];
 
     for (label, root, source, max_depth) in steps {
         if budget_exhausted(budget, t0) {
             crate::log::info(&format!("scan budget hit before {label}"));
+            break;
+        }
+        if raw.len() >= max_total {
+            crate::log::info(&format!(
+                "scan safety cap max_total={max_total} before {label}; uncovered dir recorded"
+            ));
             break;
         }
         let before = raw.len();
@@ -99,6 +145,8 @@ fn scan_apps_with_scoop_shims(
             max_depth,
             budget,
             t0,
+            max_per_dir,
+            max_total,
             &mut raw,
             &mut cache,
         );
@@ -110,7 +158,7 @@ fn scan_apps_with_scoop_shims(
         ));
     }
 
-    if !budget_exhausted(budget, t0) && raw.len() < MAX_TOTAL {
+    if !budget_exhausted(budget, t0) && raw.len() < max_total {
         let t = Instant::now();
         registry::collect_app_paths("app-paths", &mut raw);
         crate::log::info(&format!(
@@ -157,7 +205,7 @@ fn scan_apps_with_scoop_shims(
         apps.push(item);
     }
     crate::log::info(&format!(
-        "fields/icons fast={fast}: {} apps in {:?} pinyin={py:?}",
+        "fields/icons pass={pass:?}: {} apps in {:?} pinyin={py:?}",
         apps.len(),
         t.elapsed()
     ));
@@ -223,6 +271,8 @@ fn collect_from_dir(
     max_depth: usize,
     budget: Option<Duration>,
     t0: Instant,
+    max_per_dir: usize,
+    max_total: usize,
     out: &mut Vec<RawItem>,
     cache: &mut ScanCache,
 ) {
@@ -236,7 +286,19 @@ fn collect_from_dir(
         .into_iter()
         .filter_map(|e| e.ok())
     {
-        if n >= MAX_PER_DIR || out.len() >= MAX_TOTAL || budget_exhausted(budget, t0) {
+        if n >= max_per_dir || out.len() >= max_total || budget_exhausted(budget, t0) {
+            if n >= max_per_dir {
+                crate::log::info(&format!(
+                    "scan per-dir cap {max_per_dir} in {} ({source})",
+                    root.display()
+                ));
+            }
+            if out.len() >= max_total {
+                crate::log::info(&format!(
+                    "scan total cap {max_total} while walking {} ({source})",
+                    root.display()
+                ));
+            }
             break;
         }
         let path = entry.path();
@@ -298,6 +360,9 @@ fn collect_scoop_shims(
     extra_shim_dirs: &[PathBuf],
     budget: Option<Duration>,
     t0: Instant,
+    max_depth: usize,
+    max_per_dir: usize,
+    max_total: usize,
     out: &mut Vec<RawItem>,
     cache: &mut ScanCache,
 ) {
@@ -323,9 +388,11 @@ fn collect_scoop_shims(
         collect_from_dir(
             &root,
             "scoop",
-            OTHER_SOURCE_MAX_DEPTH,
+            max_depth,
             budget,
             t0,
+            max_per_dir,
+            max_total,
             out,
             cache,
         );
@@ -392,7 +459,7 @@ mod tests {
         let icon_dir = root.join("icons");
         std::fs::create_dir_all(&icon_dir).unwrap();
 
-        let index = scan_apps_with_scoop_shims(&icon_dir, true, &[shims]);
+        let index = scan_apps_with_scoop_shims(&icon_dir, ScanPass::Fast, &[shims]);
 
         assert!(
             index
@@ -426,6 +493,8 @@ mod tests {
             START_MENU_MAX_DEPTH,
             None,
             Instant::now(),
+            MAX_PER_DIR,
+            MAX_TOTAL,
             &mut raw,
             &mut cache,
         );
@@ -436,6 +505,60 @@ mod tests {
             .collect();
         assert!(targets.contains(&first.to_string_lossy().as_ref()));
         assert!(targets.contains(&second.to_string_lossy().as_ref()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn full_pass_recurses_deeper_than_fast_depth() {
+        // WalkDir depth: root=0. fast max_depth=5 可见 a/b/c/X.exe (depth 4)，
+        // 看不到 a/b/c/d/e/Deep.exe (depth 6)。
+        let root = temp_dir("full-depth");
+        let shallow = root.join("a").join("b").join("c").join("Shallow.exe");
+        let deep = root
+            .join("a")
+            .join("b")
+            .join("c")
+            .join("d")
+            .join("e")
+            .join("Deep.exe");
+        std::fs::create_dir_all(shallow.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(deep.parent().unwrap()).unwrap();
+        std::fs::write(&shallow, b"fixture").unwrap();
+        std::fs::write(&deep, b"fixture").unwrap();
+
+        let collect_at = |depth: usize| {
+            let mut raw = Vec::new();
+            let mut cache = ScanCache::load(&root);
+            collect_from_dir(
+                &root,
+                "start-menu",
+                depth,
+                None,
+                Instant::now(),
+                FULL_MAX_PER_DIR,
+                FULL_MAX_TOTAL,
+                &mut raw,
+                &mut cache,
+            );
+            raw.iter()
+                .map(|(item, _)| item.target.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let fast_hits = collect_at(START_MENU_MAX_DEPTH);
+        let full_hits = collect_at(FULL_START_MENU_MAX_DEPTH);
+        assert!(
+            fast_hits.contains(&shallow.to_string_lossy().to_string()),
+            "fast depth should still see common nested entry"
+        );
+        assert!(
+            !fast_hits.contains(&deep.to_string_lossy().to_string()),
+            "fast depth stops before sixth-level entry"
+        );
+        assert!(
+            full_hits.contains(&deep.to_string_lossy().to_string()),
+            "full pass must reach deeper than fast budget/depth"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
