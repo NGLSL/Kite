@@ -82,6 +82,7 @@ Kite 的产品定位和工程实践参考了以下开源启动器项目：
 - [ZeroLaunch-rs](https://github.com/ghost-him/ZeroLaunch-rs/)
 - [LaunchyQt](https://github.com/samsonwang/LaunchyQt)
 - [Flow Launcher](https://github.com/Flow-Launcher/Flow.Launcher)
+- [ZTools](https://github.com/ZToolsCenter/ZTools)
 
 ## 相关社区
 
