@@ -56,6 +56,7 @@ fn same_items(left: &[AppItem], right: &[AppItem]) -> bool {
                 && a.pinyin == b.pinyin
                 && a.pinyin_initials == b.pinyin_initials
                 && a.search_keywords == b.search_keywords
+                && a.search_context == b.search_context
         })
 }
 
@@ -122,9 +123,8 @@ fn build_index_inner(
         "index complete n={count} {status} in {:?} (generation={generation})",
         started.elapsed()
     ));
-    if published {
-        let _ = tx.unbounded_send(Message::FullIndexReady(count));
-    }
+    // 内容未变化也要通知 UI，否则设置页「重新扫描」看起来毫无反应。
+    let _ = tx.unbounded_send(Message::FullIndexReady(count));
 }
 
 #[cfg(test)]

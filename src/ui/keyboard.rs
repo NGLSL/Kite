@@ -178,6 +178,7 @@ mod alt_digit_tests {
             query_at_alt: None,
             alt_digit_consumed: false,
             index_ready: true,
+            rescan_pending: false,
             files_mode: false,
             file_query_generation: 0,
             file_results: Vec::new(),

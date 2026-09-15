@@ -205,6 +205,8 @@ struct State {
     /// 同一次 Alt 按下最多触发一次结果启动（KeyPressed 和 text_input 可能都报告数字）。
     alt_digit_consumed: bool,
     index_ready: bool,
+    /// 用户主动点了重新扫描；完成后给设置页一条可见反馈。
+    rescan_pending: bool,
     files_mode: bool,
     file_query_generation: u64,
     file_results: Vec<SearchResult>,

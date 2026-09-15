@@ -166,13 +166,14 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::Rescan => {
-            plog("rescan requested from tray");
+            plog("rescan requested from settings/tray");
+            state.rescan_pending = true;
             let index = state.index.clone();
             let dir = state.icon_dir.clone();
             let options = state.scan_options.clone();
             let tx = EVENT_TX.get().expect("event tx").clone();
             backend::request_build(index, dir, options, tx);
-            Task::none()
+            flash(state, "正在重新扫描应用索引…")
         }
         Message::Quit => {
             plog("quit requested");
@@ -473,7 +474,11 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.pinned = db.pinned_ids().into_iter().collect();
             }
             state.refresh_results();
-            Task::none()
+            if std::mem::take(&mut state.rescan_pending) {
+                flash(state, &format!("扫描完成，共 {n} 条"))
+            } else {
+                Task::none()
+            }
         }
     }
 }

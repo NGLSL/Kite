@@ -253,6 +253,7 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         query_at_alt: None,
         alt_digit_consumed: false,
         index_ready: false,
+        rescan_pending: false,
         files_mode: false,
         file_query_generation: 0,
         file_results: Vec::new(),
