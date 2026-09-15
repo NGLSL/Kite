@@ -1,9 +1,9 @@
-//! 常驻搜索调度：最新请求槽 + 单 worker + 协作取消 + 基础命中缓存。
+//! 常驻搜索调度：最新请求槽 + 单 worker + 协作取消 + 基础候选缓存。
 //!
 //! 职责边界：
 //! - 待处理请求只保留最新一份（覆盖，不排队）
 //! - 单一常驻线程；旧任务在阶段边界协作退出
-//! - 缓存：仅无个性化且任务完整完成时写入
+//! - 缓存的是**个性化前**的轻量候选（未截断），个性化每次用最新 prefs 重放
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,12 +13,14 @@ use std::time::Duration;
 use crate::history::Personalization;
 use crate::model::{AppItem, SearchResult};
 use crate::search::matcher::UserTarget;
+use crate::search::retrieval::RankedHit;
 use crate::search::RetrievalIndex;
 
-/// 小容量基础命中缓存：key = (index_gen, query_norm, max_results)。
+/// 基础轻量候选缓存：key = (index_gen, query_norm)。
+/// value 为 into_ranked 后、个性化/归并/截断前的候选（故事 17：不是 TopN 全集）。
 #[derive(Debug)]
 pub struct BaseHitCache {
-    map: Mutex<HashMap<(u64, String, usize), Vec<SearchResult>>>,
+    map: Mutex<HashMap<(u64, String), Vec<RankedHit>>>,
     capacity: usize,
 }
 
@@ -36,29 +38,17 @@ impl BaseHitCache {
         }
     }
 
-    pub fn get(
-        &self,
-        index_gen: u64,
-        query_norm: &str,
-        max_results: usize,
-    ) -> Option<Vec<SearchResult>> {
+    pub fn get(&self, index_gen: u64, query_norm: &str) -> Option<Vec<RankedHit>> {
         let map = self.map.lock().unwrap_or_else(|e| e.into_inner());
-        map.get(&(index_gen, query_norm.to_string(), max_results))
-            .cloned()
+        map.get(&(index_gen, query_norm.to_string())).cloned()
     }
 
-    pub fn insert(
-        &self,
-        index_gen: u64,
-        query_norm: &str,
-        max_results: usize,
-        hits: Vec<SearchResult>,
-    ) {
+    pub fn insert(&self, index_gen: u64, query_norm: &str, base: Vec<RankedHit>) {
         let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
         if map.len() >= self.capacity {
             map.clear();
         }
-        map.insert((index_gen, query_norm.to_string(), max_results), hits);
+        map.insert((index_gen, query_norm.to_string()), base);
     }
 
     pub fn clear(&self) {
@@ -74,7 +64,7 @@ impl BaseHitCache {
     }
 }
 
-/// 在基础命中上重放最新个性化（历史/Pin/降权）。
+/// 在 SearchResult 基础命中上重放个性化（测试/工具路径）。
 pub fn personalize_base_hits(
     base: Vec<SearchResult>,
     prefs: Option<&Personalization>,
@@ -87,7 +77,7 @@ pub fn personalize_base_hits(
     hits
 }
 
-/// 个性化快照是否为空（可安全缓存基础命中）。
+/// 个性化快照是否为空（文档化字段契约；缓存本身不再依赖此判断）。
 pub fn prefs_is_empty(prefs: Option<&Personalization>) -> bool {
     prefs
         .map(|p| {
@@ -232,66 +222,58 @@ fn run_job(job: AppSearchJob, cancelled: &dyn Fn() -> bool) {
     }
     let started = std::time::Instant::now();
 
-    // 阶段 0：缓存命中（仅无个性化）
-    if prefs_is_empty(job.prefs.as_ref()) {
-        if let Some(hits) = job.cache.get(
-            job.index_generation,
-            &job.q_norm,
-            crate::search::MAX_RESULTS,
-        ) {
-            if !cancelled() {
-                (job.on_done)(job.generation, job.query, hits, started.elapsed().as_micros());
+    // 阶段 0：基础候选缓存（个性化前、未截断）
+    let base = if let Some(base) = job.cache.get(job.index_generation, &job.q_norm) {
+        Some(base)
+    } else if let Some(ret) = job.retrieval.as_deref() {
+        match ret.search_base_ranked(&job.query, &job.user_targets, cancelled) {
+            Some(base) => {
+                if !cancelled() {
+                    job.cache
+                        .insert(job.index_generation, &job.q_norm, base.clone());
+                }
+                Some(base)
             }
-            return;
+            None => return,
         }
-    }
-
-    if cancelled() {
-        return;
-    }
-
-    // 阶段 1–3：召回 / 验证 / 排序（内核在阶段边界检查 cancelled）
-    let hits = if let Some(ret) = job.retrieval.as_deref() {
-        ret.search_personalized_cancellable(
-            &job.query,
-            &job.user_targets,
-            job.prefs.as_ref(),
-            crate::search::MAX_RESULTS,
-            cancelled,
-        )
     } else {
-        // 无预构建索引时一次性构建；构建前再查一次取消
         if cancelled() {
             return;
         }
         let index = RetrievalIndex::build(&job.apps, &job.system_entries);
-        index.search_personalized_cancellable(
-            &job.query,
-            &job.user_targets,
-            job.prefs.as_ref(),
-            crate::search::MAX_RESULTS,
-            cancelled,
-        )
+        // 临时索引不跨请求复用，不写入代际缓存（doc_id 无效于下一次 build）
+        index.search_base_ranked(&job.query, &job.user_targets, cancelled)
     };
 
-    let Some(hits) = hits else {
-        // 取消：无部分结果、不写缓存、不回调
+    let Some(base) = base else {
         return;
     };
     if cancelled() {
         return;
     }
 
-    // 仅无个性化且完整完成才写缓存
-    if prefs_is_empty(job.prefs.as_ref()) {
-        job.cache.insert(
-            job.index_generation,
-            &job.q_norm,
-            crate::search::MAX_RESULTS,
-            hits.clone(),
-        );
-    }
+    // 阶段 1：用最新 prefs 完成个性化/归并/排序/截断
+    let hits = if let Some(ret) = job.retrieval.as_deref() {
+        let ranked = ret.finish_ranked_from_base(base, job.prefs.as_ref(), crate::search::MAX_RESULTS);
+        if cancelled() {
+            return;
+        }
+        ret.materialize_ranked(ranked)
+    } else {
+        if cancelled() {
+            return;
+        }
+        let index = RetrievalIndex::build(&job.apps, &job.system_entries);
+        let ranked = index.finish_ranked_from_base(base, job.prefs.as_ref(), crate::search::MAX_RESULTS);
+        if cancelled() {
+            return;
+        }
+        index.materialize_ranked(ranked)
+    };
 
+    if cancelled() {
+        return;
+    }
     let elapsed = started.elapsed().as_micros();
     (job.on_done)(job.generation, job.query, hits, elapsed);
 }
@@ -320,21 +302,32 @@ mod tests {
     #[test]
     fn cache_roundtrip_same_query() {
         let cache = BaseHitCache::new(4);
-        let hits = vec![hit("a", 100), hit("b", 80)];
-        cache.insert(1, "chrome", 10, hits);
-        let got = cache.get(1, "chrome", 10).expect("cache hit");
-        assert_eq!(got.len(), 2);
-        assert!(cache.get(2, "chrome", 10).is_none());
+        let mut it = AppItem::scanned(
+            "a".into(),
+            "chrome".into(),
+            r"C:\a.exe".into(),
+            None,
+            None,
+            "t",
+        );
+        it.attach_search_fields();
+        let index = RetrievalIndex::build(&[it], &[]);
+        let base = index
+            .search_base_ranked("chrome", &[], &|| false)
+            .expect("base");
+        cache.insert(1, "chrome", base);
+        assert!(cache.get(1, "chrome").is_some());
+        assert!(cache.get(2, "chrome").is_none());
     }
 
     #[test]
     fn cache_capacity_clears_old_entries() {
         let cache = BaseHitCache::new(2);
-        cache.insert(1, "a", 10, vec![hit("a", 1)]);
-        cache.insert(1, "b", 10, vec![hit("b", 1)]);
-        cache.insert(1, "c", 10, vec![hit("c", 1)]);
+        cache.insert(1, "a", vec![]);
+        cache.insert(1, "b", vec![]);
+        cache.insert(1, "c", vec![]);
         assert_eq!(cache.len(), 1);
-        assert!(cache.get(1, "c", 10).is_some());
+        assert!(cache.get(1, "c").is_some());
     }
 
     #[test]
@@ -366,9 +359,9 @@ mod tests {
     #[test]
     fn cache_clear_on_invalidate() {
         let cache = BaseHitCache::new(4);
-        cache.insert(1, "x", 10, vec![hit("x", 1)]);
+        cache.insert(1, "x", vec![]);
         cache.clear();
-        assert!(cache.get(1, "x", 10).is_none());
+        assert!(cache.get(1, "x").is_none());
     }
 
     #[test]

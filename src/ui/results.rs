@@ -104,30 +104,38 @@ impl State {
             apps,
             system_entries,
             cache,
-            on_done: Arc::new(|generation, query, hits, elapsed_us| {
+            on_done: Arc::new(move |generation, query, hits, elapsed_us| {
                 let _ = EVENT_TX
                     .get()
                     .expect("event tx")
                     .unbounded_send(Message::AppSearchReady(
-                        generation, query, hits, elapsed_us,
+                        generation,
+                        query,
+                        hits,
+                        elapsed_us,
+                        index_gen,
                     ));
             }),
         };
         self.app_search_worker.submit(job);
     }
 
-    /// 应用后台结果：代际核对后合并链接/文件/网页槽位（个性化已在 worker 完成）。
+    /// 应用后台结果：Query/索引代际核对后合并链接/文件/网页槽位。
     pub(super) fn apply_app_search_ready(
         &mut self,
         generation: u64,
         query: String,
         hits: Vec<SearchResult>,
         elapsed_us: u128,
+        index_generation: u64,
     ) {
-        if generation != self.app_query_generation || query != self.query {
+        if generation != self.app_query_generation
+            || query != self.query
+            || index_generation != self.index_generation
+        {
             plog(&format!(
-                "app search stale generation={generation} current={} query={query:?}",
-                self.app_query_generation
+                "app search stale generation={generation} current={} index_gen={index_generation} cur_index={} query={query:?}",
+                self.app_query_generation, self.index_generation
             ));
             return;
         }

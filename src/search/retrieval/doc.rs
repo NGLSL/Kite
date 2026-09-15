@@ -591,16 +591,14 @@ impl RetrievalIndex {
         .unwrap_or_default()
     }
 
-    /// 同 `search_personalized`，但在阶段边界检查协作取消。
-    /// 召回后 / 验证后 / 排序前若 `cancelled()` 为真，返回 None（无部分结果）。
-    pub fn search_personalized_cancellable(
+    /// 基础轻量候选：召回 → 验证 → into_ranked。**不含**个性化、归并、截断。
+    /// 适合缓存；`doc_id` 绑定当前索引代际。
+    pub fn search_base_ranked(
         &self,
         query: &str,
         user_targets: &[UserTarget],
-        personalization: Option<&crate::history::Personalization>,
-        max_results: usize,
         cancelled: &dyn Fn() -> bool,
-    ) -> Option<Vec<crate::model::SearchResult>> {
+    ) -> Option<Vec<RankedHit>> {
         let q = super::query::parse(query);
         if q.is_empty() {
             return Some(Vec::new());
@@ -614,40 +612,70 @@ impl RetrievalIndex {
         if cancelled() {
             return None;
         }
-        let mut ranked = self.into_ranked(scored);
+        Some(self.into_ranked(scored))
+    }
+
+    /// 在基础候选上：个性化 → 启动组归并 → 排序 → 截断。
+    pub fn finish_ranked_from_base(
+        &self,
+        base: Vec<RankedHit>,
+        personalization: Option<&crate::history::Personalization>,
+        max_results: usize,
+    ) -> Vec<RankedHit> {
+        let mut ranked = base;
         if let Some(prefs) = personalization {
             self.apply_personalization_boosts(&mut ranked, prefs);
         }
         let mut ranked = self.collapse_launch_groups(ranked, personalization);
+        ranked.sort_by(cmp_ranked_hit);
+        ranked.truncate(max_results);
+        ranked
+    }
+
+    /// 物化为展示对象（克隆 AppItem；图标可借用组内缓存）。
+    pub fn materialize_ranked(&self, ranked: Vec<RankedHit>) -> Vec<crate::model::SearchResult> {
+        ranked
+            .into_iter()
+            .filter_map(|r| {
+                let doc = self.doc(r.doc_id)?;
+                let mut item = doc.item.clone();
+                if item.icon.is_none() {
+                    if let Some(icon_doc) = self.doc(r.icon_doc_id) {
+                        if icon_doc.item.icon.is_some() {
+                            item.icon.clone_from(&icon_doc.item.icon);
+                            item.icon_src.clone_from(&icon_doc.item.icon_src);
+                        }
+                    }
+                }
+                Some(crate::model::SearchResult {
+                    item,
+                    score: r.score,
+                    matched_by: r.matched_by,
+                    quality_tier: r.quality_tier,
+                })
+            })
+            .collect()
+    }
+
+    /// 同 `search_personalized`，但在阶段边界检查协作取消。
+    /// 召回后 / 验证后 / 排序前若 `cancelled()` 为真，返回 None（无部分结果）。
+    pub fn search_personalized_cancellable(
+        &self,
+        query: &str,
+        user_targets: &[UserTarget],
+        personalization: Option<&crate::history::Personalization>,
+        max_results: usize,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Option<Vec<crate::model::SearchResult>> {
+        let base = self.search_base_ranked(query, user_targets, cancelled)?;
         if cancelled() {
             return None;
         }
-        ranked.sort_by(cmp_ranked_hit);
-        ranked.truncate(max_results);
-        Some(
-            ranked
-                .into_iter()
-                .filter_map(|r| {
-                    let doc = self.doc(r.doc_id)?;
-                    let mut item = doc.item.clone();
-                    // 启动配置保持主入口；图标只借用已有缓存，不改启动目标
-                    if item.icon.is_none() {
-                        if let Some(icon_doc) = self.doc(r.icon_doc_id) {
-                            if icon_doc.item.icon.is_some() {
-                                item.icon.clone_from(&icon_doc.item.icon);
-                                item.icon_src.clone_from(&icon_doc.item.icon_src);
-                            }
-                        }
-                    }
-                    Some(crate::model::SearchResult {
-                        item,
-                        score: r.score,
-                        matched_by: r.matched_by,
-                        quality_tier: r.quality_tier,
-                    })
-                })
-                .collect(),
-        )
+        let ranked = self.finish_ranked_from_base(base, personalization, max_results);
+        if cancelled() {
+            return None;
+        }
+        Some(self.materialize_ranked(ranked))
     }
 
     /// 与 `search_personalized` 同一条排序链，返回截断后的轻量候选（含证据）。
@@ -659,21 +687,10 @@ impl RetrievalIndex {
         personalization: Option<&crate::history::Personalization>,
         max_results: usize,
     ) -> Vec<RankedHit> {
-        let q = super::query::parse(query);
-        if q.is_empty() {
+        let Some(base) = self.search_base_ranked(query, user_targets, &|| false) else {
             return Vec::new();
-        }
-        let mut ctx = QueryContext::build(&q, self);
-        let candidates = super::channels::collect(self, &q, user_targets);
-        let scored = super::verify::verify_all(self, &candidates, &mut ctx, user_targets);
-        let mut ranked = self.into_ranked(scored);
-        if let Some(prefs) = personalization {
-            self.apply_personalization_boosts(&mut ranked, prefs);
-        }
-        let mut ranked = self.collapse_launch_groups(ranked, personalization);
-        ranked.sort_by(cmp_ranked_hit);
-        ranked.truncate(max_results);
-        ranked
+        };
+        self.finish_ranked_from_base(base, personalization, max_results)
     }
 
     fn into_ranked(&self, scored: Vec<ScoredHit>) -> Vec<RankedHit> {

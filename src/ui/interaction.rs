@@ -163,8 +163,8 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             state.refresh_search_for_query();
             Task::none()
         }
-        Message::AppSearchReady(generation, query, hits, elapsed_us) => {
-            state.apply_app_search_ready(generation, query, hits, elapsed_us);
+        Message::AppSearchReady(generation, query, hits, elapsed_us, index_generation) => {
+            state.apply_app_search_ready(generation, query, hits, elapsed_us, index_generation);
             sync_scroll(state)
         }
         Message::Rescan => {

@@ -115,8 +115,8 @@ enum Message {
     ToggleFiles,
     /// 后台 Everything 查询完成；代际和查询文本用于丢弃过期结果。
     FileSearchReady(u64, String, Vec<SearchResult>, u128),
-    /// 后台应用搜索完成；代际和查询文本用于丢弃过期结果。
-    AppSearchReady(u64, String, Vec<SearchResult>, u128),
+    /// 后台应用搜索完成；代际和查询文本用于丢弃过期结果；末位为索引代际。
+    AppSearchReady(u64, String, Vec<SearchResult>, u128, u64),
     /// 托盘菜单：重新扫描应用。
     Rescan,
     /// 托盘菜单：退出。

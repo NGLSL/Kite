@@ -4,7 +4,7 @@
 **Progress:** implemented
 
 - [x] SQLite `demoted` 表 + `demote_item` / `undemote_item` / `demoted_ids`
-- [x] `Personalization.demoted`；非保护层扣 `DEMOTE_PENALTY`（120）
+- [x] `Personalization.demoted`；非保护层扣 `DEMOTE_PENALTY`（**180**，须 > HISTORY_BOOST_MAX 160）
 - [x] 右键「降低此结果优先级 / 恢复优先级」
 - [x] 不删除索引项、不改启动目标；Name Exact 保护层不被挤出
 - [x] 存储往返 + 排序主缝测试通过

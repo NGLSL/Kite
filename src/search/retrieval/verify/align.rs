@@ -14,18 +14,25 @@ use super::{SCORE_NUCLEO_MAX, SCORE_SKIP};
 /// 跳字最大额外跨度（Query 长度之外允许跳过的字符数）。
 const SKIP_EXTRA_SPAN: usize = 3;
 
-/// 拼音首字母串中的字节偏移 → display 字符下标（每个非空白字符对应一位首字母）。
+/// 拼音首字母串中的字节偏移 → display **原始**字符下标（含空格）。
+/// 每个非空白字符对应一位首字母；返回值须与 name/token 的 start 同一坐标系。
 pub(crate) fn map_initial_index_to_display(doc: &IndexedDoc, initial_byte_at: usize) -> usize {
     let initials = doc.pinyin_initials.as_str();
+    if initial_byte_at > initials.len() {
+        return usize::MAX;
+    }
     let idx = initials[..initial_byte_at].chars().count();
-    doc.item
-        .display_name
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .enumerate()
-        .find(|(i, _)| *i == idx)
-        .map(|(i, _)| i)
-        .unwrap_or(usize::MAX)
+    let mut non_ws = 0usize;
+    for (i, ch) in doc.item.display_name.chars().enumerate() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        if non_ws == idx {
+            return i;
+        }
+        non_ws += 1;
+    }
+    usize::MAX
 }
 
 /// nucleo u16 分映射到本内核分数域（低质量，不抢精确/前缀）。
