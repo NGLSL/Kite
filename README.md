@@ -69,7 +69,7 @@ docs/         开发文档、需求和 ADR
 
 ## 性能
 
-在 Windows 11、i5-13490F、32 GB 内存环境下，Iced 原生版本为单进程，稳定空闲私有内存约 14.86 MB，20 秒 CPU 采样无增量，主程序约 7.90 MiB，NSIS 安装包约 3.91 MiB。详细测量方法、100 次唤起曲线和 Flow Launcher 对比见 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)。
+在 Windows 11、i5-13490F、32 GB 内存环境下，Iced 原生版本为单进程。详细见：[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)。
 
 ## 贡献
 
