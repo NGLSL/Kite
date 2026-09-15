@@ -194,6 +194,15 @@ fn verify_one(
             best = take_best(best, SCORE_SUBSTRING, "substring");
         }
     }
+    for candidate in &doc.keywords {
+        if candidate == q_raw {
+            best = take_best(best, SCORE_WORD_EXACT, "keyword-exact");
+        } else if candidate.starts_with(q_raw) {
+            best = take_best(best, SCORE_WORD_PREFIX, "keyword-prefix");
+        } else if candidate.contains(q_raw) {
+            best = take_best(best, SCORE_SUBSTRING - 40, "keyword-substring");
+        }
+    }
 
     // 2b) Compact
     if q_compact.len() >= 2 {
@@ -202,6 +211,17 @@ fn verify_one(
                 best = take_best(best, SCORE_COMPACT_EXACT, "compact-exact");
             } else if q_compact.len() >= MIN_COMPACT_SUBSTR_LEN && candidate.contains(q_compact) {
                 best = take_best(best, SCORE_COMPACT_SUBSTRING, "compact-substring");
+            }
+        }
+        for candidate in &doc.keyword_compacts {
+            if candidate == q_compact {
+                best = take_best(best, SCORE_WORD_EXACT, "keyword-compact-exact");
+            } else if q_compact.len() >= MIN_COMPACT_SUBSTR_LEN && candidate.contains(q_compact) {
+                best = take_best(
+                    best,
+                    SCORE_COMPACT_SUBSTRING - 60,
+                    "keyword-compact-substring",
+                );
             }
         }
     }
@@ -269,6 +289,15 @@ fn verify_one(
             best = take_best(best, score, "skip");
         } else if let Some(score) = ordered_skip_score(q_raw, display) {
             best = take_best(best, score, "skip");
+        } else {
+            for (keyword, bits) in doc.keywords.iter().zip(&doc.keyword_bits) {
+                if bits.contains_all(&q.chars) {
+                    if let Some(score) = ordered_skip_score(q_raw, keyword) {
+                        best = take_best(best, score - 30, "keyword-skip");
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -288,10 +317,17 @@ fn verify_one(
 
     // 6) Fuzzy / SymSpell 验证（编辑距离）
     if best.is_none() {
-        if let Some((score, _)) = fuzzy_name_or_tokens(q_raw, name)
-            .or_else(|| fuzzy_name_or_tokens(q_raw, display))
+        if let Some((score, _)) =
+            fuzzy_name_or_tokens(q_raw, name).or_else(|| fuzzy_name_or_tokens(q_raw, display))
         {
             best = take_best(best, score, "fuzzy");
+        } else if let Some((score, _)) = doc
+            .keywords
+            .iter()
+            .filter_map(|keyword| fuzzy_name_or_tokens(q_raw, keyword))
+            .max_by_key(|(score, _)| *score)
+        {
+            best = take_best(best, score - 30, "keyword-fuzzy");
         }
     }
 
@@ -459,10 +495,13 @@ pub fn reference_search(
             ));
         }
     }
-    hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)).then_with(|| a.2.cmp(&b.2)));
+    hits.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
     hits.truncate(max_results);
-    hits
-        .into_iter()
+    hits.into_iter()
         .map(|(score, _, _, id, matched_by)| {
             let doc = docs.iter().find(|d| d.id == id).unwrap();
             SearchResult {
@@ -534,8 +573,14 @@ mod tests {
             .collect();
         assert_eq!(ac, "ndm");
         let q = tokens("visual code");
-        let n: Vec<String> = tokens("visual studio code").iter().map(|s| s.to_string()).collect();
-        assert!(ordered_token_match(&q.iter().map(|s| s.to_string()).collect::<Vec<_>>(), &n));
+        let n: Vec<String> = tokens("visual studio code")
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(ordered_token_match(
+            &q.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            &n
+        ));
         let wrong = tokens("code visual")
             .iter()
             .map(|s| s.to_string())

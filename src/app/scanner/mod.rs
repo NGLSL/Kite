@@ -2,8 +2,13 @@
 //! 注意：不要 follow_links（开始菜单 junction 可能卡死）；快速扫描有时间预算。
 
 mod cache;
+mod commands;
 mod lnk;
+mod metadata;
+mod protocols;
 mod registry;
+mod uninstall;
+mod url;
 pub mod util;
 
 use std::collections::HashMap;
@@ -13,9 +18,9 @@ use std::time::{Duration, Instant};
 
 use walkdir::WalkDir;
 
-use cache::ScanCache;
 use crate::model::{AppIndex, AppItem};
 use crate::system::icons;
+use cache::ScanCache;
 use util::{app_display_name, hash_id, normalize_path_key};
 
 type RawItem = (AppItem, Option<String>);
@@ -43,6 +48,12 @@ pub enum ScanPass {
     Full,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ScanOptions {
+    pub extra_scoop_shim_dirs: Vec<PathBuf>,
+    pub portable_dirs: Vec<PathBuf>,
+}
+
 /// 完整扫描。`fast` 为 true 时只建列表、不提图标（首屏用）。
 pub fn scan_apps(icon_dir: &Path, fast: bool) -> AppIndex {
     let pass = if fast { ScanPass::Fast } else { ScanPass::Full };
@@ -50,15 +61,36 @@ pub fn scan_apps(icon_dir: &Path, fast: bool) -> AppIndex {
 }
 
 /// 按档位扫描；完整档可作为后台第二遍原子替换首屏快照。
-pub fn scan_apps_pass(icon_dir: &Path, pass: ScanPass, extra_scoop_shim_dirs: &[PathBuf]) -> AppIndex {
-    scan_apps_with_scoop_shims(icon_dir, pass, extra_scoop_shim_dirs)
-}
-
-fn scan_apps_with_scoop_shims(
+pub fn scan_apps_pass(
     icon_dir: &Path,
     pass: ScanPass,
     extra_scoop_shim_dirs: &[PathBuf],
 ) -> AppIndex {
+    scan_apps_pass_with_options(
+        icon_dir,
+        pass,
+        &ScanOptions {
+            extra_scoop_shim_dirs: extra_scoop_shim_dirs.to_vec(),
+            portable_dirs: Vec::new(),
+        },
+    )
+}
+
+pub fn scan_apps_pass_with_options(
+    icon_dir: &Path,
+    pass: ScanPass,
+    options: &ScanOptions,
+) -> AppIndex {
+    scan_apps_with_options(icon_dir, pass, options)
+}
+
+/// Fixed command-source directories that should participate in filesystem
+/// change monitoring together with Start Menu and configured portable roots.
+pub fn command_watch_roots() -> Vec<PathBuf> {
+    commands::configured_command_roots()
+}
+
+fn scan_apps_with_options(icon_dir: &Path, pass: ScanPass, options: &ScanOptions) -> AppIndex {
     let fast = pass == ScanPass::Fast;
     let t0 = Instant::now();
     let budget = if fast { Some(FAST_BUDGET) } else { None };
@@ -72,11 +104,7 @@ fn scan_apps_with_scoop_shims(
     } else {
         FULL_OTHER_SOURCE_MAX_DEPTH
     };
-    let max_per_dir = if fast {
-        MAX_PER_DIR
-    } else {
-        FULL_MAX_PER_DIR
-    };
+    let max_per_dir = if fast { MAX_PER_DIR } else { FULL_MAX_PER_DIR };
     let max_total = if fast { MAX_TOTAL } else { FULL_MAX_TOTAL };
     let mut raw: Vec<RawItem> = Vec::new();
     let mut cache = ScanCache::load(icon_dir);
@@ -104,7 +132,7 @@ fn scan_apps_with_scoop_shims(
         program_data.as_deref(),
         scoop_root.as_deref(),
         scoop_global_root.as_deref(),
-        extra_scoop_shim_dirs,
+        &options.extra_scoop_shim_dirs,
         budget,
         t0,
         other_depth,
@@ -115,6 +143,56 @@ fn scan_apps_with_scoop_shims(
     );
     crate::log::info(&format!(
         "scoop-shims: +{} -> total {} in {:?}",
+        raw.len() - before,
+        raw.len(),
+        t0.elapsed()
+    ));
+
+    // User-authorized roots take priority over broad system sources so the
+    // fast-pass budget cannot starve explicitly configured portable apps.
+    for root in &options.portable_dirs {
+        if budget_exhausted(budget, t0) || raw.len() >= max_total {
+            break;
+        }
+        let before = raw.len();
+        collect_from_dir(
+            root,
+            "portable",
+            other_depth,
+            budget,
+            t0,
+            max_per_dir,
+            max_total,
+            &mut raw,
+            &mut cache,
+        );
+        crate::log::info(&format!(
+            "portable {}: +{} -> total {} in {:?}",
+            root.display(),
+            raw.len() - before,
+            raw.len(),
+            t0.elapsed()
+        ));
+    }
+
+    // Package managers and Windows app aliases expose small, fixed command
+    // directories. They are intentionally scanned directly instead of walking
+    // the complete PATH, which would pull in SDK and runtime internals.
+    let before = raw.len();
+    commands::collect_command_entries(commands::COMMAND_SOURCE, &mut raw);
+    crate::log::info(&format!(
+        "command aliases: +{} -> total {} in {:?}",
+        raw.len() - before,
+        raw.len(),
+        t0.elapsed()
+    ));
+
+    // Installed programs without Start Menu entries often still publish a
+    // friendly DisplayName and executable icon through Uninstall registry rows.
+    let before = raw.len();
+    raw.extend(uninstall::collect_uninstall("uninstall"));
+    crate::log::info(&format!(
+        "uninstall registry: +{} -> total {} in {:?}",
         raw.len() - before,
         raw.len(),
         t0.elapsed()
@@ -176,24 +254,45 @@ fn scan_apps_with_scoop_shims(
         t0.elapsed()
     ));
 
-    // UWP 较慢且噪声多，仅在非快速扫描时做，且限制数量
+    // AppsFolder 枚举较慢，含 Store 应用和经典系统入口；后台完整扫描再补齐。
     if !fast {
         let t = Instant::now();
         crate::app::uwp::collect_uwp("uwp", &mut raw);
         crate::log::info(&format!(
-            "uwp: total {} in {:?}",
+            "apps-folder: total {} in {:?}",
             raw.len(),
             t.elapsed()
         ));
     }
 
-    let items = dedupe(raw);
-    crate::log::info(&format!("dedupe -> {} in {:?}", items.len(), t0.elapsed()));
+    let mut items = dedupe(raw);
+    merge_command_name_duplicates(&mut items);
+    let system_entries = crate::app::builtin::materialize_system_entries(Some(icon_dir));
+    exclude_system_name_duplicates(&mut items, &system_entries);
+    crate::log::info(&format!(
+        "dedupe/system filter -> {} in {:?}",
+        items.len(),
+        t0.elapsed()
+    ));
 
     let mut apps = Vec::with_capacity(items.len());
     let t = Instant::now();
     let mut py = Duration::ZERO;
+    let mut metadata_time = Duration::ZERO;
     for (mut item, icon_src) in items {
+        if !fast {
+            let tm = Instant::now();
+            for keyword in metadata::executable_keywords(Path::new(&item.target)) {
+                if !item
+                    .search_keywords
+                    .iter()
+                    .any(|known| known.eq_ignore_ascii_case(&keyword))
+                {
+                    item.search_keywords.push(keyword);
+                }
+            }
+            metadata_time += tm.elapsed();
+        }
         let tp = Instant::now();
         item.attach_search_fields();
         py += tp.elapsed();
@@ -209,14 +308,32 @@ fn scan_apps_with_scoop_shims(
         }
         apps.push(item);
     }
+
+    // Protocol schemes are aliases for an existing executable whenever
+    // possible. Only registrations with no indexed target materialize a new
+    // row, and those still launch the verified executable rather than a URI.
+    let protocols = protocols::collect_protocols();
+    let existing_len = apps.len();
+    protocols::merge_or_materialize(&mut apps, &protocols);
+    for item in &mut apps[existing_len..] {
+        item.attach_search_fields();
+        item.icon_src = Some(item.target.clone());
+        if !fast {
+            item.icon = icons::cache_icon(
+                icon_dir,
+                &item.id,
+                item.icon_src.as_deref(),
+                Some(item.target.as_str()),
+            );
+        }
+    }
     crate::log::info(&format!(
-        "fields/icons pass={pass:?}: {} apps in {:?} pinyin={py:?}",
+        "fields/icons pass={pass:?}: {} apps in {:?} metadata={metadata_time:?} pinyin={py:?}",
         apps.len(),
         t.elapsed()
     ));
 
     // 系统入口随快照物化并补齐图标；检索索引与 apps+system 同代发布
-    let system_entries = crate::app::builtin::materialize_system_entries(Some(icon_dir));
     let t_idx = Instant::now();
     let mut index = AppIndex {
         apps,
@@ -269,12 +386,7 @@ pub fn extract_icons_parallel(
             let results = Arc::clone(&results);
             s.spawn(move || {
                 for (id, src, target) in &part {
-                    let path = icons::cache_icon(
-                        &icon_dir,
-                        id,
-                        src.as_deref(),
-                        target.as_deref(),
-                    );
+                    let path = icons::cache_icon(&icon_dir, id, src.as_deref(), target.as_deref());
                     if let Ok(mut g) = results.lock() {
                         g.insert(id.clone(), path);
                     }
@@ -356,6 +468,26 @@ fn collect_from_dir(
                 out.push((item, icon_src));
                 n += 1;
             }
+        } else if ext == "url" && url::is_app_protocol_shortcut(path) {
+            // ShellExecute opens the verified shortcut file, so the parsed URL
+            // never becomes an executable target or a shell command.
+            let target = path.to_string_lossy().to_string();
+            let name = app_display_name(&file_name);
+            let id = util::stable_item_id(&target, None);
+            let working_dir = path.parent().map(|p| p.to_string_lossy().to_string());
+            let item = AppItem::scanned(id, name, target, None, working_dir, source);
+            out.push((item, None));
+            n += 1;
+        } else if ext == "appref-ms" {
+            // ClickOnce application references are themselves verified files;
+            // Windows Shell resolves deployment metadata when the user opens it.
+            let target = path.to_string_lossy().to_string();
+            let name = app_display_name(&file_name);
+            let id = util::stable_item_id(&target, None);
+            let working_dir = path.parent().map(|p| p.to_string_lossy().to_string());
+            let item = AppItem::scanned(id, name, target, None, working_dir, source);
+            out.push((item, None));
+            n += 1;
         } else if ext == "exe" {
             let target = path.to_string_lossy().to_string();
             let name = app_display_name(&file_name);
@@ -417,21 +549,35 @@ fn collect_scoop_shims(
 }
 
 fn dedupe(raw: Vec<RawItem>) -> Vec<RawItem> {
+    use std::collections::hash_map::Entry;
+
     let rank = |source: &str| match source {
         "start-menu" => 0,
         "desktop" => 1,
-        "app-paths" => 2,
-        "uwp" => 3,
-        _ => 4,
+        "portable" => 2,
+        "uninstall" => 3,
+        "app-paths" => 4,
+        "uwp" | "apps-folder" => 5,
+        "commands" => 6,
+        _ => 7,
     };
 
     let mut best: HashMap<String, RawItem> = HashMap::new();
     for (item, icon) in raw {
         let key = dedupe_key(&item);
-        match best.get(&key) {
-            Some((existing, _)) if rank(&existing.source) <= rank(&item.source) => {}
-            _ => {
-                best.insert(key, (item, icon));
+        match best.entry(key) {
+            Entry::Vacant(slot) => {
+                slot.insert((item, icon));
+            }
+            Entry::Occupied(mut slot) => {
+                if rank(&slot.get().0.source) <= rank(&item.source) {
+                    keep_shortcut_names(&mut slot.get_mut().0, &item);
+                } else {
+                    let (old_item, _) = slot.get();
+                    let mut replacement = item;
+                    keep_shortcut_names(&mut replacement, old_item);
+                    slot.insert((replacement, icon));
+                }
             }
         }
     }
@@ -444,6 +590,55 @@ fn dedupe(raw: Vec<RawItem>) -> Vec<RawItem> {
             .then_with(|| a.0.source.cmp(&b.0.source))
     });
     list
+}
+
+fn exclude_system_name_duplicates(apps: &mut Vec<RawItem>, system_entries: &[AppItem]) {
+    let system_names: std::collections::HashSet<String> = system_entries
+        .iter()
+        .map(|item| crate::search::normalize_for_index(&item.name))
+        .collect();
+    apps.retain(|(item, _)| {
+        item.source != "apps-folder"
+            || !system_names.contains(&crate::search::normalize_for_index(&item.name))
+    });
+}
+
+/// WindowsApps often exposes `MediaPlayer.exe` beside an AppsFolder row named
+/// `Media Player`. Preserve the executable alias as a keyword on the friendly
+/// row instead of showing two visually equivalent applications.
+fn merge_command_name_duplicates(items: &mut Vec<RawItem>) {
+    let compact_name = |item: &AppItem| {
+        crate::search::normalize_for_index(&item.name)
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>()
+    };
+    let mut remove = std::collections::HashSet::new();
+    for index in 0..items.len() {
+        if items[index].0.source != commands::COMMAND_SOURCE {
+            continue;
+        }
+        let key = compact_name(&items[index].0);
+        let Some(winner) = items.iter().enumerate().find_map(|(candidate, (item, _))| {
+            (candidate != index
+                && item.source != commands::COMMAND_SOURCE
+                && compact_name(item) == key)
+                .then_some(candidate)
+        }) else {
+            continue;
+        };
+        let alias = items[index].0.clone();
+        keep_shortcut_names(&mut items[winner].0, &alias);
+        remove.insert(index);
+    }
+    if !remove.is_empty() {
+        let mut index = 0usize;
+        items.retain(|_| {
+            let keep = !remove.contains(&index);
+            index += 1;
+            keep
+        });
+    }
 }
 
 /// 同一 target 的不同参数可能代表不同的启动语义（例如普通 PowerShell
@@ -476,7 +671,14 @@ mod tests {
         let icon_dir = root.join("icons");
         std::fs::create_dir_all(&icon_dir).unwrap();
 
-        let index = scan_apps_with_scoop_shims(&icon_dir, ScanPass::Fast, &[shims]);
+        let index = scan_apps_pass_with_options(
+            &icon_dir,
+            ScanPass::Fast,
+            &ScanOptions {
+                extra_scoop_shim_dirs: vec![shims],
+                ..ScanOptions::default()
+            },
+        );
 
         assert!(
             index
@@ -516,12 +718,120 @@ mod tests {
             &mut cache,
         );
 
-        let targets: Vec<_> = raw
-            .iter()
-            .map(|(item, _)| item.target.as_str())
-            .collect();
+        let targets: Vec<_> = raw.iter().map(|(item, _)| item.target.as_str()).collect();
         assert!(targets.contains(&first.to_string_lossy().as_ref()));
         assert!(targets.contains(&second.to_string_lossy().as_ref()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn configured_portable_directory_is_indexed() {
+        let root = temp_dir("portable-root");
+        let portable = root.join("My Portable Apps");
+        std::fs::create_dir_all(&portable).unwrap();
+        let exe = portable.join("Portable Editor.exe");
+        std::fs::write(&exe, b"fixture").unwrap();
+        let icon_dir = root.join("icons");
+        let index = scan_apps_pass_with_options(
+            &icon_dir,
+            ScanPass::Fast,
+            &ScanOptions {
+                portable_dirs: vec![portable],
+                ..ScanOptions::default()
+            },
+        );
+        assert!(
+            index
+                .retrieval
+                .as_ref()
+                .unwrap()
+                .search("Portable Editor", &[], 10)
+                .iter()
+                .any(|hit| hit.item.target == exe.to_string_lossy()),
+            "an explicitly configured portable application must be searchable"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn protocol_shortcut_in_start_menu_is_searchable() {
+        let root = temp_dir("protocol-shortcut");
+        let shortcut = root.join("Example Game.url");
+        let website = root.join("Example Website.url");
+        std::fs::write(
+            &shortcut,
+            b"[{000214A0-0000-0000-C000-000000000046}]\r\nProp3=19,0\r\n[InternetShortcut]\r\nURL=steam://rungameid/123\r\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &website,
+            b"[InternetShortcut]\r\nURL=https://example.com\r\n",
+        )
+        .unwrap();
+
+        let mut raw = Vec::new();
+        let mut cache = ScanCache::load(&root);
+        collect_from_dir(
+            &root,
+            "start-menu",
+            START_MENU_MAX_DEPTH,
+            None,
+            Instant::now(),
+            MAX_PER_DIR,
+            MAX_TOTAL,
+            &mut raw,
+            &mut cache,
+        );
+        assert!(
+            raw.iter()
+                .all(|(item, _)| item.target != website.to_string_lossy()),
+            "web bookmarks should not be indexed as installed software"
+        );
+        let (mut item, _) = raw
+            .into_iter()
+            .find(|(item, _)| item.target == shortcut.to_string_lossy())
+            .expect("installed game protocol shortcut must be indexed");
+        item.attach_search_fields();
+        let retrieval = crate::search::RetrievalIndex::build(&[item], &[]);
+        assert!(
+            retrieval
+                .search("Example Game", &[], 10)
+                .iter()
+                .any(|hit| hit.item.name == "Example Game"),
+            "shortcut must be searchable by its display name"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clickonce_shortcut_in_start_menu_is_searchable() {
+        let root = temp_dir("clickonce-shortcut");
+        let shortcut = root.join("Enterprise Portal.appref-ms");
+        std::fs::write(&shortcut, b"fixture").unwrap();
+        let mut raw = Vec::new();
+        let mut cache = ScanCache::load(&root);
+        collect_from_dir(
+            &root,
+            "start-menu",
+            START_MENU_MAX_DEPTH,
+            None,
+            Instant::now(),
+            MAX_PER_DIR,
+            MAX_TOTAL,
+            &mut raw,
+            &mut cache,
+        );
+        let mut item = raw
+            .into_iter()
+            .map(|(item, _)| item)
+            .find(|item| item.target == shortcut.to_string_lossy())
+            .expect("ClickOnce application reference must be indexed");
+        item.attach_search_fields();
+        let retrieval = crate::search::RetrievalIndex::build(&[item], &[]);
+        assert!(retrieval
+            .search("Enterprise Portal", &[], 10)
+            .iter()
+            .any(|hit| { hit.item.target == shortcut.to_string_lossy() }));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -607,9 +917,155 @@ mod tests {
             "start-menu",
         );
 
-        let items = dedupe(vec![(normal, None), (normal_duplicate, None), (developer, None)]);
+        let items = dedupe(vec![
+            (normal, None),
+            (normal_duplicate, None),
+            (developer, None),
+        ]);
 
         assert_eq!(items.len(), 2, "相同启动语义应合并，不同参数必须保留");
-        assert!(items.iter().any(|(item, _)| item.name == "Developer PowerShell"));
+        assert!(items
+            .iter()
+            .any(|(item, _)| item.name == "Developer PowerShell"));
+    }
+
+    #[test]
+    fn duplicate_shortcut_names_remain_searchable() {
+        let target = r"C:\Program Files\Example\example.exe";
+        let primary = AppItem::scanned(
+            "same-id".into(),
+            "Primary Launcher".into(),
+            target.into(),
+            None,
+            None,
+            "start-menu",
+        );
+        let alternate = AppItem::scanned(
+            "same-id".into(),
+            "Alternate Console".into(),
+            target.into(),
+            None,
+            None,
+            "desktop",
+        );
+        for raw in [
+            vec![(primary.clone(), None), (alternate.clone(), None)],
+            vec![(alternate.clone(), None), (primary.clone(), None)],
+        ] {
+            let mut items = dedupe(raw);
+            assert_eq!(items.len(), 1);
+            let mut item = items.pop().unwrap().0;
+            item.attach_search_fields();
+            let index = crate::search::RetrievalIndex::build(&[item], &[]);
+            assert!(
+                index
+                    .search("Alternate Console", &[], 10)
+                    .iter()
+                    .any(|hit| hit.item.name == "Primary Launcher"),
+                "another installed shortcut name must still find the same target"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_command_alias_merges_into_friendly_application() {
+        let friendly = AppItem::scanned(
+            "friendly".into(),
+            "Media Player".into(),
+            r"shell:AppsFolder\MediaPlayer".into(),
+            None,
+            None,
+            "uwp",
+        );
+        let command = AppItem::scanned(
+            "command".into(),
+            "MediaPlayer".into(),
+            r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\MediaPlayer.exe".into(),
+            None,
+            None,
+            commands::COMMAND_SOURCE,
+        );
+        let mut items = vec![(friendly, None), (command, None)];
+        merge_command_name_duplicates(&mut items);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].0.name, "Media Player");
+        assert!(items[0]
+            .0
+            .search_keywords
+            .iter()
+            .any(|keyword| keyword == "MediaPlayer"));
+    }
+
+    #[test]
+    fn uninstall_display_name_wins_and_executable_alias_remains_searchable() {
+        let target = r"C:\Apps\Editor\editor.exe";
+        let app_path = AppItem::scanned(
+            "app-path".into(),
+            "editor".into(),
+            target.into(),
+            None,
+            None,
+            "app-paths",
+        );
+        let uninstall = AppItem::scanned(
+            "uninstall".into(),
+            "Acme Document Editor".into(),
+            target.into(),
+            None,
+            None,
+            "uninstall",
+        );
+        let mut items = dedupe(vec![(app_path, None), (uninstall, None)]);
+        assert_eq!(items.len(), 1);
+        let mut item = items.pop().unwrap().0;
+        assert_eq!(item.name, "Acme Document Editor");
+        item.attach_search_fields();
+        let index = crate::search::RetrievalIndex::build(&[item], &[]);
+        for query in ["acme", "editor"] {
+            assert_eq!(index.search(query, &[], 10).len(), 1);
+        }
+    }
+
+    #[test]
+    fn apps_folder_classic_does_not_duplicate_builtin_system_entry() {
+        let app = AppItem::scanned(
+            "apps-folder-control-panel".into(),
+            "控制面板".into(),
+            "shell:AppsFolder\\Microsoft.Windows.ControlPanel".into(),
+            None,
+            None,
+            "apps-folder",
+        );
+        let builtin = AppItem::scanned(
+            "builtin-control-panel".into(),
+            "控制面板".into(),
+            "shell:ControlPanelFolder".into(),
+            None,
+            None,
+            "builtin-system",
+        );
+        let mut apps = vec![(app, None)];
+        exclude_system_name_duplicates(&mut apps, &[builtin]);
+        assert!(
+            apps.is_empty(),
+            "same-named AppsFolder row duplicates an existing system entry"
+        );
+    }
+}
+
+fn keep_shortcut_names(winner: &mut AppItem, other: &AppItem) {
+    for name in std::iter::once(&other.name)
+        .chain(std::iter::once(&other.display_name))
+        .chain(other.search_keywords.iter())
+    {
+        if !name.eq_ignore_ascii_case(&winner.name)
+            && !name.eq_ignore_ascii_case(&winner.display_name)
+            && !winner
+                .search_keywords
+                .iter()
+                .any(|kw| kw.eq_ignore_ascii_case(name))
+        {
+            winner.search_keywords.push(name.clone());
+        }
     }
 }

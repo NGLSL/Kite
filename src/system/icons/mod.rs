@@ -13,6 +13,9 @@ use sha2::{Digest, Sha256};
 
 static VALIDATED_ICON_CACHE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
+const ICON_CACHE_SCHEMA: &str = "v2";
+const CONTROL_PANEL_ICON_CACHE_SCHEMA: &str = "v3";
+
 /// 将图标 PNG 缓存到 `icon_dir`，返回绝对路径。
 /// `icon_src` 为首选源（lnk 的 icon_location 可为 `path,index`）；
 /// `target_fallback` 为启动 target，优先源失败或无效时再试。
@@ -27,8 +30,18 @@ pub fn cache_icon(
         return None;
     }
     std::fs::create_dir_all(icon_dir).ok()?;
-    // Schema bump：策略修正后让旧版「内容有效但语义错误」的 PNG 自动重提。
-    let out = icon_dir.join(format!("{}.png", hash_file_name(&format!("v2:{id}"))));
+    // Control Panel's virtual Shell path used to produce a valid but wrong
+    // generic icon. Keep the cache bump local to that path so ordinary app
+    // icons do not all get extracted again on the next launch.
+    let schema = if candidates
+        .iter()
+        .any(|(path, _)| extract::is_control_panel_path(path))
+    {
+        CONTROL_PANEL_ICON_CACHE_SCHEMA
+    } else {
+        ICON_CACHE_SCHEMA
+    };
+    let out = icon_dir.join(format!("{}.png", hash_file_name(&format!("{schema}:{id}"))));
     if out.exists() {
         if !source_newer_than_cache(&out, &candidates) && is_trusted_cached_icon(&out) {
             return Some(out.to_string_lossy().to_string());
@@ -48,9 +61,7 @@ pub fn cache_icon(
             }
         }
     }
-    crate::log::info(&format!(
-        "icon fail id={id} tried={candidates:?}"
-    ));
+    crate::log::info(&format!("icon fail id={id} tried={candidates:?}"));
     None
 }
 
@@ -58,9 +69,8 @@ pub fn cache_icon(
 fn extract_any(path: &Path, index: Option<i32>) -> Option<Vec<u8>> {
     match extract::classify(path) {
         extract::SourceKind::Image => decode_image_file(path),
-        extract::SourceKind::Ico => {
-            extract::extract_ico_large(path).or_else(|| extract::extract_shell_icon_indexed(path, index))
-        }
+        extract::SourceKind::Ico => extract::extract_ico_large(path)
+            .or_else(|| extract::extract_shell_icon_indexed(path, index)),
         extract::SourceKind::Shell => extract::extract_shell_icon_indexed(path, index),
     }
 }
@@ -98,7 +108,10 @@ pub fn cache_type_icon(icon_dir: &Path, file_name: &str, is_dir: bool) -> Option
 
 fn cache_type_icon_uncached(icon_dir: &Path, key: &str, is_dir: bool) -> Option<String> {
     std::fs::create_dir_all(icon_dir).ok()?;
-    let out = icon_dir.join(format!("{}.png", hash_file_name(&format!("filetype:{key}"))));
+    let out = icon_dir.join(format!(
+        "{}.png",
+        hash_file_name(&format!("filetype:{key}"))
+    ));
     if out.exists() {
         if is_trusted_cached_icon(&out) {
             return Some(out.to_string_lossy().to_string());
@@ -161,7 +174,10 @@ fn remember_cached_icon(path: &Path) {
 }
 
 /// 图标源候选：首选 icon_location（`path,index`），再追加启动 target 回退。
-fn collect_candidates(icon_src: Option<&str>, target_fallback: Option<&str>) -> Vec<(PathBuf, Option<i32>)> {
+fn collect_candidates(
+    icon_src: Option<&str>,
+    target_fallback: Option<&str>,
+) -> Vec<(PathBuf, Option<i32>)> {
     let mut list = Vec::new();
     let push_unique = |raw: &str, list: &mut Vec<(PathBuf, Option<i32>)>| {
         let s = raw.trim().trim_matches('"');
@@ -214,7 +230,10 @@ fn expand_env_path(raw: &str) -> PathBuf {
 fn hash_file_name(id: &str) -> String {
     let mut h = Sha256::new();
     h.update(id.as_bytes());
-    h.finalize()[..8].iter().map(|b| format!("{b:02x}")).collect()
+    h.finalize()[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// 裁掉透明边，再居中放到正方形画布，避免列表里显得过小。
@@ -305,10 +324,7 @@ mod tests {
 
     #[test]
     fn collect_candidates_prefer_icon_src_then_target() {
-        let c = collect_candidates(
-            Some(r"C:\app\ProductIcon,3"),
-            Some(r"C:\app\App.exe"),
-        );
+        let c = collect_candidates(Some(r"C:\app\ProductIcon,3"), Some(r"C:\app\App.exe"));
         assert_eq!(c.len(), 2);
         assert_eq!(c[0].0.to_string_lossy(), r"C:\app\ProductIcon");
         assert_eq!(c[0].1, Some(3));
@@ -348,7 +364,12 @@ mod tests {
     fn cache_shell_namespace_icon() {
         let dir = std::env::temp_dir().join(format!("kite-shell-icon-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let cached = cache_icon(&dir, "shell:recycle-bin", Some("shell:RecycleBinFolder"), None);
+        let cached = cache_icon(
+            &dir,
+            "shell:recycle-bin",
+            Some("shell:RecycleBinFolder"),
+            None,
+        );
         assert!(cached.is_some(), "shell namespace icon should be extracted");
         let path = cached.unwrap();
         let bytes = std::fs::read(&path).expect("cached shell icon");
@@ -379,13 +400,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let id = "transparent-cache";
-        let out = dir.join(format!("{}.png", hash_file_name(&format!("v2:{id}"))));
+        let out = dir.join(format!(
+            "{}.png",
+            hash_file_name(&format!("{ICON_CACHE_SCHEMA}:{id}"))
+        ));
         let blank = RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 0]));
         std::fs::write(&out, encode_png(&blank).unwrap()).unwrap();
 
         let source = std::env::current_exe().unwrap();
         let cached = cache_icon(&dir, id, source.to_str(), None);
-        assert!(cached.is_some(), "invalid cached icon should be extracted again");
+        assert!(
+            cached.is_some(),
+            "invalid cached icon should be extracted again"
+        );
         let bytes = std::fs::read(cached.unwrap()).unwrap();
         let img = image::load_from_memory(&bytes).unwrap().to_rgba8();
         assert!(img.pixels().any(|p| p.0[3] > 8));
@@ -415,5 +442,83 @@ mod tests {
         let image = image::open(refreshed).unwrap().to_rgba8();
         assert_eq!(image.get_pixel(32, 32).0, [0, 0, 255, 255]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_control_panel_icon_reuses_v2_cache() {
+        let dir =
+            std::env::temp_dir().join(format!("kite-ordinary-icon-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let source = dir.join("source.png");
+        let source_image = RgbaImage::from_pixel(8, 8, image::Rgba([0, 255, 0, 255]));
+        std::fs::write(&source, encode_png(&source_image).unwrap()).unwrap();
+
+        let id = "ordinary-cache";
+        let v2 = dir.join(format!(
+            "{}.png",
+            hash_file_name(&format!("{ICON_CACHE_SCHEMA}:{id}"))
+        ));
+        let cached_image = RgbaImage::from_pixel(64, 64, image::Rgba([255, 0, 255, 255]));
+        std::fs::write(&v2, encode_png(&cached_image).unwrap()).unwrap();
+
+        let cached = cache_icon(&dir, id, source.to_str(), None).expect("v2 cache should resolve");
+        assert_eq!(cached, v2.to_string_lossy());
+        let image = image::open(&cached).unwrap().to_rgba8();
+        assert_eq!(image.get_pixel(0, 0).0, [255, 0, 255, 255]);
+        assert!(!dir
+            .join(format!(
+                "{}.png",
+                hash_file_name(&format!("{CONTROL_PANEL_ICON_CACHE_SCHEMA}:{id}"))
+            ))
+            .exists());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn control_panel_shell_icon_matches_windows_control_panel_resource() {
+        let dir =
+            std::env::temp_dir().join(format!("kite-control-panel-icon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let stale_v2 = dir.join(format!(
+            "{}.png",
+            hash_file_name(&format!("{ICON_CACHE_SCHEMA}:control-panel-shell"))
+        ));
+        let stale_image = RgbaImage::from_pixel(64, 64, image::Rgba([255, 0, 255, 255]));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&stale_v2, encode_png(&stale_image).unwrap()).unwrap();
+
+        let shell_path = cache_icon(
+            &dir,
+            "control-panel-shell",
+            Some("shell:ControlPanelFolder"),
+            None,
+        )
+        .expect("control panel shell icon should resolve");
+        let resource_path = cache_icon(
+            &dir,
+            "control-panel-resource",
+            Some(r"%windir%\system32\imageres.dll,-27"),
+            None,
+        )
+        .expect("control panel resource icon should resolve");
+
+        let shell = image::open(&shell_path)
+            .expect("shell icon should decode")
+            .to_rgba8();
+        let resource = image::open(resource_path)
+            .expect("resource icon should decode")
+            .to_rgba8();
+        assert_eq!(
+            shell, resource,
+            "shell:ControlPanelFolder must use the Windows Control Panel icon resource, not the generic Shell folder icon"
+        );
+        assert_ne!(shell_path, stale_v2.to_string_lossy());
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

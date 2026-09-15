@@ -73,13 +73,7 @@ pub fn search_with_system(
     if q.is_empty() {
         return search(apps, query, user_alias_targets, max_results);
     }
-    retrieval::search_with_snapshot(
-        apps,
-        system_entries,
-        query,
-        user_alias_targets,
-        max_results,
-    )
+    retrieval::search_with_snapshot(apps, system_entries, query, user_alias_targets, max_results)
 }
 
 /// 使用预构建索引搜索（快照同代，避免每键重建）。
@@ -100,19 +94,21 @@ pub fn order_by_recent(
     top_n: usize,
 ) -> Vec<SearchResult> {
     let mut hits: Vec<SearchResult> = Vec::with_capacity(top_n.min(apps.len()));
-    let push_hit = |id: &str, score: i32, matched_by: &'static str, hits: &mut Vec<SearchResult>| -> bool {        if hits.iter().any(|h| h.item.id == id) {
-            return false;
-        }
-        if let Some(item) = apps.iter().find(|a| a.id == id) {
-            hits.push(SearchResult {
-                item: item.clone(),
-                score,
-                matched_by: matched_by.into(),
-            });
-            return true;
-        }
-        false
-    };
+    let push_hit =
+        |id: &str, score: i32, matched_by: &'static str, hits: &mut Vec<SearchResult>| -> bool {
+            if hits.iter().any(|h| h.item.id == id) {
+                return false;
+            }
+            if let Some(item) = apps.iter().find(|a| a.id == id) {
+                hits.push(SearchResult {
+                    item: item.clone(),
+                    score,
+                    matched_by: matched_by.into(),
+                });
+                return true;
+            }
+            false
+        };
     for id in pinned_ids {
         if hits.len() >= top_n {
             break;
@@ -236,10 +232,7 @@ mod tests {
             item("Windows Terminal"),
         ];
         let hits = search(&apps, query, &[], TOP_N);
-        assert!(
-            !hits.is_empty(),
-            "no hits for {query}"
-        );
+        assert!(!hits.is_empty(), "no hits for {query}");
         assert_eq!(
             hits[0].item.name, expected,
             "query={query} top={} expected={expected}",
@@ -326,10 +319,8 @@ mod tests {
     #[test]
     fn history_boost_cannot_beat_exact_gap() {
         // Name Exact(1000) + 历史上限(160) 仍应高于 Prefix(800) + 同样历史上限
-        let exact = crate::search::ranker::SCORE_NAME_EXACT
-            + crate::history::HISTORY_BOOST_MAX;
-        let prefix = crate::search::ranker::SCORE_PREFIX
-            + crate::history::HISTORY_BOOST_MAX;
+        let exact = crate::search::ranker::SCORE_NAME_EXACT + crate::history::HISTORY_BOOST_MAX;
+        let prefix = crate::search::ranker::SCORE_PREFIX + crate::history::HISTORY_BOOST_MAX;
         assert!(exact > prefix);
     }
 
@@ -364,7 +355,10 @@ mod tests {
 
         let unrelated = sourced_item("Aurora Remote", r"D:\Apps\Remote\launcher.exe", "desktop");
         let hits = search(&[raw, unrelated], "aurora", &[], TOP_N);
-        assert_eq!(hits[0].item.name, "aurora", "无同安装目录的友好入口时保留精确匹配");
+        assert_eq!(
+            hits[0].item.name, "aurora",
+            "无同安装目录的友好入口时保留精确匹配"
+        );
     }
 
     #[test]
@@ -452,7 +446,10 @@ mod tests {
     #[test]
     fn name_candidates_empty_query_and_limit() {
         let apps: Vec<_> = (0..10).map(|i| item(&format!("App{i:02}"))).collect();
-        assert!(name_candidates(&apps, "  ", 8).is_empty(), "空 Query 无候选");
+        assert!(
+            name_candidates(&apps, "  ", 8).is_empty(),
+            "空 Query 无候选"
+        );
         assert_eq!(name_candidates(&apps, "app", 3).len(), 3, "只返回 Top N");
     }
 
@@ -512,10 +509,7 @@ mod tests {
             names.contains(&"控制面板"),
             "单字母 k 应召回控制面板: {names:?}"
         );
-        assert!(
-            !names.contains(&"记事本"),
-            "记事本不应被 k 召回: {names:?}"
-        );
+        assert!(!names.contains(&"记事本"), "记事本不应被 k 召回: {names:?}");
         // 名称前缀优先于拼音首字母前缀
         assert_eq!(hits[0].item.name, "Kite");
     }
@@ -564,11 +558,7 @@ mod tests {
     #[test]
     fn ordered_skip_recalls_omitted_chars() {
         // 有序跳字：googchrome（≥4 字）跳过 google 中的 l/e 与空格
-        let apps = vec![
-            item("Google Chrome"),
-            item("Firefox"),
-            item("Steam"),
-        ];
+        let apps = vec![item("Google Chrome"), item("Firefox"), item("Steam")];
         let hits = search(&apps, "googchrome", &[], TOP_N);
         assert!(
             hits.iter().any(|h| h.item.name == "Google Chrome"),
@@ -619,7 +609,8 @@ mod tests {
 
         let hits = search_with_system(&apps, &[sys], "显示", &[], TOP_N);
         assert!(
-            hits.iter().any(|h| h.item.id == "winsettings:ms-settings:display"),
+            hits.iter()
+                .any(|h| h.item.id == "winsettings:ms-settings:display"),
             "系统入口应与应用统一召回: {:?}",
             hits.iter().map(|h| &h.item.name).collect::<Vec<_>>()
         );
@@ -642,31 +633,68 @@ mod tests {
             item("XTerminal"),
         ];
         let queries = [
-            "chrome",
-            "vis",
-            "vsc",
-            "微信",
-            "weixin",
-            "ndm",
-            "todo",
-            "ter",
-            "ownloa",
-            "chorme",
+            "chrome", "vis", "vsc", "微信", "weixin", "ndm", "todo", "ter", "ownloa", "chorme",
         ];
         let index = RetrievalIndex::build(&apps, &[]);
         for q in queries {
             let indexed = search_with_index(&index, q, &[], TOP_N);
-            let reference = retrieval::reference_search(
-                &index.docs,
-                &retrieval::query::parse(q),
-                &[],
-                TOP_N,
-            );
+            let reference =
+                retrieval::reference_search(&index.docs, &retrieval::query::parse(q), &[], TOP_N);
             let indexed_top = indexed.first().map(|h| h.item.name.as_str());
             let ref_top = reference.first().map(|h| h.item.name.as_str());
             assert_eq!(
                 indexed_top, ref_top,
                 "query={q} indexed vs reference top mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn short_inner_character_and_polyphonic_candidates_match_reference() {
+        let apps = vec![
+            item("Notepad"),
+            item("Google Chrome"),
+            item("控制面板"),
+            item("重庆"),
+        ];
+        let index = RetrievalIndex::build(&apps, &[]);
+        for (query, expected) in [
+            ("e", "Notepad"),
+            ("c", "Google Chrome"),
+            ("制", "控制面板"),
+            ("chong", "重庆"),
+            ("ch", "重庆"),
+        ] {
+            let reference = retrieval::reference_search(
+                &index.docs,
+                &retrieval::query::parse(query),
+                &[],
+                TOP_N,
+            );
+            assert!(reference.iter().any(|hit| hit.item.name == expected));
+            let indexed = search_with_index(&index, query, &[], TOP_N);
+            assert!(
+                indexed.iter().any(|hit| hit.item.name == expected),
+                "query={query} lost {expected} before verification"
+            );
+        }
+    }
+
+    #[test]
+    fn additional_search_fields_are_tokenized_and_support_inner_fragments() {
+        let mut app = item("pwsh");
+        app.search_keywords = vec![
+            "PowerShell 7".into(),
+            "Microsoft Corporation".into(),
+            "飞书会议".into(),
+        ];
+        let index = RetrievalIndex::build(&[app], &[]);
+
+        for query in ["powershell", "corporation", "书会"] {
+            let hits = search_with_index(&index, query, &[], TOP_N);
+            assert!(
+                hits.iter().any(|hit| hit.item.name == "pwsh"),
+                "additional field fragment {query:?} must recall its application"
             );
         }
     }

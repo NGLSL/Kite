@@ -2,6 +2,7 @@
 
 pub mod actions;
 pub mod builtin;
+mod control_panel;
 mod launcher;
 pub mod scanner;
 pub mod uwp;

@@ -42,7 +42,15 @@ fn collect_hive(
     let subkey_wide = wide(subkey);
     let mut hkey = Default::default();
     unsafe {
-        if RegOpenKeyExW(hive, PCWSTR(subkey_wide.as_ptr()), options, KEY_READ, &mut hkey).is_err() {
+        if RegOpenKeyExW(
+            hive,
+            PCWSTR(subkey_wide.as_ptr()),
+            options,
+            KEY_READ,
+            &mut hkey,
+        )
+        .is_err()
+        {
             return;
         }
     }
@@ -53,28 +61,8 @@ fn collect_hive(
             break;
         };
         if let Some(target) = read_default_path(hive, &format!("{subkey}\\{sub}"), options) {
-            // 展开 %ProgramFiles% 等，并过滤卸载残留的死条目
-            let target = crate::system::env::expand_env(&target);
-            if !Path::new(&target).exists() {
-                crate::log::info(&format!("app-paths: skip missing {sub} -> {target}"));
-            } else {
-                let name = Path::new(&target)
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| sub.trim_end_matches(".exe").to_string());
-                let working_dir = Path::new(&target)
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string());
-                let icon_src = Some(target.clone());
-                let item = AppItem::scanned(
-                    super::util::stable_item_id(&target, None),
-                    name,
-                    target,
-                    None,
-                    working_dir,
-                    source,
-                );
-                out.push((item, icon_src));
+            if let Some(item) = app_path_item(source, &sub, &target) {
+                out.push(item);
             }
         }
         index += 1;
@@ -82,6 +70,68 @@ fn collect_hive(
 
     unsafe {
         let _ = RegCloseKey(hkey);
+    }
+}
+
+fn app_path_item(source: &str, sub: &str, raw_target: &str) -> Option<RawItem> {
+    // App Paths 默认值是可执行文件路径；部分安装器会用引号包裹路径。
+    // 引号属于注册表值的表示方式，不是文件名的一部分。
+    let raw_target = raw_target.trim();
+    let path = raw_target
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(raw_target)
+        .trim();
+    // 展开 %ProgramFiles% 等，并过滤卸载残留的死条目。
+    let target = crate::system::env::expand_env(path);
+    if !Path::new(&target).exists() {
+        crate::log::info(&format!("app-paths: skip missing {sub} -> {target}"));
+        return None;
+    }
+    let name = Path::new(&target)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| sub.trim_end_matches(".exe").to_string());
+    let working_dir = Path::new(&target)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string());
+    let icon_src = Some(target.clone());
+    let item = AppItem::scanned(
+        super::util::stable_item_id(&target, None),
+        name,
+        target,
+        None,
+        working_dir,
+        source,
+    );
+    Some((item, icon_src))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quoted_app_path_remains_searchable() {
+        let dir = std::env::temp_dir().join(format!("kite-quoted-app-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("ExamplePlayer.exe");
+        std::fs::write(&exe, b"fixture").unwrap();
+
+        let registered = format!("  \"{}\"  ", exe.display());
+        let (mut item, _) = app_path_item("app-paths", "ExamplePlayer.exe", &registered)
+            .expect("a quoted existing App Paths executable must be indexed");
+        item.attach_search_fields();
+        let index = crate::search::RetrievalIndex::build(&[item], &[]);
+        assert!(
+            index
+                .search("ExamplePlayer", &[], 10)
+                .iter()
+                .any(|hit| hit.item.name == "ExamplePlayer"),
+            "the registered application must be searchable by its executable name"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 
@@ -107,15 +157,18 @@ fn enum_subkey(hkey: HKEY, index: u32) -> Option<String> {
     Some(String::from_utf16_lossy(&name_buf[..name_len as usize]))
 }
 
-fn read_default_path(
-    hive: HKEY,
-    subkey: &str,
-    options: Option<u32>,
-) -> Option<String> {
+fn read_default_path(hive: HKEY, subkey: &str, options: Option<u32>) -> Option<String> {
     let subkey_wide = wide(subkey);
     let mut child = Default::default();
     unsafe {
-        if RegOpenKeyExW(hive, PCWSTR(subkey_wide.as_ptr()), options, KEY_READ, &mut child).is_err()
+        if RegOpenKeyExW(
+            hive,
+            PCWSTR(subkey_wide.as_ptr()),
+            options,
+            KEY_READ,
+            &mut child,
+        )
+        .is_err()
         {
             return None;
         }

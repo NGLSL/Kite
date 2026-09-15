@@ -16,6 +16,8 @@ pub struct Settings {
     pub search_files: bool,
     /// 是否记录启动历史（Usage + Query History）；暂停后 record 直接跳过。
     pub history_recording: bool,
+    /// 用户明确授权扫描的便携软件目录。
+    pub portable_dirs: Vec<String>,
 }
 
 impl Default for Settings {
@@ -27,6 +29,7 @@ impl Default for Settings {
             hotkey_label: crate::system::hotkey::DEFAULT_HOTKEY.into(),
             search_files: false,
             history_recording: true,
+            portable_dirs: Vec::new(),
         }
     }
 }
@@ -56,10 +59,9 @@ impl HistoryDb {
             "#,
         )?;
         // 旧库没有 target_id 列；已存在时 ALTER 报错属预期，忽略即可
-        let _ = self.conn_mut().execute(
-            "ALTER TABLE user_aliases ADD COLUMN target_id TEXT",
-            [],
-        );
+        let _ = self
+            .conn_mut()
+            .execute("ALTER TABLE user_aliases ADD COLUMN target_id TEXT", []);
         Ok(())
     }
 
@@ -83,6 +85,14 @@ impl HistoryDb {
         if let Ok(v) = self.get_setting("history_recording") {
             s.history_recording = v != "0";
         }
+        if let Ok(v) = self.get_setting("portable_dirs") {
+            s.portable_dirs = serde_json::from_str::<Vec<String>>(&v)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|path| path.trim().to_string())
+                .filter(|path| !path.is_empty())
+                .collect();
+        }
         s
     }
 
@@ -93,6 +103,24 @@ impl HistoryDb {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    pub fn set_portable_dirs(&mut self, dirs: &[String]) -> rusqlite::Result<Vec<String>> {
+        let mut normalized = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for raw in dirs {
+            let path = raw.trim();
+            if path.is_empty() {
+                continue;
+            }
+            let key = path.replace('/', "\\").to_lowercase();
+            if seen.insert(key) {
+                normalized.push(path.to_string());
+            }
+        }
+        let value = serde_json::to_string(&normalized).unwrap_or_else(|_| "[]".into());
+        self.save_setting("portable_dirs", &value)?;
+        Ok(normalized)
     }
 
     pub fn get_setting(&self, key: &str) -> rusqlite::Result<String> {
@@ -134,9 +162,9 @@ impl HistoryDb {
     }
 
     pub fn list_aliases(&self) -> rusqlite::Result<Vec<UserAlias>> {
-        let mut stmt = self.conn().prepare(
-            "SELECT alias, target_name, target_id FROM user_aliases ORDER BY alias",
-        )?;
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT alias, target_name, target_id FROM user_aliases ORDER BY alias")?;
         let rows = stmt.query_map([], |r| {
             Ok(UserAlias {
                 alias: r.get(0)?,
@@ -243,9 +271,33 @@ mod tests {
     }
 
     #[test]
+    fn portable_directories_roundtrip_as_settings() {
+        let mut db = temp_db();
+        db.save_setting("portable_dirs", r#"["D:\\Portable","E:\\Apps"]"#)
+            .unwrap();
+        let settings = db.load_settings();
+        assert_eq!(settings.portable_dirs, vec![r"D:\Portable", r"E:\Apps"]);
+    }
+
+    #[test]
+    fn portable_directories_are_trimmed_and_deduplicated() {
+        let mut db = temp_db();
+        let saved = db
+            .set_portable_dirs(&[
+                r" D:\Portable ".into(),
+                r"d:/portable".into(),
+                String::new(),
+            ])
+            .unwrap();
+        assert_eq!(saved, vec![r"D:\Portable"]);
+        assert_eq!(db.load_settings().portable_dirs, saved);
+    }
+
+    #[test]
     fn alias_saves_and_reads_target_id() {
         let mut db = temp_db();
-        db.set_alias("code", Some("app-123"), "Visual Studio Code").unwrap();
+        db.set_alias("code", Some("app-123"), "Visual Studio Code")
+            .unwrap();
         let rows = db.list_aliases().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].target_id.as_deref(), Some("app-123"));

@@ -7,12 +7,12 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use iced::futures::channel::mpsc::UnboundedSender;
 
-use crate::app::scanner::ScanPass;
+use crate::app::scanner::{ScanOptions, ScanPass};
 use crate::model::{AppIndex, AppItem};
 use crate::{app, system};
 
@@ -27,7 +27,12 @@ static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// 触发一次完整重建：快扫首屏 + 后台完整补扫。
 /// 已在跑时标记 pending，当前构建结束后自动再跑一轮。
-pub fn request_build(index: Arc<Mutex<AppIndex>>, icon_dir: PathBuf, tx: UnboundedSender<Message>) -> bool {
+pub fn request_build(
+    index: Arc<Mutex<AppIndex>>,
+    icon_dir: PathBuf,
+    scan_options: Arc<RwLock<ScanOptions>>,
+    tx: UnboundedSender<Message>,
+) -> bool {
     if BUILDING.swap(true, Ordering::SeqCst) {
         PENDING_REBUILD.store(true, Ordering::SeqCst);
         plog("index build already in flight; queued pending rebuild");
@@ -37,7 +42,17 @@ pub fn request_build(index: Arc<Mutex<AppIndex>>, icon_dir: PathBuf, tx: Unbound
         loop {
             PENDING_REBUILD.store(false, Ordering::SeqCst);
             let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-            build_index_inner(index.clone(), icon_dir.clone(), tx.clone(), generation);
+            let options = scan_options
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            build_index_inner(
+                index.clone(),
+                icon_dir.clone(),
+                tx.clone(),
+                generation,
+                &options,
+            );
             if !PENDING_REBUILD.swap(false, Ordering::SeqCst) {
                 break;
             }
@@ -55,12 +70,13 @@ fn build_index_inner(
     icon_dir: PathBuf,
     tx: UnboundedSender<Message>,
     generation: u64,
+    options: &ScanOptions,
 ) {
     let _ = std::fs::create_dir_all(&icon_dir);
 
     // 阶段 1：快速扫描（与 Kite 首屏一致，不提图标）
     let t0 = Instant::now();
-    let built = app::scan_apps(&icon_dir, true);
+    let built = app::scanner::scan_apps_pass_with_options(&icon_dir, ScanPass::Fast, options);
     let n = built.apps.len();
     if GENERATION.load(Ordering::SeqCst) != generation {
         plog("fast snapshot skipped; newer build started");
@@ -117,7 +133,7 @@ fn build_index_inner(
         return;
     }
     let t3 = Instant::now();
-    let full = app::scanner::scan_apps_pass(&icon_dir, ScanPass::Full, &[]);
+    let full = app::scanner::scan_apps_pass_with_options(&icon_dir, ScanPass::Full, options);
     let full_n = full.apps.len();
     if GENERATION.load(Ordering::SeqCst) != generation {
         plog("full snapshot discarded; newer build started");
@@ -207,7 +223,10 @@ mod tests {
         // 手动模拟：第一次 swap 成功
         assert!(!BUILDING.swap(true, Ordering::SeqCst));
         assert!(BUILDING.load(Ordering::SeqCst));
-        assert!(BUILDING.swap(true, Ordering::SeqCst), "second caller sees already-building");
+        assert!(
+            BUILDING.swap(true, Ordering::SeqCst),
+            "second caller sees already-building"
+        );
         BUILDING.store(false, Ordering::SeqCst);
         let _ = std::fs::remove_dir_all(dir);
         // index 仅防止 unused；真实 request_build 由 UI 线程触发

@@ -6,8 +6,8 @@ use std::path::Path;
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC,
-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
+    CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
@@ -15,9 +15,8 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::Shell::{
     ExtractIconExW, SHGetFileInfoW, SHGetStockIconInfo, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON,
-    SHGFI_USEFILEATTRIBUTES, SHGSI_ICON,
-    SHGSI_LARGEICON, SHSTOCKICONID, SHSTOCKICONINFO, SIID_MYNETWORK, SIID_NETWORKCONNECT,
-    SIID_PRINTER, SIID_RECYCLER, SIID_SOFTWARE,
+    SHGFI_USEFILEATTRIBUTES, SHGSI_ICON, SHGSI_LARGEICON, SHSTOCKICONID, SHSTOCKICONINFO,
+    SIID_MYNETWORK, SIID_NETWORKCONNECT, SIID_PRINTER, SIID_RECYCLER, SIID_SOFTWARE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyIcon, GetIconInfo, LoadImageW, HICON, IMAGE_ICON, LR_LOADFROMFILE,
@@ -80,6 +79,19 @@ pub fn extract_shell_icon(path: &Path) -> Option<Vec<u8>> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         if is_virtual_shell_path(path) {
+            // SHGetFileInfoW resolves Control Panel's virtual namespace to a
+            // generic Shell folder icon on some Windows builds. The Control
+            // Panel shortcut shipped by Windows points at this resource, so
+            // use it as the canonical source before accepting Shell output.
+            if is_control_panel_path(path) {
+                let system_root = std::env::var_os("SystemRoot")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+                let resource = system_root.join(r"System32\imageres.dll");
+                if let Some(png) = extract_shell_icon_indexed(&resource, Some(-27)) {
+                    return Some(png);
+                }
+            }
             // Prefer resolving the live Shell namespace object so Control Panel
             // and friends show the real system icon, not a generic stock glyph.
             if let Some(png) = extract_shell_icon_win32(path) {
@@ -92,6 +104,12 @@ pub fn extract_shell_icon(path: &Path) -> Option<Vec<u8>> {
         }
         extract_shell_icon_win32(path)
     }
+}
+
+pub(crate) fn is_control_panel_path(path: &Path) -> bool {
+    path.to_string_lossy()
+        .trim()
+        .eq_ignore_ascii_case("shell:ControlPanelFolder")
 }
 
 /// Return a stable system icon for built-in Shell namespace targets that do
@@ -412,7 +430,10 @@ mod tests {
 
     #[test]
     fn classify_by_extension() {
-        assert_eq!(classify(Path::new("C:\\a\\Logo.scale-200.PNG")), SourceKind::Image);
+        assert_eq!(
+            classify(Path::new("C:\\a\\Logo.scale-200.PNG")),
+            SourceKind::Image
+        );
         assert_eq!(classify(Path::new("C:\\a\\x.jpg")), SourceKind::Image);
         assert_eq!(classify(Path::new("C:\\a\\x.webp")), SourceKind::Image);
         assert_eq!(classify(Path::new("C:\\a\\app.ico")), SourceKind::Ico);

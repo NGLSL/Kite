@@ -1,7 +1,9 @@
 //! 内置可搜索动作：Kite 设置、Windows 系统设置页。
 
+use std::collections::HashSet;
 use std::path::Path;
 
+use crate::app::control_panel;
 use crate::model::{AppItem, SearchResult};
 use crate::search::pinyin_of;
 use crate::system::icons;
@@ -31,52 +33,236 @@ struct SystemTool {
 
 /// 常用系统设置页（中文名 + 英文/拼音关键词）。
 const WIN_PAGES: &[WinPage] = &[
-    WinPage { name: "系统", uri: "ms-settings:system", keywords: &["system", "xitong", "关于", "系统信息"] },
-    WinPage { name: "显示", uri: "ms-settings:display", keywords: &["display", "xianshi", "屏幕", "分辨率", "显示器"] },
-    WinPage { name: "声音", uri: "ms-settings:sound", keywords: &["sound", "shengyin", "音量", "音频"] },
-    WinPage { name: "通知", uri: "ms-settings:notifications", keywords: &["notification", "tongzhi", "通知"] },
-    WinPage { name: "专注助手", uri: "ms-settings:quiethours", keywords: &["focus", "zhuanzhu", "勿扰"] },
-    WinPage { name: "电源", uri: "ms-settings:powersleep", keywords: &["power", "dianyuan", "睡眠", "电池"] },
-    WinPage { name: "存储", uri: "ms-settings:storagesense", keywords: &["storage", "cunchu", "磁盘"] },
-    WinPage { name: "多任务处理", uri: "ms-settings:multitasking", keywords: &["multitask", "duorenwu", "贴靠"] },
-    WinPage { name: "激活", uri: "ms-settings:activation", keywords: &["activation", "jihuo", "许可证"] },
-    WinPage { name: "查找我的设备", uri: "ms-settings:findmydevice", keywords: &["find", "chazhao"] },
-    WinPage { name: "远程桌面", uri: "ms-settings:remotedesktop", keywords: &["remote", "yuancheng", "rdp"] },
-    WinPage { name: "可选功能", uri: "ms-settings:optionalfeatures", keywords: &["optional", "kexuan", "windows 功能"] },
-    WinPage { name: "设备", uri: "ms-settings:devices", keywords: &["devices", "shebei", "打印机", "鼠标", "键盘"] },
-    WinPage { name: "蓝牙和其他设备", uri: "ms-settings:bluetooth", keywords: &["bluetooth", "lanya", "蓝牙"] },
-    WinPage { name: "打印机和扫描仪", uri: "ms-settings:printers", keywords: &["printer", "dayinji", "扫描"] },
-    WinPage { name: "鼠标", uri: "ms-settings:mousetouchpad", keywords: &["mouse", "shubiao"] },
-    WinPage { name: "触摸板", uri: "ms-settings:devices-touchpad", keywords: &["touchpad", "chumoban"] },
-    WinPage { name: "网络和 Internet", uri: "ms-settings:network", keywords: &["network", "wangluo", "wifi", "internet", "网络"] },
-    WinPage { name: "WLAN", uri: "ms-settings:network-wifi", keywords: &["wlan", "wifi", "无线"] },
-    WinPage { name: "VPN", uri: "ms-settings:network-vpn", keywords: &["vpn"] },
-    WinPage { name: "代理", uri: "ms-settings:network-proxy", keywords: &["proxy", "daili"] },
-    WinPage { name: "飞行模式", uri: "ms-settings:network-airplanemode", keywords: &["airplane", "feixing"] },
-    WinPage { name: "移动热点", uri: "ms-settings:network-mobilehotspot", keywords: &["hotspot", "redian"] },
-    WinPage { name: "个性化", uri: "ms-settings:personalization", keywords: &["personalization", "geren", "主题", "壁纸"] },
-    WinPage { name: "背景", uri: "ms-settings:personalization-background", keywords: &["background", "beijing", "壁纸"] },
-    WinPage { name: "颜色", uri: "ms-settings:personalization-colors", keywords: &["color", "yanse", "深色", "浅色"] },
-    WinPage { name: "锁屏界面", uri: "ms-settings:lockscreen", keywords: &["lockscreen", "suoping"] },
-    WinPage { name: "开始", uri: "ms-settings:personalization-start", keywords: &["start", "kaishi", "开始菜单"] },
-    WinPage { name: "任务栏", uri: "ms-settings:taskbar", keywords: &["taskbar", "renwulan"] },
-    WinPage { name: "字体", uri: "ms-settings:fonts", keywords: &["fonts", "ziti"] },
-    WinPage { name: "应用", uri: "ms-settings:appsfeatures", keywords: &["apps", "yingyong", "卸载", "应用和功能"] },
-    WinPage { name: "默认应用", uri: "ms-settings:defaultapps", keywords: &["default", "moren", "默认"] },
-    WinPage { name: "启动", uri: "ms-settings:startupapps", keywords: &["startup", "qidong", "自启"] },
-    WinPage { name: "账户", uri: "ms-settings:yourinfo", keywords: &["account", "zhanghu", "用户"] },
-    WinPage { name: "登录选项", uri: "ms-settings:signinoptions", keywords: &["signin", "denglu", "密码", "指纹", "人脸"] },
-    WinPage { name: "时间和语言", uri: "ms-settings:dateandtime", keywords: &["time", "shijian", "日期", "时区"] },
-    WinPage { name: "语言", uri: "ms-settings:regionlanguage", keywords: &["language", "yuyan", "输入法"] },
-    WinPage { name: "游戏", uri: "ms-settings:gaming", keywords: &["gaming", "youxi", "xbox"] },
-    WinPage { name: "辅助功能", uri: "ms-settings:easeofaccess", keywords: &["accessibility", "wuzhangai", "辅助", "放大镜", "讲述人"] },
-    WinPage { name: "隐私", uri: "ms-settings:privacy", keywords: &["privacy", "yinsi", "权限"] },
-    WinPage { name: "摄像头", uri: "ms-settings:privacy-webcam", keywords: &["camera", "shexiangtou"] },
-    WinPage { name: "麦克风", uri: "ms-settings:privacy-microphone", keywords: &["microphone", "maikefeng"] },
-    WinPage { name: "更新和安全", uri: "ms-settings:windowsupdate", keywords: &["update", "gengxin", "windows update", "补丁"] },
-    WinPage { name: "Windows 安全中心", uri: "ms-settings:windowsdefender", keywords: &["defender", "anquan", "病毒", "防火墙"] },
-    WinPage { name: "开发者选项", uri: "ms-settings:developers", keywords: &["developer", "kaifazhe", "开发"] },
-    WinPage { name: "剪贴板", uri: "ms-settings:clipboard", keywords: &["clipboard", "jiantieban"] },
+    WinPage {
+        name: "系统",
+        uri: "ms-settings:system",
+        keywords: &["system", "xitong", "关于", "系统信息"],
+    },
+    WinPage {
+        name: "显示",
+        uri: "ms-settings:display",
+        keywords: &["display", "xianshi", "屏幕", "分辨率", "显示器"],
+    },
+    WinPage {
+        name: "声音",
+        uri: "ms-settings:sound",
+        keywords: &["sound", "shengyin", "音量", "音频"],
+    },
+    WinPage {
+        name: "通知",
+        uri: "ms-settings:notifications",
+        keywords: &["notification", "tongzhi", "通知"],
+    },
+    WinPage {
+        name: "专注助手",
+        uri: "ms-settings:quiethours",
+        keywords: &["focus", "zhuanzhu", "勿扰"],
+    },
+    WinPage {
+        name: "电源",
+        uri: "ms-settings:powersleep",
+        keywords: &["power", "dianyuan", "睡眠", "电池"],
+    },
+    WinPage {
+        name: "存储",
+        uri: "ms-settings:storagesense",
+        keywords: &["storage", "cunchu", "磁盘"],
+    },
+    WinPage {
+        name: "多任务处理",
+        uri: "ms-settings:multitasking",
+        keywords: &["multitask", "duorenwu", "贴靠"],
+    },
+    WinPage {
+        name: "激活",
+        uri: "ms-settings:activation",
+        keywords: &["activation", "jihuo", "许可证"],
+    },
+    WinPage {
+        name: "查找我的设备",
+        uri: "ms-settings:findmydevice",
+        keywords: &["find", "chazhao"],
+    },
+    WinPage {
+        name: "远程桌面",
+        uri: "ms-settings:remotedesktop",
+        keywords: &["remote", "yuancheng", "rdp"],
+    },
+    WinPage {
+        name: "可选功能",
+        uri: "ms-settings:optionalfeatures",
+        keywords: &["optional", "kexuan", "windows 功能"],
+    },
+    WinPage {
+        name: "设备",
+        uri: "ms-settings:devices",
+        keywords: &["devices", "shebei", "打印机", "鼠标", "键盘"],
+    },
+    WinPage {
+        name: "蓝牙和其他设备",
+        uri: "ms-settings:bluetooth",
+        keywords: &["bluetooth", "lanya", "蓝牙"],
+    },
+    WinPage {
+        name: "打印机和扫描仪",
+        uri: "ms-settings:printers",
+        keywords: &["printer", "dayinji", "扫描"],
+    },
+    WinPage {
+        name: "鼠标",
+        uri: "ms-settings:mousetouchpad",
+        keywords: &["mouse", "shubiao"],
+    },
+    WinPage {
+        name: "触摸板",
+        uri: "ms-settings:devices-touchpad",
+        keywords: &["touchpad", "chumoban"],
+    },
+    WinPage {
+        name: "网络和 Internet",
+        uri: "ms-settings:network",
+        keywords: &["network", "wangluo", "wifi", "internet", "网络"],
+    },
+    WinPage {
+        name: "WLAN",
+        uri: "ms-settings:network-wifi",
+        keywords: &["wlan", "wifi", "无线"],
+    },
+    WinPage {
+        name: "VPN",
+        uri: "ms-settings:network-vpn",
+        keywords: &["vpn"],
+    },
+    WinPage {
+        name: "代理",
+        uri: "ms-settings:network-proxy",
+        keywords: &["proxy", "daili"],
+    },
+    WinPage {
+        name: "飞行模式",
+        uri: "ms-settings:network-airplanemode",
+        keywords: &["airplane", "feixing"],
+    },
+    WinPage {
+        name: "移动热点",
+        uri: "ms-settings:network-mobilehotspot",
+        keywords: &["hotspot", "redian"],
+    },
+    WinPage {
+        name: "个性化",
+        uri: "ms-settings:personalization",
+        keywords: &["personalization", "geren", "主题", "壁纸"],
+    },
+    WinPage {
+        name: "背景",
+        uri: "ms-settings:personalization-background",
+        keywords: &["background", "beijing", "壁纸"],
+    },
+    WinPage {
+        name: "颜色",
+        uri: "ms-settings:personalization-colors",
+        keywords: &["color", "yanse", "深色", "浅色"],
+    },
+    WinPage {
+        name: "锁屏界面",
+        uri: "ms-settings:lockscreen",
+        keywords: &["lockscreen", "suoping"],
+    },
+    WinPage {
+        name: "开始",
+        uri: "ms-settings:personalization-start",
+        keywords: &["start", "kaishi", "开始菜单"],
+    },
+    WinPage {
+        name: "任务栏",
+        uri: "ms-settings:taskbar",
+        keywords: &["taskbar", "renwulan"],
+    },
+    WinPage {
+        name: "字体",
+        uri: "ms-settings:fonts",
+        keywords: &["fonts", "ziti"],
+    },
+    WinPage {
+        name: "应用",
+        uri: "ms-settings:appsfeatures",
+        keywords: &["apps", "yingyong", "卸载", "应用和功能"],
+    },
+    WinPage {
+        name: "默认应用",
+        uri: "ms-settings:defaultapps",
+        keywords: &["default", "moren", "默认"],
+    },
+    WinPage {
+        name: "启动",
+        uri: "ms-settings:startupapps",
+        keywords: &["startup", "qidong", "自启"],
+    },
+    WinPage {
+        name: "账户",
+        uri: "ms-settings:yourinfo",
+        keywords: &["account", "zhanghu", "用户"],
+    },
+    WinPage {
+        name: "登录选项",
+        uri: "ms-settings:signinoptions",
+        keywords: &["signin", "denglu", "密码", "指纹", "人脸"],
+    },
+    WinPage {
+        name: "时间和语言",
+        uri: "ms-settings:dateandtime",
+        keywords: &["time", "shijian", "日期", "时区"],
+    },
+    WinPage {
+        name: "语言",
+        uri: "ms-settings:regionlanguage",
+        keywords: &["language", "yuyan", "输入法"],
+    },
+    WinPage {
+        name: "游戏",
+        uri: "ms-settings:gaming",
+        keywords: &["gaming", "youxi", "xbox"],
+    },
+    WinPage {
+        name: "辅助功能",
+        uri: "ms-settings:easeofaccess",
+        keywords: &["accessibility", "wuzhangai", "辅助", "放大镜", "讲述人"],
+    },
+    WinPage {
+        name: "隐私",
+        uri: "ms-settings:privacy",
+        keywords: &["privacy", "yinsi", "权限"],
+    },
+    WinPage {
+        name: "摄像头",
+        uri: "ms-settings:privacy-webcam",
+        keywords: &["camera", "shexiangtou"],
+    },
+    WinPage {
+        name: "麦克风",
+        uri: "ms-settings:privacy-microphone",
+        keywords: &["microphone", "maikefeng"],
+    },
+    WinPage {
+        name: "更新和安全",
+        uri: "ms-settings:windowsupdate",
+        keywords: &["update", "gengxin", "windows update", "补丁"],
+    },
+    WinPage {
+        name: "Windows 安全中心",
+        uri: "ms-settings:windowsdefender",
+        keywords: &["defender", "anquan", "病毒", "防火墙"],
+    },
+    WinPage {
+        name: "开发者选项",
+        uri: "ms-settings:developers",
+        keywords: &["developer", "kaifazhe", "开发"],
+    },
+    WinPage {
+        name: "剪贴板",
+        uri: "ms-settings:clipboard",
+        keywords: &["clipboard", "jiantieban"],
+    },
 ];
 
 /// Windows 常用管理入口。它们不一定出现在开始菜单里，因此作为稳定的
@@ -280,6 +466,31 @@ pub fn materialize_system_entries(icon_dir: Option<&Path>) -> Vec<AppItem> {
         out.push(item);
     }
 
+    // Control Panel entries come from the current Shell namespace snapshot;
+    // only verified launch targets are materialized by the dedicated module.
+    let mut existing_names: HashSet<String> =
+        out.iter().map(|item| item.name.to_lowercase()).collect();
+    let mut existing_targets: HashSet<(String, String)> = out
+        .iter()
+        .map(|item| {
+            (
+                item.target.to_lowercase(),
+                item.args.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    for item in control_panel::materialize_entries() {
+        let name_key = item.name.to_lowercase();
+        let target_key = (
+            item.target.to_lowercase(),
+            item.args.clone().unwrap_or_default(),
+        );
+        if !existing_names.insert(name_key) || !existing_targets.insert(target_key) {
+            continue;
+        }
+        out.push(item);
+    }
+
     if let Some(dir) = icon_dir {
         fill_entry_icons(&mut out, dir);
     }
@@ -347,8 +558,7 @@ fn windows_settings_hits(query_norm: &str, icon_dir: &Path) -> Vec<SearchResult>
     if query_norm.chars().count() < 2 && !query_norm.is_ascii() {
         return Vec::new();
     }
-    let settings_exe = std::env::var("SystemRoot")
-        .unwrap_or_else(|_| r"C:\Windows".into())
+    let settings_exe = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())
         + r"\ImmersiveControlPanel\SystemSettings.exe";
 
     let mut hits = Vec::new();
@@ -366,12 +576,7 @@ fn windows_settings_hits(query_norm: &str, icon_dir: &Path) -> Vec<SearchResult>
         );
         item.icon_src = Some(settings_exe.clone());
         item.attach_search_fields();
-        item.icon = icons::cache_icon(
-            icon_dir,
-            &item.id,
-            item.icon_src.as_deref(),
-            None,
-        );
+        item.icon = icons::cache_icon(icon_dir, &item.id, item.icon_src.as_deref(), None);
         hits.push(SearchResult {
             item,
             score,
@@ -419,12 +624,7 @@ fn system_tool_hits(query_norm: &str, icon_dir: &Path) -> Vec<SearchResult> {
         );
         item.attach_search_fields();
         item.icon_src = Some(target);
-        item.icon = icons::cache_icon(
-            icon_dir,
-            &item.id,
-            item.icon_src.as_deref(),
-            None,
-        );
+        item.icon = icons::cache_icon(icon_dir, &item.id, item.icon_src.as_deref(), None);
         hits.push(SearchResult {
             item,
             score,
@@ -566,7 +766,9 @@ mod tests {
 
         let control = collect_builtin_hits("control panel", &dir);
         assert!(
-            control.iter().any(|h| h.item.target == "shell:ControlPanelFolder"),
+            control
+                .iter()
+                .any(|h| h.item.target == "shell:ControlPanelFolder"),
             "控制面板应支持英文搜索"
         );
     }
@@ -588,15 +790,81 @@ mod tests {
             collect_builtin_hits("ter", &dir).is_empty(),
             "ter 不应召回 Internet、printer、computer 等词尾"
         );
+        assert!(collect_builtin_hits("internet", &dir)
+            .iter()
+            .any(|h| h.item.name == "Windows · 网络和 Internet"));
+        assert!(collect_builtin_hits("print", &dir)
+            .iter()
+            .any(|h| h.item.name == "打印机"));
+    }
+
+    #[test]
+    fn visible_control_panel_pen_entry_is_searchable() {
+        let entries = materialize_system_entries(None);
+        let Some(pen) = entries.iter().find(|entry| {
+            entry
+                .id
+                .eq_ignore_ascii_case("control-panel:{F82DF8F7-8B9F-442E-A48C-818EA735FF9B}")
+        }) else {
+            // Pen and Touch is optional on some Windows installations.
+            return;
+        };
+
+        if !pen.target.starts_with("shell:") {
+            assert!(std::path::Path::new(&pen.target).is_file());
+        }
+        if pen.target.to_ascii_lowercase().ends_with("rundll32.exe") {
+            let args = pen.args.as_deref().unwrap_or_default().to_ascii_lowercase();
+            assert!(
+                args.contains("tabletpc.cpl") && args.contains("control_rundll"),
+                "必须保留系统提供的 Pen and Touch 打开参数: {args}"
+            );
+        }
+
+        let index = crate::search::RetrievalIndex::build(&[], &entries);
+        let query = if pen.name.contains('笔') {
+            "笔".to_string()
+        } else if pen.name.to_ascii_lowercase().contains("pen") {
+            "pen".to_string()
+        } else {
+            pen.name.chars().next().unwrap().to_string()
+        };
+        let hits = index.search(&query, &[], 20);
         assert!(
-            collect_builtin_hits("internet", &dir)
-                .iter()
-                .any(|h| h.item.name == "Windows · 网络和 Internet")
+            hits.iter().any(|hit| hit.item.id == pen.id),
+            "输入‘{query}’应召回控制面板入口: {:?}",
+            hits.iter().map(|hit| &hit.item.name).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn visible_control_panel_keyboard_entry_is_searchable() {
+        let entries = materialize_system_entries(None);
+        let Some(keyboard) = entries.iter().find(|entry| {
+            entry.source == "builtin-system"
+                && entry
+                    .id
+                    .eq_ignore_ascii_case("control-panel:{725BE8F7-668E-4C7B-8F90-46BDB0936430}")
+        }) else {
+            return;
+        };
+        if !keyboard.target.starts_with("shell:") {
+            assert!(std::path::Path::new(&keyboard.target).is_file());
+        }
+
+        let index = crate::search::RetrievalIndex::build(&[], &entries);
+        let query = if keyboard.name.contains("键盘") {
+            "键盘".to_string()
+        } else if keyboard.name.to_ascii_lowercase().contains("keyboard") {
+            "keyboard".to_string()
+        } else {
+            keyboard.name.chars().next().unwrap().to_string()
+        };
+        let hits = index.search(&query, &[], 20);
         assert!(
-            collect_builtin_hits("print", &dir)
-                .iter()
-                .any(|h| h.item.name == "打印机")
+            hits.iter().any(|hit| hit.item.id == keyboard.id),
+            "输入‘{query}’应召回控制面板入口: {:?}",
+            hits.iter().map(|hit| &hit.item.name).collect::<Vec<_>>()
         );
     }
 }

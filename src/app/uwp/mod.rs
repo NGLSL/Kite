@@ -1,5 +1,5 @@
-//! UWP / Store 应用：枚举 shell:AppsFolder（对齐 LaunchyQt UWPApp）。
-//! 过滤：System.Launcher.AppState 非空；用 AUMID + ActivationManager 启动。
+//! 枚举 shell:AppsFolder 中的 Store 应用和经典系统工具。
+//! Store 应用使用 AUMID；经典入口使用 Shell 已验证的解析路径。
 
 mod activate;
 
@@ -11,17 +11,17 @@ use std::path::{Path, PathBuf};
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::PROPERTYKEY;
-use windows::Win32::System::Com::{
-    CoInitializeEx, CoTaskMemFree, CoUninitialize, IBindCtx, COINIT_APARTMENTTHREADED,
-};
 use windows::Win32::System::Com::StructuredStorage::{
     PropVariantClear, PropVariantToStringAlloc, PROPVARIANT,
+};
+use windows::Win32::System::Com::{
+    CoInitializeEx, CoTaskMemFree, CoUninitialize, IBindCtx, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::System::Variant::{VT_BSTR, VT_EMPTY, VT_LPWSTR};
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, PSGetPropertyKeyFromName};
 use windows::Win32::UI::Shell::{
     BHID_EnumItems, BHID_PropertyStore, IEnumShellItems, IShellItem, SHCreateItemFromParsingName,
-    SIGDN_NORMALDISPLAY,
+    SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_NORMALDISPLAY,
 };
 
 use super::scanner::util::stable_item_id;
@@ -89,25 +89,40 @@ fn collect_apps_folder(source: &str, out: &mut Vec<RawItem>) {
         }
         let Some(item) = slot else { continue };
 
-        let props: IPropertyStore = match unsafe {
-            item.BindToHandler(None::<&IBindCtx>, &BHID_PropertyStore)
-        } {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-
-        // 真 UWP 才有非空 Launcher.AppState
-        let Some(state) = prop_string(&props, &pk_app_state) else {
-            continue;
-        };
-        if state.trim().is_empty() {
-            continue;
-        }
-
         let name = display_name(&item).unwrap_or_default();
         if name.is_empty() {
             continue;
         }
+        let props: Option<IPropertyStore> = unsafe {
+            item.BindToHandler(None::<&IBindCtx>, &BHID_PropertyStore)
+                .ok()
+        };
+        let state = props
+            .as_ref()
+            .and_then(|props| prop_string(props, &pk_app_state));
+        // Classic AppsFolder items have no UWP launcher state. Keep only Shell
+        // targets that resolve, and avoid a second row for the same name.
+        if state.as_deref().is_none_or(|state| state.trim().is_empty()) {
+            if is_auxiliary_display_name(&name) {
+                continue;
+            }
+            let Some(target) = classic_shell_target(&item) else {
+                continue;
+            };
+            if out
+                .iter()
+                .any(|(existing, _)| existing.name.eq_ignore_ascii_case(&name))
+                || !seen.insert(target.to_lowercase())
+            {
+                continue;
+            }
+            let id = stable_item_id(&target, None);
+            let classic = AppItem::scanned(id, name, target.clone(), None, None, "apps-folder");
+            out.push((classic, Some(target)));
+            continue;
+        }
+
+        let Some(props) = props else { continue };
         let Some(aumid) = prop_string(&props, &pk_aumid) else {
             continue;
         };
@@ -124,6 +139,66 @@ fn collect_apps_folder(source: &str, out: &mut Vec<RawItem>) {
         let item = AppItem::scanned(id, name, target, None, None, source);
         out.push((item, icon_src));
     }
+}
+
+fn classic_shell_target(item: &IShellItem) -> Option<String> {
+    let parsing_name = display_name_with_flag(item, SIGDN_DESKTOPABSOLUTEPARSING)?;
+    if is_web_identifier(&parsing_name) {
+        return None;
+    }
+    let target = format!("shell:AppsFolder\\{parsing_name}");
+    let _: IShellItem = unsafe {
+        SHCreateItemFromParsingName(PCWSTR(wide(&target).as_ptr()), None::<&IBindCtx>).ok()?
+    };
+    Some(target)
+}
+
+fn is_web_identifier(value: &str) -> bool {
+    if [
+        "http:",
+        "https:",
+        "ftp:",
+        "file:",
+        "mailto:",
+        "data:",
+        "javascript:",
+    ]
+    .iter()
+    .any(|prefix| {
+        value
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    }) {
+        return true;
+    }
+
+    let lower = value.to_ascii_lowercase();
+    let suffix = Path::new(&lower)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default();
+    if matches!(suffix, "url" | "html" | "htm" | "pdf" | "txt" | "chm") {
+        return true;
+    }
+    ["uninstall", "unins", "readme", "documentation", "manual"]
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+fn is_auxiliary_display_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        "uninstall",
+        "unins",
+        "readme",
+        "documentation",
+        "manual",
+        "卸载",
+        "文档",
+        "说明",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -177,8 +252,15 @@ fn prop_variant_to_string(pv: &PROPVARIANT) -> Option<String> {
 }
 
 fn display_name(item: &IShellItem) -> Option<String> {
+    display_name_with_flag(item, SIGDN_NORMALDISPLAY)
+}
+
+fn display_name_with_flag(
+    item: &IShellItem,
+    flag: windows::Win32::UI::Shell::SIGDN,
+) -> Option<String> {
     unsafe {
-        let p: PWSTR = item.GetDisplayName(SIGDN_NORMALDISPLAY).ok()?;
+        let p: PWSTR = item.GetDisplayName(flag).ok()?;
         if p.is_null() {
             return None;
         }
@@ -257,6 +339,83 @@ mod tests {
     use super::*;
 
     #[test]
+    fn websites_in_apps_folder_are_not_software() {
+        assert!(is_web_identifier("https://example.com"));
+        assert!(is_web_identifier("HTTP://example.com"));
+        assert!(is_web_identifier("javascript:alert(1)"));
+        assert!(!is_web_identifier(
+            "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\charmap.exe"
+        ));
+        assert!(is_web_identifier(
+            r"D:\Program Files\SDK\DesktopAppsDocumentation.url"
+        ));
+        assert!(is_web_identifier(r"D:\Program Files\Tool\ReadMe.pdf"));
+        assert!(is_web_identifier(r"D:\Program Files\Tool\uninstall.exe"));
+        assert!(is_auxiliary_display_name("英雄联盟卸载"));
+    }
+
+    #[test]
+    fn classic_apps_folder_item_is_searchable_by_shell_name() {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        let folder: IShellItem = unsafe {
+            SHCreateItemFromParsingName(
+                PCWSTR(wide("shell:AppsFolder").as_ptr()),
+                None::<&IBindCtx>,
+            )
+            .unwrap()
+        };
+        let entries: IEnumShellItems = unsafe {
+            folder
+                .BindToHandler(None::<&IBindCtx>, &BHID_EnumItems)
+                .unwrap()
+        };
+        let mut expected = None;
+        loop {
+            let mut fetched = 0;
+            let mut slot: Option<IShellItem> = None;
+            if unsafe { entries.Next(std::slice::from_mut(&mut slot), Some(&mut fetched)) }.is_err()
+                || fetched == 0
+            {
+                break;
+            }
+            if let Some(shell_item) = slot {
+                if let Some(parsing) =
+                    display_name_with_flag(&shell_item, SIGDN_DESKTOPABSOLUTEPARSING)
+                {
+                    if parsing.to_ascii_lowercase().ends_with("cleanmgr.exe") {
+                        expected = Some((
+                            display_name(&shell_item).unwrap(),
+                            classic_shell_target(&shell_item).unwrap(),
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+        let (expected_name, expected_target) =
+            expected.expect("Disk Cleanup visible in AppsFolder");
+        let mut raw = Vec::new();
+        collect_uwp("uwp", &mut raw);
+        let mut item = raw
+            .into_iter()
+            .map(|(item, _)| item)
+            .find(|item| item.target.eq_ignore_ascii_case(&expected_target))
+            .expect("classic AppsFolder item must enter the index");
+        assert_eq!(item.name, expected_name);
+        item.attach_search_fields();
+        let index = crate::search::RetrievalIndex::build(&[item], &[]);
+        assert!(index
+            .search(&expected_name, &[], 10)
+            .iter()
+            .any(|hit| hit.item.name == expected_name));
+        unsafe {
+            CoUninitialize();
+        }
+    }
+
+    #[test]
     fn resolve_icon_empty() {
         assert!(resolve_uwp_icon("", "").is_none());
         assert!(resolve_uwp_icon(r"C:\nope", "").is_none());
@@ -273,7 +432,12 @@ mod tests {
     #[test]
     fn picks_highest_scale() {
         assert_eq!(
-            picked(&["Logo.scale-100.png", "Logo.scale-200.png", "Logo.scale-400.png"]).as_deref(),
+            picked(&[
+                "Logo.scale-100.png",
+                "Logo.scale-200.png",
+                "Logo.scale-400.png"
+            ])
+            .as_deref(),
             Some("Logo.scale-400.png")
         );
     }

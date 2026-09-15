@@ -4,13 +4,14 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegNotifyChangeKeyValue, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER,
     HKEY_LOCAL_MACHINE, KEY_NOTIFY, KEY_READ, KEY_WOW64_32KEY, REG_NOTIFY_CHANGE_LAST_SET,
+    REG_NOTIFY_CHANGE_NAME,
 };
 
 /// 安装器会连写多个文件：安静期后触发，最长等待封顶避免一直拖着。
@@ -19,11 +20,17 @@ const MAX_WAIT: Duration = Duration::from_millis(2500);
 
 /// 需要监听的目录集合。
 pub fn watch_roots() -> Vec<PathBuf> {
+    watch_roots_with_options(&crate::app::scanner::ScanOptions::default())
+}
+
+pub fn watch_roots_with_options(options: &crate::app::scanner::ScanOptions) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(d) = dirs::data_dir() {
         roots.push(d.join("Microsoft/Windows/Start Menu"));
     }
-    roots.push(PathBuf::from(r"C:\ProgramData\Microsoft\Windows\Start Menu"));
+    roots.push(PathBuf::from(
+        r"C:\ProgramData\Microsoft\Windows\Start Menu",
+    ));
     if let Some(d) = dirs::desktop_dir() {
         roots.push(d);
     }
@@ -39,11 +46,21 @@ pub fn watch_roots() -> Vec<PathBuf> {
     {
         roots.push(root.join("shims"));
     }
+    roots.extend(options.portable_dirs.iter().cloned());
+    roots.extend(crate::app::scanner::command_watch_roots());
+    roots.sort_by_key(|path| path.to_string_lossy().to_lowercase());
+    roots.dedup_by(|a, b| {
+        a.to_string_lossy()
+            .eq_ignore_ascii_case(&b.to_string_lossy())
+    });
     roots
 }
 
 /// 启动入口监听。`on_change` 在 debounce 合并后调用（通常触发 request_build）。
-pub fn spawn_entry_watchers(on_change: impl Fn() + Send + 'static) {
+pub fn spawn_entry_watchers(
+    scan_options: Arc<RwLock<crate::app::scanner::ScanOptions>>,
+    on_change: impl Fn() + Send + 'static,
+) {
     let dirty = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<()>();
 
@@ -66,19 +83,28 @@ pub fn spawn_entry_watchers(on_change: impl Fn() + Send + 'static) {
                 return;
             }
         };
-        for root in watch_roots() {
-            if !root.exists() {
-                continue;
-            }
-            if let Err(e) = watcher.watch(&root, RecursiveMode::Recursive) {
-                crate::log::info(&format!("watch {:?} failed: {e}", root));
-            } else {
-                crate::log::info(&format!("watching {:?}", root));
-            }
-        }
-        // 持有 watcher 直到进程退出
+        let mut watched = std::collections::HashSet::new();
         loop {
-            std::thread::sleep(Duration::from_secs(3600));
+            let options = scan_options
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            let desired: std::collections::HashSet<PathBuf> = watch_roots_with_options(&options)
+                .into_iter()
+                .filter(|root| root.exists())
+                .collect();
+            for root in desired.difference(&watched) {
+                if let Err(e) = watcher.watch(root, RecursiveMode::Recursive) {
+                    crate::log::info(&format!("watch {:?} failed: {e}", root));
+                } else {
+                    crate::log::info(&format!("watching {:?}", root));
+                }
+            }
+            for root in watched.difference(&desired) {
+                let _ = watcher.unwatch(root);
+            }
+            watched = desired;
+            std::thread::sleep(Duration::from_secs(2));
         }
     });
 
@@ -130,8 +156,7 @@ pub fn spawn_entry_watchers(on_change: impl Fn() + Send + 'static) {
 }
 
 fn spawn_registry_watchers(tx: mpsc::Sender<()>, dirty: Arc<AtomicBool>) {
-    let subkey = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths";
-    for (hive_kind, wow) in [(0u8, false), (0u8, true), (1u8, false)] {
+    for (hive_kind, subkey, wow) in registry_watch_specs() {
         let tx = tx.clone();
         let dirty = Arc::clone(&dirty);
         let subkey = subkey.to_string();
@@ -141,12 +166,35 @@ fn spawn_registry_watchers(tx: mpsc::Sender<()>, dirty: Arc<AtomicBool>) {
             } else {
                 HKEY_CURRENT_USER
             };
-            watch_app_paths_key(hive, &subkey, wow, tx, dirty);
+            watch_registry_key(hive, &subkey, wow, tx, dirty);
         });
     }
 }
 
-fn watch_app_paths_key(
+fn registry_watch_specs() -> Vec<(u8, &'static str, bool)> {
+    let mut specs = Vec::new();
+    let app_paths = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths";
+    specs.extend([
+        (0, app_paths, false),
+        (0, app_paths, true),
+        (1, app_paths, false),
+    ]);
+
+    let uninstall = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
+    for hive in [0, 1] {
+        specs.push((hive, uninstall, false));
+        specs.push((hive, uninstall, true));
+    }
+
+    let classes = r"SOFTWARE\Classes";
+    for hive in [0, 1] {
+        specs.push((hive, classes, false));
+        specs.push((hive, classes, true));
+    }
+    specs
+}
+
+fn watch_registry_key(
     hive: HKEY,
     subkey: &str,
     wow64: bool,
@@ -155,18 +203,22 @@ fn watch_app_paths_key(
 ) {
     use crate::app::scanner::util::wide;
     let wide_sub = wide(subkey);
-    let options = if wow64 { Some(KEY_WOW64_32KEY.0) } else { None };
+    let access = if wow64 {
+        KEY_READ | KEY_NOTIFY | KEY_WOW64_32KEY
+    } else {
+        KEY_READ | KEY_NOTIFY
+    };
     unsafe {
         let mut hkey = Default::default();
         let open = RegOpenKeyExW(
             hive,
             windows::core::PCWSTR(wide_sub.as_ptr()),
-            options,
-            KEY_READ | KEY_NOTIFY,
+            None,
+            access,
             &mut hkey,
         );
         if open.is_err() {
-            crate::log::info("app-paths registry watch: open failed");
+            crate::log::info(&format!("registry watch open failed: {subkey}"));
             return;
         }
         loop {
@@ -174,7 +226,7 @@ fn watch_app_paths_key(
             let notified = RegNotifyChangeKeyValue(
                 hkey,
                 true,
-                REG_NOTIFY_CHANGE_LAST_SET,
+                REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET,
                 None,
                 false,
             );
@@ -202,5 +254,32 @@ mod tests {
             let s = p.to_string_lossy().to_lowercase();
             s.contains("desktop")
         }));
+    }
+
+    #[test]
+    fn watch_roots_include_configured_portable_directories() {
+        let root = PathBuf::from(r"D:\Portable Apps");
+        let roots = watch_roots_with_options(&crate::app::scanner::ScanOptions {
+            portable_dirs: vec![root.clone()],
+            ..crate::app::scanner::ScanOptions::default()
+        });
+        assert!(roots.contains(&root));
+    }
+
+    #[test]
+    fn registry_watch_specs_cover_every_registry_search_source() {
+        let specs = registry_watch_specs();
+        for expected in ["App Paths", "Uninstall", "Classes"] {
+            assert!(
+                specs.iter().any(|(_, key, _)| key.ends_with(expected)),
+                "missing registry watcher for {expected}"
+            );
+        }
+        assert!(specs
+            .iter()
+            .any(|(_, key, wow)| key.ends_with("Uninstall") && *wow));
+        assert!(specs
+            .iter()
+            .any(|(_, key, wow)| key.ends_with("Classes") && *wow));
     }
 }

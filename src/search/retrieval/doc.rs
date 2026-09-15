@@ -30,6 +30,8 @@ pub struct IndexedDoc {
     pub pinyin_initials: String,
     pub pinyin_syllables: Vec<String>,
     pub keywords: Vec<String>,
+    pub keyword_compacts: Vec<String>,
+    pub keyword_bits: Vec<CharBits>,
     pub name_bits: CharBits,
     pub display_bits: CharBits,
 }
@@ -46,10 +48,7 @@ impl IndexedDoc {
         } else {
             item.normalized_display.clone()
         };
-        let mut token_set: Vec<String> = tokens(&name)
-            .into_iter()
-            .map(str::to_string)
-            .collect();
+        let mut token_set: Vec<String> = tokens(&name).into_iter().map(str::to_string).collect();
         for raw in [&item.name, &item.display_name] {
             for part in split_camel(raw) {
                 if !token_set.contains(&part) {
@@ -57,11 +56,24 @@ impl IndexedDoc {
                 }
             }
         }
-        for kw in &extra_keywords {
-            let k = kw.to_lowercase();
-            if !token_set.contains(&k) {
-                token_set.push(k);
+        let mut keywords = Vec::new();
+        for raw in &extra_keywords {
+            let keyword = crate::search::normalizer::normalize_name(raw);
+            if keyword.is_empty() {
+                continue;
             }
+            if !keywords.contains(&keyword) {
+                keywords.push(keyword.clone());
+            }
+            for token in tokens(&keyword) {
+                push_unique(&mut token_set, token.to_string());
+            }
+            for part in split_camel(raw) {
+                push_unique(&mut token_set, part);
+            }
+            let (full, initials) = pinyin_of(raw);
+            push_unique_nonempty(&mut token_set, full);
+            push_unique_nonempty(&mut token_set, initials);
         }
         let acronym = word_acronym(&name);
         let pinyin = if item.pinyin.is_empty() {
@@ -89,10 +101,9 @@ impl IndexedDoc {
             pinyin,
             pinyin_initials,
             pinyin_syllables,
-            keywords: extra_keywords
-                .into_iter()
-                .map(|k| k.to_lowercase())
-                .collect(),
+            keyword_compacts: keywords.iter().map(|k| compact(k)).collect(),
+            keyword_bits: keywords.iter().map(|k| CharBits::from_str(k)).collect(),
+            keywords,
         }
     }
 
@@ -105,8 +116,18 @@ impl IndexedDoc {
         if !self.display.is_empty() {
             out.push(&self.display);
         }
-        out.extend(self.tokens.iter().filter(|t| !t.is_empty()).map(|s| s.as_str()));
-        out.extend(self.keywords.iter().filter(|k| !k.is_empty()).map(|s| s.as_str()));
+        out.extend(
+            self.tokens
+                .iter()
+                .filter(|t| !t.is_empty())
+                .map(|s| s.as_str()),
+        );
+        out.extend(
+            self.keywords
+                .iter()
+                .filter(|k| !k.is_empty())
+                .map(|s| s.as_str()),
+        );
         if !self.pinyin.is_empty() {
             out.push(&self.pinyin);
         }
@@ -142,6 +163,8 @@ pub struct RetrievalIndex {
     first_char: HashMap<char, Vec<DocId>>,
     /// 名称/显示名任意字符 → 文档（跳字稀有字符锚点）。
     char_postings: HashMap<char, Vec<DocId>>,
+    /// All readings of CJK characters (and literal ASCII) in mixed names.
+    pinyin_char_postings: HashMap<char, Vec<DocId>>,
 }
 
 impl RetrievalIndex {
@@ -161,7 +184,7 @@ impl RetrievalIndex {
         };
 
         for item in apps {
-            push_item(item, Vec::new(), &mut docs);
+            push_item(item, item_extra_keywords(item), &mut docs);
         }
         for item in system_entries {
             push_item(item, item_extra_keywords(item), &mut docs);
@@ -175,24 +198,33 @@ impl RetrievalIndex {
         let mut term_set: HashSet<String> = HashSet::new();
         let mut first_char: HashMap<char, Vec<DocId>> = HashMap::new();
         let mut char_postings: HashMap<char, Vec<DocId>> = HashMap::new();
+        let mut pinyin_char_postings: HashMap<char, Vec<DocId>> = HashMap::new();
+        let pinyin_data =
+            ib_pinyin::pinyin::PinyinData::new(ib_pinyin::pinyin::PinyinNotation::Ascii);
 
         for doc in &docs {
             by_stable_id.insert(doc.item.id.clone(), doc.id);
             for term in doc.all_terms() {
                 term_set.insert(term.to_string());
-                term_postings.entry(term.to_string()).or_default().push(doc.id);
+                term_postings
+                    .entry(term.to_string())
+                    .or_default()
+                    .push(doc.id);
             }
-            for c in [&doc.compact_name, &doc.compact_display] {
+            for c in std::iter::once(&doc.compact_name)
+                .chain(std::iter::once(&doc.compact_display))
+                .chain(doc.keyword_compacts.iter())
+            {
                 if !c.is_empty() {
-                    compact_postings
-                        .entry(c.clone())
-                        .or_default()
-                        .push(doc.id);
+                    compact_postings.entry(c.clone()).or_default().push(doc.id);
                     term_set.insert(c.clone());
                     term_postings.entry(c.clone()).or_default().push(doc.id);
                 }
             }
-            for field in [&doc.name, &doc.display] {
+            for field in std::iter::once(&doc.name)
+                .chain(std::iter::once(&doc.display))
+                .chain(doc.keywords.iter())
+            {
                 index_grams(field, doc.id, &mut gram2, &mut gram3);
                 let mut seen_chars: HashSet<char> = HashSet::new();
                 for (i, ch) in field.chars().enumerate() {
@@ -202,6 +234,24 @@ impl RetrievalIndex {
                     if seen_chars.insert(ch) {
                         char_postings.entry(ch).or_default().push(doc.id);
                     }
+                }
+            }
+            if doc.item.display_name.chars().any(is_cjk) || doc.item.name.chars().any(is_cjk) {
+                let mut reading_chars = HashSet::new();
+                for ch in doc.item.display_name.chars().chain(doc.item.name.chars()) {
+                    if ch.is_ascii_alphabetic() {
+                        reading_chars.insert(ch.to_ascii_lowercase());
+                    }
+                    pinyin_data.get_pinyins_and_for_each(ch, |reading| {
+                        if let Some(ascii) =
+                            reading.notation(ib_pinyin::pinyin::PinyinNotation::Ascii)
+                        {
+                            reading_chars.extend(ascii.chars());
+                        }
+                    });
+                }
+                for ch in reading_chars {
+                    pinyin_char_postings.entry(ch).or_default().push(doc.id);
                 }
             }
         }
@@ -230,6 +280,10 @@ impl RetrievalIndex {
             list.sort_unstable();
             list.dedup();
         }
+        for list in pinyin_char_postings.values_mut() {
+            list.sort_unstable();
+            list.dedup();
+        }
 
         let deletes = symspell::build(&term_set, 2);
 
@@ -255,6 +309,7 @@ impl RetrievalIndex {
             by_stable_id,
             first_char,
             char_postings,
+            pinyin_char_postings,
         }
     }
 
@@ -323,6 +378,10 @@ impl RetrievalIndex {
         self.char_postings.get(&c).map(|v| v.as_slice())
     }
 
+    pub fn pinyin_char_postings(&self, c: char) -> Option<&[DocId]> {
+        self.pinyin_char_postings.get(&c).map(|v| v.as_slice())
+    }
+
     /// 非空 Query 搜索：多路召回 → 验证 → 统一排序 → 物化 Top K。
     /// 友好入口折扣可能下调 app-paths，因此物化窗口为 cutoff 分以上（含折扣余量）。
     pub fn search(
@@ -362,6 +421,18 @@ impl RetrievalIndex {
     }
 }
 
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
+}
+
+fn push_unique_nonempty(values: &mut Vec<String>, value: String) {
+    if !value.is_empty() {
+        push_unique(values, value);
+    }
+}
+
 fn item_extra_keywords(item: &AppItem) -> Vec<String> {
     let mut kws = item.search_keywords.clone();
     if item.source == "win-settings" || item.source == "builtin-system" {
@@ -369,14 +440,14 @@ fn item_extra_keywords(item: &AppItem) -> Vec<String> {
             kws.push(rest.replace('-', " "));
         }
         if item.id.starts_with("system-tool:") {
-            kws.push(
-                item.id
-                    .trim_start_matches("system-tool:")
-                    .replace('-', " "),
-            );
+            kws.push(item.id.trim_start_matches("system-tool:").replace('-', " "));
         }
     }
     kws
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(ch as u32, 0x4e00..=0x9fff | 0x3400..=0x4dbf)
 }
 
 fn index_grams(

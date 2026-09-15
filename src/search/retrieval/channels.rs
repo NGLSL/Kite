@@ -18,11 +18,7 @@ pub struct Candidates {
     pub stats: ChannelStats,
 }
 
-pub fn collect(
-    index: &RetrievalIndex,
-    q: &ParsedQuery,
-    user_targets: &[UserTarget],
-) -> Candidates {
+pub fn collect(index: &RetrievalIndex, q: &ParsedQuery, user_targets: &[UserTarget]) -> Candidates {
     let mut out = Candidates::default();
     if q.is_empty() {
         return out;
@@ -151,8 +147,7 @@ pub fn collect(
         if let Some(list) = seed {
             for &id in list {
                 let Some(doc) = index.doc(id) else { continue };
-                if doc.name_bits.contains_all(&q.chars) || doc.display_bits.contains_all(&q.chars)
-                {
+                if doc.name_bits.contains_all(&q.chars) || doc.display_bits.contains_all(&q.chars) {
                     out.ids.insert(id);
                     out.stats.skip += 1;
                 }
@@ -200,7 +195,12 @@ pub fn collect(
     // 成本模型：极短 Query 用首字符倒排兜底，而不是无条件全集扫描
     if q.chars.len() <= 2 {
         if let Some(&first) = q.chars.first() {
-            if let Some(list) = index.first_char_postings(first) {
+            let list = if q.chars.len() == 1 {
+                index.char_postings(first)
+            } else {
+                index.first_char_postings(first)
+            };
+            if let Some(list) = list {
                 for &id in list {
                     out.ids.insert(id);
                     out.stats.scanned_fallback += 1;
@@ -278,28 +278,16 @@ fn add_pinyin_candidates(index: &RetrievalIndex, q: &ParsedQuery, out: &mut Cand
             }
         }
     }
-    // 混合全拼/简拼（wxin）不在倒排词元里：仅对含汉字的文档扩候选，
-    // 避免拉丁 Query 把全部英文名扫进验证。
+    // 混合全拼/简拼和多音字的所有读音在建索引时展开为字符倒排。
+    // 这里只取可能包含输入字符的中文文档，最终仍由 ib-pinyin 验证。
     if q.chars.len() >= 2 {
-        for doc in &index.docs {
-            if !doc.pinyin_syllables.is_empty()
-                && doc_has_cjk(doc)
-                && doc
-                    .pinyin_syllables
-                    .iter()
-                    .any(|s| s.chars().next().is_some_and(|c| q.chars.contains(&c)))
-            {
-                out.ids.insert(doc.id);
-                out.stats.pinyin += 1;
+        for &ch in &q.chars {
+            if let Some(list) = index.pinyin_char_postings(ch) {
+                for &id in list {
+                    out.ids.insert(id);
+                    out.stats.pinyin += 1;
+                }
             }
         }
     }
-}
-
-fn doc_has_cjk(doc: &super::doc::IndexedDoc) -> bool {
-    doc.item
-        .display_name
-        .chars()
-        .chain(doc.item.name.chars())
-        .any(|c| matches!(c as u32, 0x4e00..=0x9fff | 0x3400..=0x4dbf))
 }

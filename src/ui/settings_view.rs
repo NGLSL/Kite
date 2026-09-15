@@ -2,13 +2,13 @@
 //! 布局 token 复用 ui.rs 的设计常量。
 
 use iced::font::Weight;
-use iced::widget::{button, column, container, mouse_area, row, scrollable, space::Space, text, text_input};
+use iced::widget::{
+    button, column, container, mouse_area, row, scrollable, space::Space, text, text_input,
+};
 use iced::{alignment, border, color, Background, Border, Color, Element, Font, Length, Padding};
 
 use super::font::{name_font, ui_font};
-use super::search_view::{
-    BG_ELEVATED, BG_PANEL, BORDER, MARK, TEXT, TEXT_MUTED, WINDOW_BORDER,
-};
+use super::search_view::{BG_ELEVATED, BG_PANEL, BORDER, MARK, TEXT, TEXT_MUTED, WINDOW_BORDER};
 use super::{Message, Section, State};
 
 const HOTKEY_PRESETS: [&str; 5] = [
@@ -124,31 +124,35 @@ fn nav_panel(state: &State) -> Element<'_, Message> {
     }
 
     // 品牌区固定高 53（与右侧标题栏一致），两条分隔线精确对齐在同一 y
-    container(
-        column![
-            mouse_area(
-                container(brand)
-                    .width(Length::Fill)
-                    .height(53.0)
-                    .align_y(alignment::Alignment::Center)
-                    .padding(Padding { top: 0.0, right: 12.0, bottom: 0.0, left: 12.0 })
-            )
-            .on_press(Message::DragWindow),
-            divider(),
-            nav_list,
-        ])
-        .width(168.0)
-        .height(Length::Fill)
-        .style(|_t| container::Style {
-            background: Some(Background::Color(BG_ELEVATED)),
-            border: Border {
-                color: BORDER,
-                width: 0.0,
-                radius: border::radius(0.0),
-            },
-            ..container::Style::default()
-        })
-        .into()
+    container(column![
+        mouse_area(
+            container(brand)
+                .width(Length::Fill)
+                .height(53.0)
+                .align_y(alignment::Alignment::Center)
+                .padding(Padding {
+                    top: 0.0,
+                    right: 12.0,
+                    bottom: 0.0,
+                    left: 12.0
+                })
+        )
+        .on_press(Message::DragWindow),
+        divider(),
+        nav_list,
+    ])
+    .width(168.0)
+    .height(Length::Fill)
+    .style(|_t| container::Style {
+        background: Some(Background::Color(BG_ELEVATED)),
+        border: Border {
+            color: BORDER,
+            width: 0.0,
+            radius: border::radius(0.0),
+        },
+        ..container::Style::default()
+    })
+    .into()
 }
 fn header(section: Section) -> Element<'static, Message> {
     let title = text(section.label()).size(20.0).color(TEXT).font(Font {
@@ -160,7 +164,12 @@ fn header(section: Section) -> Element<'static, Message> {
         .width(Length::Fill)
         .height(53.0)
         .align_y(alignment::Alignment::Center)
-        .padding(Padding { top: 0.0, right: 18.0, bottom: 0.0, left: 18.0 });
+        .padding(Padding {
+            top: 0.0,
+            right: 18.0,
+            bottom: 0.0,
+            left: 18.0,
+        });
     column![mouse_area(strip).on_press(Message::DragWindow), divider()]
         .width(Length::Fill)
         .into()
@@ -177,7 +186,12 @@ fn body(state: &State) -> Element<'_, Message> {
     container(content)
         .width(Length::Fill)
         .height(Length::Fill)
-        .padding(Padding { top: 12.0, right: 14.0, bottom: 16.0, left: 14.0 })
+        .padding(Padding {
+            top: 12.0,
+            right: 14.0,
+            bottom: 16.0,
+            left: 14.0,
+        })
         .into()
 }
 
@@ -189,9 +203,12 @@ fn flow_row(
 ) -> Element<'static, Message> {
     container(
         row![
-            column![text(title).size(13.5).color(TEXT).font(name_font()), text(hint).size(12.0).color(TEXT_MUTED)]
-                .spacing(2.0)
-                .width(Length::Fill),
+            column![
+                text(title).size(13.5).color(TEXT).font(name_font()),
+                text(hint).size(12.0).color(TEXT_MUTED)
+            ]
+            .spacing(2.0)
+            .width(Length::Fill),
             control,
         ]
         .spacing(12.0)
@@ -244,11 +261,13 @@ fn flow_card(rows: Vec<Element<'static, Message>>) -> Element<'static, Message> 
 /// 开关（css .switch）：40×22 胶囊 + 白色滑块。
 fn toggle(checked: bool, on_press: Message) -> Element<'static, Message> {
     button(
-        container(container(Space::new().width(14.0).height(14.0)).style(|_t| container::Style {
-            background: Some(Background::Color(color!(0xFF_FF_FF))),
-            border: Border::default().rounded(999.0),
-            ..container::Style::default()
-        }))
+        container(
+            container(Space::new().width(14.0).height(14.0)).style(|_t| container::Style {
+                background: Some(Background::Color(color!(0xFF_FF_FF))),
+                border: Border::default().rounded(999.0),
+                ..container::Style::default()
+            }),
+        )
         .width(40.0)
         .height(22.0)
         .padding(2.0)
@@ -300,7 +319,10 @@ fn general_card(state: &State) -> Element<'_, Message> {
         flow_row(
             "失焦时隐藏",
             "点击其它窗口后自动收起启动器".to_string(),
-            toggle(state.hide_on_blur, Message::SetHideOnBlur(!state.hide_on_blur)),
+            toggle(
+                state.hide_on_blur,
+                Message::SetHideOnBlur(!state.hide_on_blur),
+            ),
         ),
         flow_row(
             "记录使用历史",
@@ -320,10 +342,15 @@ fn general_card(state: &State) -> Element<'_, Message> {
 
 fn hotkey_card(state: &State) -> Element<'_, Message> {
     let recording = state.hotkey_recording;
-    let chip = container(text(state.hotkey_label.clone()).size(13.0).color(TEXT).font(Font {
-        weight: Weight::Semibold,
-        ..ui_font()
-    }))
+    let chip = container(
+        text(state.hotkey_label.clone())
+            .size(13.0)
+            .color(TEXT)
+            .font(Font {
+                weight: Weight::Semibold,
+                ..ui_font()
+            }),
+    )
     .padding([5.0, 10.0])
     .style(|_t| container::Style {
         background: Some(Background::Color(BG_PANEL)),
@@ -336,13 +363,13 @@ fn hotkey_card(state: &State) -> Element<'_, Message> {
     });
 
     let change: Element<'_, Message> = button(
-        text(if recording { "按下组合键…" } else { "更改" })
-            .size(13.0)
-            .color(if recording {
-                color!(0xFF_FF_FF)
-            } else {
-                TEXT
-            }),
+        text(if recording {
+            "按下组合键…"
+        } else {
+            "更改"
+        })
+        .size(13.0)
+        .color(if recording { color!(0xFF_FF_FF) } else { TEXT }),
     )
     .padding([7.0, 12.0])
     .on_press(Message::StartHotkeyRecord)
@@ -366,23 +393,31 @@ fn hotkey_card(state: &State) -> Element<'_, Message> {
     for preset in HOTKEY_PRESETS {
         let on = state.hotkey == preset;
         presets = presets.push(
-            button(text(preset).size(12.0).color(if on { MARK } else { TEXT_MUTED }))
-                .padding([5.0, 10.0])
-                .on_press(Message::ApplyHotkey(preset.to_string()))
-                .style(move |_t, _s| button::Style {
-                    background: if on {
-                        Some(Background::Color(Color { a: 0.10, ..MARK }))
+            button(
+                text(preset)
+                    .size(12.0)
+                    .color(if on { MARK } else { TEXT_MUTED }),
+            )
+            .padding([5.0, 10.0])
+            .on_press(Message::ApplyHotkey(preset.to_string()))
+            .style(move |_t, _s| button::Style {
+                background: if on {
+                    Some(Background::Color(Color { a: 0.10, ..MARK }))
+                } else {
+                    Some(Background::Color(BG_PANEL))
+                },
+                text_color: if on { MARK } else { TEXT_MUTED },
+                border: Border {
+                    color: if on {
+                        Color { a: 0.45, ..MARK }
                     } else {
-                        Some(Background::Color(BG_PANEL))
+                        BORDER
                     },
-                    text_color: if on { MARK } else { TEXT_MUTED },
-                    border: Border {
-                        color: if on { Color { a: 0.45, ..MARK } } else { BORDER },
-                        width: 1.0,
-                        radius: border::radius(999.0),
-                    },
-                    ..button::Style::default()
-                }),
+                    width: 1.0,
+                    radius: border::radius(999.0),
+                },
+                ..button::Style::default()
+            }),
         );
     }
 
@@ -390,18 +425,20 @@ fn hotkey_card(state: &State) -> Element<'_, Message> {
         flow_row(
             "全局快捷键",
             "按下组合键后立即生效".to_string(),
-            row![chip, change].spacing(8.0).align_y(alignment::Alignment::Center).into(),
+            row![chip, change]
+                .spacing(8.0)
+                .align_y(alignment::Alignment::Center)
+                .into(),
         ),
-        container(
-            column![
-                text("常用预设").size(12.0).color(TEXT_MUTED),
-                presets,
-            ]
-            .spacing(8.0),
-        )
-        .width(Length::Fill)
-        .padding(Padding { top: 12.0, right: 14.0, bottom: 14.0, left: 14.0 })
-        .into(),
+        container(column![text("常用预设").size(12.0).color(TEXT_MUTED), presets,].spacing(8.0))
+            .width(Length::Fill)
+            .padding(Padding {
+                top: 12.0,
+                right: 14.0,
+                bottom: 14.0,
+                left: 14.0,
+            })
+            .into(),
     ])
 }
 
@@ -441,25 +478,28 @@ fn alias_card(state: &State) -> Element<'_, Message> {
             value: TEXT,
             selection: Color { a: 0.25, ..MARK },
         });
-    let add_button =
-        button(text("添加").size(13.0).color(color!(0xFF_FF_FF)))
-            .padding([7.0, 12.0])
-            .on_press(Message::AliasAdd)
-            .style(|_t, _s| button::Style {
-                background: Some(Background::Color(MARK)),
-                text_color: color!(0xFF_FF_FF),
-                border: Border {
-                    color: MARK,
-                    width: 1.0,
-                    radius: border::radius(8.0),
-                },
-                ..button::Style::default()
-            });
+    let add_button = button(text("添加").size(13.0).color(color!(0xFF_FF_FF)))
+        .padding([7.0, 12.0])
+        .on_press(Message::AliasAdd)
+        .style(|_t, _s| button::Style {
+            background: Some(Background::Color(MARK)),
+            text_color: color!(0xFF_FF_FF),
+            border: Border {
+                color: MARK,
+                width: 1.0,
+                radius: border::radius(8.0),
+            },
+            ..button::Style::default()
+        });
     let form = column![
         text("添加别名").size(13.0).color(TEXT).font(name_font()),
         row![
-            column![text("别名").size(11.0).color(TEXT_MUTED), alias_input].spacing(4.0).width(110.0),
-            column![text("目标应用").size(11.0).color(TEXT_MUTED), target_input].spacing(4.0).width(Length::Fill),
+            column![text("别名").size(11.0).color(TEXT_MUTED), alias_input]
+                .spacing(4.0)
+                .width(110.0),
+            column![text("目标应用").size(11.0).color(TEXT_MUTED), target_input]
+                .spacing(4.0)
+                .width(Length::Fill),
             column![text(" ").size(11.0), add_button].spacing(4.0),
         ]
         .spacing(8.0)
@@ -471,7 +511,11 @@ fn alias_card(state: &State) -> Element<'_, Message> {
         .padding([12.0, 14.0])
         .style(|_t| container::Style {
             background: Some(Background::Color(BG_ELEVATED)),
-            border: Border { color: BORDER, width: 1.0, radius: border::radius(10.0) },
+            border: Border {
+                color: BORDER,
+                width: 1.0,
+                radius: border::radius(10.0),
+            },
             ..container::Style::default()
         });
 
@@ -489,7 +533,9 @@ fn alias_card(state: &State) -> Element<'_, Message> {
             cand = cand.push(
                 button(
                     row![
-                        text(c.item.display_name.clone()).size(13.0).width(Length::Fill),
+                        text(c.item.display_name.clone())
+                            .size(13.0)
+                            .width(Length::Fill),
                         text(c.item.target.clone()).size(11.0).color(TEXT_MUTED),
                     ]
                     .spacing(8.0)
@@ -511,44 +557,74 @@ fn alias_card(state: &State) -> Element<'_, Message> {
             );
         }
         sections.push(
-            container(column![text("选择目标应用").size(12.0).color(TEXT_MUTED), cand].spacing(8.0))
-                .width(Length::Fill)
-                .padding([10.0, 14.0])
-                .style(|_t| container::Style {
-                    background: Some(Background::Color(BG_ELEVATED)),
-                    border: Border { color: BORDER, width: 1.0, radius: border::radius(10.0) },
-                    ..container::Style::default()
-                })
-                .into(),
+            container(
+                column![text("选择目标应用").size(12.0).color(TEXT_MUTED), cand].spacing(8.0),
+            )
+            .width(Length::Fill)
+            .padding([10.0, 14.0])
+            .style(|_t| container::Style {
+                background: Some(Background::Color(BG_ELEVATED)),
+                border: Border {
+                    color: BORDER,
+                    width: 1.0,
+                    radius: border::radius(10.0),
+                },
+                ..container::Style::default()
+            })
+            .into(),
         );
     }
 
     // 现有别名列表：独立成卡片，和候选结果保持明确的视觉层级。
     if state.aliases.is_empty() {
-        sections.push(container(column![
-            text("已添加别名").size(13.0).color(TEXT).font(name_font()),
-            text("暂无别名。输入别名并选择目标应用后添加。").size(12.0).color(TEXT_MUTED),
-        ].spacing(8.0)).width(Length::Fill).padding([12.0, 14.0]).style(|_t| container::Style {
-            background: Some(Background::Color(BG_ELEVATED)),
-            border: Border { color: BORDER, width: 1.0, radius: border::radius(10.0) },
-            ..container::Style::default()
-        }).into());
+        sections.push(
+            container(
+                column![
+                    text("已添加别名").size(13.0).color(TEXT).font(name_font()),
+                    text("暂无别名。输入别名并选择目标应用后添加。")
+                        .size(12.0)
+                        .color(TEXT_MUTED),
+                ]
+                .spacing(8.0),
+            )
+            .width(Length::Fill)
+            .padding([12.0, 14.0])
+            .style(|_t| container::Style {
+                background: Some(Background::Color(BG_ELEVATED)),
+                border: Border {
+                    color: BORDER,
+                    width: 1.0,
+                    radius: border::radius(10.0),
+                },
+                ..container::Style::default()
+            })
+            .into(),
+        );
     } else {
-        let mut list = column![text("已添加别名").size(13.0).color(TEXT).font(name_font())].spacing(8.0);
+        let mut list =
+            column![text("已添加别名").size(13.0).color(TEXT).font(name_font())].spacing(8.0);
         for a in &state.aliases {
             let alias = a.alias.clone();
             list = list.push(
                 container(
                     row![
-                        container(text(a.alias.clone()).size(13.0).color(MARK).font(name_font()))
-                            .padding([2.0, 8.0])
-                            .style(|_t| container::Style {
-                                background: Some(Background::Color(Color { a: 0.10, ..MARK })),
-                                border: Border::default().rounded(6.0),
-                                ..container::Style::default()
-                            }),
+                        container(
+                            text(a.alias.clone())
+                                .size(13.0)
+                                .color(MARK)
+                                .font(name_font())
+                        )
+                        .padding([2.0, 8.0])
+                        .style(|_t| container::Style {
+                            background: Some(Background::Color(Color { a: 0.10, ..MARK })),
+                            border: Border::default().rounded(6.0),
+                            ..container::Style::default()
+                        }),
                         text("→").size(12.0).color(TEXT_MUTED),
-                        text(a.target_name.clone()).size(13.0).color(TEXT_MUTED).width(Length::Fill),
+                        text(a.target_name.clone())
+                            .size(13.0)
+                            .color(TEXT_MUTED)
+                            .width(Length::Fill),
                         button(text("删除").size(12.0).color(TEXT_MUTED))
                             .padding([4.0, 6.0])
                             .on_press(Message::AliasRemove(alias))
@@ -563,14 +639,24 @@ fn alias_card(state: &State) -> Element<'_, Message> {
                     .align_y(alignment::Alignment::Center),
                 )
                 .width(Length::Fill)
-                .padding([8.0, 14.0])
+                .padding([8.0, 14.0]),
             );
         }
-        sections.push(container(list).width(Length::Fill).padding([12.0, 14.0]).style(|_t| container::Style {
-            background: Some(Background::Color(BG_ELEVATED)),
-            border: Border { color: BORDER, width: 1.0, radius: border::radius(10.0) },
-            ..container::Style::default()
-        }).into());
+        sections.push(
+            container(list)
+                .width(Length::Fill)
+                .padding([12.0, 14.0])
+                .style(|_t| container::Style {
+                    background: Some(Background::Color(BG_ELEVATED)),
+                    border: Border {
+                        color: BORDER,
+                        width: 1.0,
+                        radius: border::radius(10.0),
+                    },
+                    ..container::Style::default()
+                })
+                .into(),
+        );
     }
 
     column(sections).spacing(12.0).width(Length::Fill).into()
@@ -578,18 +664,94 @@ fn alias_card(state: &State) -> Element<'_, Message> {
 
 fn index_card(state: &State) -> Element<'_, Message> {
     let n = state.index.lock().map(|g| g.apps.len()).unwrap_or(0);
-    flow_card(vec![
+    let summary = flow_card(vec![
         flow_row(
             "重新扫描应用",
-            "安装新软件后更新开始菜单与桌面索引".to_string(),
+            "更新系统入口、软件注册信息和便携目录".to_string(),
             std_button("重新扫描", Message::Rescan),
         ),
         flow_row(
             "当前索引",
-            "快速扫描 + UWP 后台合并".to_string(),
+            "快速扫描 + AppsFolder 后台补齐".to_string(),
             text(format!("{n} 条")).size(13.0).color(TEXT).into(),
         ),
-    ])
+    ]);
+
+    let input = text_input(r"D:\Portable Apps", &state.portable_dir_input)
+        .on_input(Message::PortableDirInputChanged)
+        .on_submit(Message::AddPortableDir)
+        .padding([7.0, 10.0])
+        .width(Length::Fill)
+        .style(|_t, _s| text_input::Style {
+            background: Background::Color(BG_PANEL),
+            border: Border {
+                color: BORDER,
+                width: 1.0,
+                radius: border::radius(8.0),
+            },
+            icon: TEXT_MUTED,
+            placeholder: TEXT_MUTED,
+            value: TEXT,
+            selection: Color { a: 0.25, ..MARK },
+        });
+    let add = button(text("添加").size(13.0).color(color!(0xFF_FF_FF)))
+        .padding([7.0, 12.0])
+        .on_press(Message::AddPortableDir)
+        .style(|_t, _s| button::Style {
+            background: Some(Background::Color(MARK)),
+            text_color: color!(0xFF_FF_FF),
+            border: Border::default().rounded(8.0),
+            ..button::Style::default()
+        });
+    let mut directories = column![
+        text("便携软件目录")
+            .size(13.0)
+            .color(TEXT)
+            .font(name_font()),
+        text("加入后扫描目录内的应用入口；修改会自动重建索引。")
+            .size(12.0)
+            .color(TEXT_MUTED),
+        row![input, add].spacing(8.0),
+    ]
+    .spacing(8.0);
+    for (index, path) in state.portable_dirs.iter().enumerate() {
+        directories = directories.push(
+            row![
+                text(path.clone())
+                    .size(12.0)
+                    .color(TEXT)
+                    .width(Length::Fill),
+                button(text("移除").size(12.0).color(TEXT_MUTED))
+                    .padding([4.0, 7.0])
+                    .on_press(Message::RemovePortableDir(index))
+                    .style(|_t, _s| button::Style {
+                        background: None,
+                        text_color: TEXT_MUTED,
+                        border: Border::default().rounded(6.0),
+                        ..button::Style::default()
+                    }),
+            ]
+            .spacing(8.0)
+            .align_y(alignment::Alignment::Center),
+        );
+    }
+    let directory_card = container(directories)
+        .width(Length::Fill)
+        .padding([12.0, 14.0])
+        .style(|_t| container::Style {
+            background: Some(Background::Color(BG_ELEVATED)),
+            border: Border {
+                color: BORDER,
+                width: 1.0,
+                radius: border::radius(10.0),
+            },
+            ..container::Style::default()
+        });
+
+    column![summary, directory_card]
+        .spacing(12.0)
+        .width(Length::Fill)
+        .into()
 }
 
 fn about_card(state: &State) -> Element<'_, Message> {
@@ -638,7 +800,11 @@ fn about_card(state: &State) -> Element<'_, Message> {
         }
     } else {
         std_button(
-            if state.update_checking { "检查中…" } else { "检查" },
+            if state.update_checking {
+                "检查中…"
+            } else {
+                "检查"
+            },
             Message::CheckUpdate,
         )
     };
@@ -705,6 +871,11 @@ fn toast(msg: &str) -> Element<'static, Message> {
     .height(Length::Fill)
     .align_x(alignment::Alignment::Center)
     .align_y(alignment::Alignment::End)
-    .padding(Padding { top: 0.0, right: 0.0, bottom: 16.0, left: 0.0 })
+    .padding(Padding {
+        top: 0.0,
+        right: 0.0,
+        bottom: 16.0,
+        left: 0.0,
+    })
     .into()
 }
