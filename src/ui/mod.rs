@@ -223,7 +223,9 @@ struct State {
     /// 索引代际：扫描完成后递增，用于基础命中缓存失效。
     index_generation: u64,
     /// 基础命中缓存（仅无个性化时；有历史/Pin/降权则重算）。
-    base_hit_cache: std::sync::Arc<std::sync::Mutex<search::service::BaseHitCache>>,
+    base_hit_cache: std::sync::Arc<search::service::BaseHitCache>,
+    /// 常驻应用搜索 worker（全局唯一）。
+    app_search_worker: std::sync::Arc<search::service::AppSearchWorker>,
     /// 右键菜单：(点击时的条目快照, x, y)。
     menu: Option<(AppItem, f32, f32)>,
     pinned: std::collections::HashSet<String>,

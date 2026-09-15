@@ -268,9 +268,8 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         file_results: Vec::new(),
         app_query_generation: 0,
         index_generation: 0,
-        base_hit_cache: std::sync::Arc::new(std::sync::Mutex::new(
-            search::service::BaseHitCache::default(),
-        )),
+        base_hit_cache: std::sync::Arc::new(search::service::BaseHitCache::default()),
+        app_search_worker: std::sync::Arc::new(search::service::AppSearchWorker::spawn()),
         menu: None,
         pinned: Default::default(),
         cursor: Default::default(),

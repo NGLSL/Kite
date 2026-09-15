@@ -1,35 +1,7 @@
 //! 搜索结果刷新与已有结果源合并。
 
 use super::*;
-
-/// 后台执行一次应用检索（含个性化，截断前）。
-fn run_app_search(
-    retrieval: Option<&search::RetrievalIndex>,
-    apps: &[AppItem],
-    system_entries: &[AppItem],
-    query: &str,
-    user_targets: &[search::UserTarget],
-    prefs: Option<&history::Personalization>,
-) -> Vec<SearchResult> {
-    if let Some(ret) = retrieval {
-        search::search_with_personalization(
-            ret,
-            query,
-            user_targets,
-            prefs,
-            search::MAX_RESULTS,
-        )
-    } else {
-        search::search_system_personalized(
-            apps,
-            system_entries,
-            query,
-            user_targets,
-            prefs,
-            search::MAX_RESULTS,
-        )
-    }
-}
+use std::sync::Arc;
 
 impl State {
     /// 使正在运行的文件查询失效，并清除其结果。
@@ -85,8 +57,8 @@ impl State {
         }
     }
 
-    /// 提交后台应用搜索：最新 Query 优先；个性化在截断前进入统一排序。
-    /// 仅当无个性化状态时缓存基础命中，避免「先截断再加分」丢候选。
+    /// 提交常驻 worker：最新请求覆盖；个性化在截断前进入统一排序。
+    /// 仅当无个性化状态时允许缓存基础命中。
     pub(super) fn request_app_search(&mut self) {
         self.app_query_generation = self.app_query_generation.wrapping_add(1);
         let generation = self.app_query_generation;
@@ -118,55 +90,30 @@ impl State {
             })
             .unwrap_or_default();
         let prefs = self.snapshot_personalization(&q_norm);
-        let cacheable = search::service::prefs_is_empty(prefs.as_ref());
         let cache = self.base_hit_cache.clone();
         let index_gen = self.index_generation;
 
-        std::thread::spawn(move || {
-            let started = Instant::now();
-            let hits = if cacheable {
-                let cached = cache
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(index_gen, &q_norm, search::MAX_RESULTS);
-                if let Some(hits) = cached {
-                    hits
-                } else {
-                    let hits = run_app_search(
-                        retrieval.as_deref(),
-                        &apps,
-                        &system_entries,
-                        &query,
-                        &user_targets,
-                        prefs.as_ref(),
-                    );
-                    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(
-                        index_gen,
-                        &q_norm,
-                        search::MAX_RESULTS,
-                        hits.clone(),
-                    );
-                    hits
-                }
-            } else {
-                // 有历史/Pin/降权：个性化必须在截断前生效，不走截断缓存
-                run_app_search(
-                    retrieval.as_deref(),
-                    &apps,
-                    &system_entries,
-                    &query,
-                    &user_targets,
-                    prefs.as_ref(),
-                )
-            };
-            let elapsed_us = started.elapsed().as_micros();
-            let _ = EVENT_TX
-                .get()
-                .expect("event tx")
-                .unbounded_send(Message::AppSearchReady(
-                    generation, query, hits, elapsed_us,
-                ));
-        });
+        let job = search::service::AppSearchJob {
+            generation,
+            index_generation: index_gen,
+            query,
+            q_norm,
+            user_targets,
+            prefs,
+            retrieval,
+            apps,
+            system_entries,
+            cache,
+            on_done: Arc::new(|generation, query, hits, elapsed_us| {
+                let _ = EVENT_TX
+                    .get()
+                    .expect("event tx")
+                    .unbounded_send(Message::AppSearchReady(
+                        generation, query, hits, elapsed_us,
+                    ));
+            }),
+        };
+        self.app_search_worker.submit(job);
     }
 
     /// 应用后台结果：代际核对后合并链接/文件/网页槽位（个性化已在 worker 完成）。
