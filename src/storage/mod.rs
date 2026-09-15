@@ -10,6 +10,11 @@ use std::path::Path;
 
 use rusqlite::{params, params_from_iter, Connection};
 
+/// SQLite schema 版本（ADR 0001：`PRAGMA user_version`）。
+/// 1: 基础 usage/query/settings/aliases
+/// 2: + pinned + demoted
+pub const SCHEMA_VERSION: i32 = 2;
+
 pub struct HistoryDb {
     conn: Connection,
 }
@@ -54,10 +59,31 @@ impl HistoryDb {
             "#,
         )?;
         let mut db = Self { conn };
-        db.ensure_schema()?;
-        db.ensure_pins_schema()?;
-        db.ensure_demote_schema()?;
+        db.migrate()?;
         Ok(db)
+    }
+
+    fn user_version(&self) -> rusqlite::Result<i32> {
+        self.conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+    }
+
+    fn set_user_version(&mut self, v: i32) -> rusqlite::Result<()> {
+        self.conn
+            .execute_batch(&format!("PRAGMA user_version = {v};"))?;
+        Ok(())
+    }
+
+    /// 按 `user_version` 前向迁移；重复打开安全，不删已有数据。
+    fn migrate(&mut self) -> rusqlite::Result<()> {
+        let v = self.user_version().unwrap_or(0);
+        if v < 2 {
+            self.ensure_schema()?;
+            self.ensure_pins_schema()?;
+            self.ensure_demote_schema()?;
+            self.set_user_version(SCHEMA_VERSION)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn raw_conn(&self) -> &Connection {
@@ -595,5 +621,76 @@ mod tests {
         );
         assert_eq!(stable_item_id(t, Some("-x")), stable_item_id(t, Some("-x")));
         assert_ne!(stable_item_id(t, None), stable_item_id(t, Some("-x")));
+    }
+
+    #[test]
+    fn fresh_install_sets_schema_version_and_tables() {
+        let mut db = temp_history_db("fresh");
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        assert!(db.ensure_demote_schema().is_ok());
+        db.demote_item("x", 1).unwrap();
+        assert!(db.is_demoted("x"));
+    }
+
+    #[test]
+    fn old_db_without_demoted_upgrades_and_keeps_data() {
+        let path = temp_history_path("old");
+        {
+            // 模拟仅有基础表、user_version=0 的旧库
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE usage_history (
+                    item_id TEXT PRIMARY KEY,
+                    launch_count INTEGER NOT NULL DEFAULT 0,
+                    last_used_at INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO usage_history VALUES ('keep-me', 3, 99);
+                "#,
+            )
+            .unwrap();
+        }
+        let mut db = HistoryDb::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        assert!(db.demoted_ids().is_empty());
+        db.demote_item("new", 5).unwrap();
+        assert!(db.is_demoted("new"));
+        // 旧数据仍在
+        let usage = db.usage_snapshot(&["keep-me".to_string()]);
+        assert_eq!(usage.get("keep-me").map(|u| u.launch_count), Some(3));
+    }
+
+    #[test]
+    fn existing_demoted_table_with_old_version_migrates_without_data_loss() {
+        let path = temp_history_path("has-demoted");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE demoted (
+                    item_id TEXT PRIMARY KEY,
+                    demoted_at INTEGER NOT NULL
+                );
+                INSERT INTO demoted VALUES ('legacy-demote', 42);
+                "#,
+            )
+            .unwrap();
+        }
+        let db = HistoryDb::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
+        assert!(db.is_demoted("legacy-demote"), "不得丢已有降权记录");
+    }
+
+    fn temp_history_path(tag: &str) -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("kite-schema-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let nanos = std::time::SystemTime::now().elapsed().unwrap().as_nanos();
+        dir.join(format!("{tag}-{nanos}-{n}.db"))
+    }
+
+    fn temp_history_db(tag: &str) -> HistoryDb {
+        HistoryDb::open(&temp_history_path(tag)).expect("open")
     }
 }

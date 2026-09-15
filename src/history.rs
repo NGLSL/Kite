@@ -93,6 +93,60 @@ pub fn apply_boosts(
     apply_personalization(hits, &prefs);
 }
 
+/// 个性化调整：由偏好快照统一计算，供 RankedHit / SearchResult 两条路径共用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreferenceAdjust {
+    /// 加到基础分上的调整（可为负：降权）。
+    pub boost: i32,
+    pub pinned: bool,
+    pub demoted: bool,
+    /// 是否应打 +history 标签（非 pin/demote 且 boost>0）。
+    pub history: bool,
+}
+
+/// 单一计算入口：查询偏好 + 使用 + Pin + 降权 + 时间 → boost 与标记。
+/// tier 用于判断是否处于明确匹配保护层（保护层不受降权扣分）。
+pub fn preference_adjust(
+    prefs: &Personalization,
+    item_id: &str,
+    quality_tier: i32,
+) -> PreferenceAdjust {
+    let pinned = prefs.pinned.contains(item_id);
+    let demoted = prefs.demoted.contains(item_id);
+    let u = prefs.usage.get(item_id).cloned().unwrap_or_default();
+    let p = prefs.pairs.get(item_id).cloned().unwrap_or_default();
+    let history = history_boost(&prefs.query_norm, &u, &p, prefs.now);
+    let mut boost = if pinned {
+        PIN_BOOST.max(history)
+    } else {
+        history
+    };
+    if demoted && quality_tier > PROTECTED_TIER_MAX {
+        boost -= crate::storage::demote::DEMOTE_PENALTY;
+    }
+    let history = !pinned && !demoted && boost > 0;
+    PreferenceAdjust {
+        boost,
+        pinned,
+        demoted,
+        history,
+    }
+}
+
+/// 把偏好标记追加到 matched_by。
+pub fn apply_preference_tags(matched_by: &str, adj: &PreferenceAdjust) -> String {
+    let mut out = matched_by.to_string();
+    if adj.pinned {
+        out.push_str("+pin");
+    }
+    if adj.demoted {
+        out.push_str("+demote");
+    } else if adj.history {
+        out.push_str("+history");
+    }
+    out
+}
+
 /// 在完整候选集上应用个性化并最终排序。调用方负责截断。
 ///
 /// 排序：
@@ -110,31 +164,11 @@ pub fn apply_personalization(hits: &mut [SearchResult], prefs: &Personalization)
         } else {
             quality_tier(base)
         };
-        let is_pinned = prefs.pinned.contains(&hit.item.id);
-        let is_demoted = prefs.demoted.contains(&hit.item.id);
-        let u = prefs.usage.get(&hit.item.id).cloned().unwrap_or_default();
-        let p = prefs.pairs.get(&hit.item.id).cloned().unwrap_or_default();
-        let history = history_boost(&prefs.query_norm, &u, &p, prefs.now);
-        let mut boost = if is_pinned {
-            PIN_BOOST.max(history)
-        } else {
-            history
-        };
-        // 降权：非保护层扣分；保护精确匹配仍可召回，不被压到弱匹配之下。
-        if is_demoted && tier > PROTECTED_TIER_MAX {
-            boost -= crate::storage::demote::DEMOTE_PENALTY;
-        }
+        let adj = preference_adjust(prefs, &hit.item.id, tier);
         let mut hit = hit.clone();
         hit.quality_tier = tier;
-        hit.score = base + boost;
-        if is_pinned {
-            hit.matched_by = format!("{}+pin", hit.matched_by);
-        }
-        if is_demoted {
-            hit.matched_by = format!("{}+demote", hit.matched_by);
-        } else if !is_pinned && boost > 0 {
-            hit.matched_by = format!("{}+history", hit.matched_by);
-        }
+        hit.score = base + adj.boost;
+        hit.matched_by = apply_preference_tags(&hit.matched_by, &adj);
         let keyed = (tier, hit.score, hit.item.id.clone(), hit);
         if tier <= PROTECTED_TIER_MAX {
             protected.push(keyed);
@@ -702,6 +736,75 @@ mod tests {
         assert_eq!(
             hits[0].item.id, "exact",
             "保护层 Name Exact 不得被降权挤出前排"
+        );
+    }
+
+    #[test]
+    fn preference_adjust_is_single_source_for_tags_and_boost() {
+        let mut prefs = Personalization::default();
+        prefs.pinned.insert("a".into());
+        prefs.demoted.insert("b".into());
+        prefs.usage.insert(
+            "c".into(),
+            UsageStats {
+                launch_count: 8,
+                last_used_at: prefs.now,
+            },
+        );
+        prefs.now = 1_700_086_400;
+        let adj_pin = preference_adjust(&prefs, "a", 4);
+        assert!(adj_pin.pinned && adj_pin.boost >= PIN_BOOST);
+        assert!(apply_preference_tags("prefix", &adj_pin).contains("+pin"));
+        let adj_dem = preference_adjust(&prefs, "b", 4);
+        assert!(adj_dem.demoted && adj_dem.boost < 0);
+        assert!(apply_preference_tags("prefix", &adj_dem).contains("+demote"));
+        let adj_hist = preference_adjust(&prefs, "c", 4);
+        assert!(adj_hist.history && adj_hist.boost > 0);
+    }
+
+    #[test]
+    fn cache_path_and_ranked_path_produce_same_order() {
+        use crate::search::{search_with_personalization, RetrievalIndex};
+        use crate::model::AppItem;
+
+        fn app(id: &str, name: &str) -> AppItem {
+            let mut it = AppItem::scanned(
+                id.into(),
+                name.into(),
+                format!(r"C:\{id}.exe"),
+                None,
+                None,
+                "t",
+            );
+            it.attach_search_fields();
+            it
+        }
+        let index = RetrievalIndex::build(
+            &[app("a", "Code Alpha"), app("b", "Code Beta"), app("c", "Code Gamma")],
+            &[],
+        );
+        let mut prefs = Personalization::default();
+        prefs.query_norm = "code".into();
+        prefs.demoted.insert("b".into());
+        prefs.usage.insert(
+            "c".into(),
+            UsageStats {
+                launch_count: 20,
+                last_used_at: prefs.now,
+            },
+        );
+        prefs.now = 1_700_086_400;
+
+        // 主路径：RankedHit 个性化
+        let ranked = search_with_personalization(&index, "code", &[], Some(&prefs), 10);
+        // 缓存路径：先无个性化基础结果，再 personalize_base_hits
+        let base = search_with_personalization(&index, "code", &[], None, 10);
+        let replayed = crate::search::service::personalize_base_hits(base, Some(&prefs));
+        let ranked_ids: Vec<_> = ranked.iter().map(|h| h.item.id.as_str()).collect();
+        let replay_ids: Vec<_> = replayed.iter().map(|h| h.item.id.as_str()).collect();
+        assert_eq!(
+            ranked_ids, replay_ids,
+            "缓存命中与主路径最终顺序必须一致"
         );
     }
 }

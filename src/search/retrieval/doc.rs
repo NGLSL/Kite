@@ -701,36 +701,20 @@ impl RetrievalIndex {
     }
 
     /// 只写偏好信息与最终分；排序交给统一比较器，不在个性化阶段分叉。
-    fn apply_personalization_boosts(&self, ranked: &mut [RankedHit], prefs: &crate::history::Personalization) {
-        use crate::history::{history_boost, PIN_BOOST};
+    fn apply_personalization_boosts(
+        &self,
+        ranked: &mut [RankedHit],
+        prefs: &crate::history::Personalization,
+    ) {
+        use crate::history::{apply_preference_tags, preference_adjust};
         for hit in ranked.iter_mut() {
             let Some(doc) = self.doc(hit.doc_id) else {
                 continue;
             };
-            let id = &doc.item.id;
+            let adj = preference_adjust(prefs, &doc.item.id, hit.quality_tier);
             let base = hit.score;
-            let is_pinned = prefs.pinned.contains(id);
-            let is_demoted = prefs.demoted.contains(id);
-            let usage = prefs.usage.get(id).cloned().unwrap_or_default();
-            let pair = prefs.pairs.get(id).cloned().unwrap_or_default();
-            let history = history_boost(&prefs.query_norm, &usage, &pair, prefs.now);
-            let mut boost = if is_pinned {
-                PIN_BOOST.max(history)
-            } else {
-                history
-            };
-            if is_demoted && hit.quality_tier > crate::history::PROTECTED_TIER_MAX {
-                boost -= crate::storage::demote::DEMOTE_PENALTY;
-            }
-            hit.score = base + boost;
-            if is_pinned {
-                hit.matched_by = format!("{}+pin", hit.matched_by);
-            }
-            if is_demoted {
-                hit.matched_by = format!("{}+demote", hit.matched_by);
-            } else if !is_pinned && boost > 0 {
-                hit.matched_by = format!("{}+history", hit.matched_by);
-            }
+            hit.score = base + adj.boost;
+            hit.matched_by = apply_preference_tags(&hit.matched_by, &adj);
         }
     }
 
