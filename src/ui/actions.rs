@@ -233,6 +233,31 @@ mod everything_action_tests {
     }
 }
 
+/// 显示主窗口（热键/托盘/二次启动共用）。窗口未就绪时忽略。
+pub(super) fn show_launcher(state: &mut State) -> Task<Message> {
+    let Some(id) = state.window_id else {
+        plog("show before window ready; ignored");
+        return Task::none();
+    };
+    state.hidden = false;
+    state.epoch += 1;
+    if state.files_mode {
+        state.request_file_search();
+    }
+    state.refresh_results();
+    // 对齐 Kite：唤起即响（SND_ASYNC，不阻塞显示）
+    system::sound::play_open();
+    plog(&format!("show issued epoch={}", state.epoch));
+    Task::batch([
+        // 搜索窗口只需要前台焦点，不应持续置顶，否则会压住截图层和其它全局快捷键 UI。
+        window::set_level(id, window::Level::Normal),
+        window::set_mode(id, window::Mode::Windowed),
+        window::gain_focus(id),
+        iced::widget::operation::focus(state.input_id.clone()),
+        sync_scroll(state),
+    ])
+}
+
 pub(super) fn hide(state: &mut State) {
     state.hidden = true;
     state.ime_composing = false;

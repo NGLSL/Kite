@@ -10,25 +10,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 t0.elapsed().as_micros()
             ));
             match state.window_id {
-                Some(id) if state.hidden => {
-                    state.hidden = false;
-                    state.epoch += 1;
-                    if state.files_mode {
-                        state.request_file_search();
-                    }
-                    state.refresh_results();
-                    // 对齐 Kite：唤起即响（SND_ASYNC，不阻塞显示）
-                    system::sound::play_open();
-                    plog(&format!("show issued epoch={}", state.epoch));
-                    Task::batch([
-                        // 搜索窗口只需要前台焦点，不应持续置顶，否则会压住截图层和其它全局快捷键 UI。
-                        window::set_level(id, window::Level::Normal),
-                        window::set_mode(id, window::Mode::Windowed),
-                        window::gain_focus(id),
-                        iced::widget::operation::focus(state.input_id.clone()),
-                        sync_scroll(state),
-                    ])
-                }
+                Some(_) if state.hidden => show_launcher(state),
                 Some(id) => {
                     plog("hide issued (hotkey toggle)");
                     hide(state);
@@ -38,6 +20,17 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                     plog("hotkey before window ready; ignored");
                     Task::none()
                 }
+            }
+        }
+        Message::EnsureVisible => {
+            if state.hidden {
+                plog("ensure visible from secondary instance");
+                show_launcher(state)
+            } else if let Some(id) = state.window_id {
+                plog("secondary activate while visible; focus only");
+                window::gain_focus(id)
+            } else {
+                Task::none()
             }
         }
         Message::KeyPressed(key, physical, mods) => {

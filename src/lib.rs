@@ -38,6 +38,12 @@ pub fn run() {
         }
     }
 
+    // 降权之后再 claim，避免提权 bootstrap 短暂占位误伤正常实例。
+    if let Err(system::singleton::AlreadyRunning) = system::singleton::claim() {
+        log::info("secondary launch exited after requesting activation");
+        return;
+    }
+
     if let Err(e) = ui::run() {
         eprintln!("kite: UI 启动失败: {e}");
         std::process::exit(1);

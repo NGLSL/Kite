@@ -236,6 +236,15 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         include_bytes!("../../icons/32x32.png"),
     );
 
+    // 二次启动激活：主实例已在 lib::run claim；此处消息桥就绪后开始监听。
+    if let Err(error) = system::singleton::spawn_activation_listener(|| {
+        if let Some(tx) = EVENT_TX.get() {
+            let _ = tx.unbounded_send(Message::EnsureVisible);
+        }
+    }) {
+        plog(&format!("activation listener not started: {error}"));
+    }
+
     let mut state = State {
         data_dir: data_dir.clone(),
         icon_dir: icon_dir.clone(),

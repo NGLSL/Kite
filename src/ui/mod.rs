@@ -173,6 +173,8 @@ enum Message {
     HotkeyRegistrationResult(String, Result<(), String>),
     /// 后台完整扫描完成并已原子替换快照。
     FullIndexReady(usize),
+    /// 二次启动：请求主实例显示窗口（已显示则只抢焦点，不切换隐藏）。
+    EnsureVisible,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

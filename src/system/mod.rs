@@ -10,5 +10,6 @@ pub mod hotkey;
 pub mod icons;
 pub mod resources;
 pub mod search_engine;
+pub mod singleton;
 pub mod sound;
 pub mod update;
