@@ -108,11 +108,13 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 }
             }
             state.query = q;
+            state.request_file_search();
             state.refresh_results();
             sync_scroll(state)
         }
         Message::ClearQuery => {
             state.query.clear();
+            state.request_file_search();
             state.refresh_results();
             // × 按钮会抢走键盘焦点，清空后还给输入框
             Task::batch([
@@ -135,6 +137,28 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::ToggleFiles => {
             state.files_mode = !state.files_mode;
             plog(&format!("files toggle -> {}", state.files_mode));
+            state.request_file_search();
+            state.refresh_results();
+            Task::none()
+        }
+        Message::FileSearchReady(generation, query, hits, elapsed_us) => {
+            if !results::is_current_file_response(
+                state.files_mode,
+                state.file_query_generation,
+                &state.query,
+                generation,
+                &query,
+            ) {
+                plog(&format!(
+                    "file search stale generation={generation} query={query:?} elapsed={elapsed_us}us"
+                ));
+                return Task::none();
+            }
+            plog(&format!(
+                "file search ready generation={generation} query={query:?} hits={} elapsed={elapsed_us}us",
+                hits.len()
+            ));
+            state.file_results = hits;
             state.refresh_results();
             Task::none()
         }
@@ -404,20 +428,15 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::MousePressed(_btn) => {
             // 前端行为：菜单开着时点击菜单外任意位置 → 关闭（点在菜单内交给菜单项按钮）
-            if let Some((idx, x, y)) = state.menu {
+            if let Some((item, x, y)) = &state.menu {
                 let c = state.cursor.get();
-                let target = state
-                    .results
-                    .get(idx)
-                    .map(|r| r.item.target.clone())
-                    .unwrap_or_default();
-                let n = if std::path::Path::new(&target).is_file() {
+                let n = if std::path::Path::new(&item.target).is_file() {
                     4
                 } else {
                     2
                 };
                 let h = 8.0 + n as f32 * 33.0;
-                if c.x < x || c.x > x + 180.0 || c.y < y || c.y > y + h {
+                if c.x < *x || c.x > *x + 180.0 || c.y < *y || c.y > *y + h {
                     state.menu = None;
                 }
             }
@@ -427,27 +446,11 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             let c = state.cursor.get();
             let x = c.x.min(640.0 - 200.0).max(8.0);
             let y = c.y.min(420.0 - 180.0).max(8.0);
-            state.menu = Some((i, x, y));
+            state.menu = capture_menu_item(&state.results, i).map(|item| (item, x, y));
             Task::none()
         }
-        Message::MenuAction(i, action) => menu_action(state, i, action),
+        Message::MenuAction(item, action) => menu_action(state, item, action),
         Message::DragWindow => state.window_id.map(window::drag).unwrap_or_else(Task::none),
-        Message::IndexReady(n) => {
-            plog(&format!("index ready n={n}"));
-            state.index_ready = true;
-            state.refresh_results();
-            Task::none()
-        }
-        Message::IconsFilled(n) => {
-            plog(&format!("icons filled n={n}"));
-            state.refresh_results();
-            Task::none()
-        }
-        Message::UwpMerged(n) => {
-            plog(&format!("uwp merged n={n}"));
-            state.refresh_results();
-            Task::none()
-        }
         Message::FullIndexReady(n) => {
             plog(&format!("full index ready n={n}"));
             state.index_ready = true;
@@ -469,6 +472,44 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             state.refresh_results();
             Task::none()
         }
+    }
+}
+
+fn capture_menu_item(results: &[SearchResult], index: usize) -> Option<AppItem> {
+    results.get(index).map(|result| result.item.clone())
+}
+
+#[cfg(test)]
+mod context_menu_tests {
+    use super::*;
+
+    fn result(id: &str, target: &str) -> SearchResult {
+        SearchResult {
+            item: AppItem::scanned(
+                id.to_string(),
+                id.to_string(),
+                target.to_string(),
+                None,
+                None,
+                "test",
+            ),
+            score: 1,
+            matched_by: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn context_menu_keeps_clicked_item_when_results_reorder() {
+        let mut results = vec![
+            result("first", r"C:\Apps\first.exe"),
+            result("second", r"C:\Apps\second.exe"),
+        ];
+        let clicked = capture_menu_item(&results, 0).expect("clicked item");
+
+        results.swap(0, 1);
+
+        assert_eq!(clicked.id, "first");
+        assert_eq!(clicked.target, r"C:\Apps\first.exe");
     }
 }
 

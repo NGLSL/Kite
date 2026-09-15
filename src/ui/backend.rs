@@ -1,19 +1,18 @@
-//! 原型后台：历史库副本与索引重建（对齐 state::rebuild_index，去 Tauri 化）。
-//! 只调用 kite_lib 既有函数，不改数据格式；历史库用副本，避免污染 Kite 真实数据。
+//! 后台索引重建。
 //!
-//! 快扫首屏 → 图标补齐 → UWP 合并 → 后台完整扫描原子替换。
-//! 同一时刻最多一次构建；旧构建结果不得覆盖更新的快照。
+//! 扫描在线程内构建完整搜索快照，完成后一次性替换 UI 当前快照。
+//! 同一时刻最多一次构建；构建期间继续使用上一份完整快照。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use iced::futures::channel::mpsc::UnboundedSender;
 
+use crate::app;
 use crate::app::scanner::{ScanOptions, ScanPass};
 use crate::model::{AppIndex, AppItem};
-use crate::{app, system};
 
 use super::{plog, Message};
 
@@ -24,7 +23,43 @@ static PENDING_REBUILD: AtomicBool = AtomicBool::new(false);
 /// 构建代际：完成时仅当仍等于启动时记下的 generation 才发布，避免旧构建覆盖新状态。
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// 触发一次完整重建：快扫首屏 + 后台完整补扫。
+/// 只有完整快照可以替换当前索引。内容未变化时保留原 Arc，并且不刷新 UI。
+fn publish_snapshot(current: &mut AppIndex, built: AppIndex, complete: bool) -> bool {
+    if !complete {
+        return false;
+    }
+    if current.retrieval.is_some() && same_snapshot_content(current, &built) {
+        return false;
+    }
+    *current = built;
+    true
+}
+
+fn same_snapshot_content(left: &AppIndex, right: &AppIndex) -> bool {
+    same_items(&left.apps, &right.apps) && same_items(&left.system_entries, &right.system_entries)
+}
+
+fn same_items(left: &[AppItem], right: &[AppItem]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(a, b)| {
+            a.id == b.id
+                && a.name == b.name
+                && a.display_name == b.display_name
+                && a.target == b.target
+                && a.args == b.args
+                && a.working_dir == b.working_dir
+                && a.icon == b.icon
+                && a.icon_src == b.icon_src
+                && a.source == b.source
+                && a.normalized_name == b.normalized_name
+                && a.normalized_display == b.normalized_display
+                && a.pinyin == b.pinyin
+                && a.pinyin_initials == b.pinyin_initials
+                && a.search_keywords == b.search_keywords
+        })
+}
+
+/// 触发一次完整重建。扫描期间保留旧快照，完整结果生成后再原子发布。
 /// 已在跑时标记 pending，当前构建结束后自动再跑一轮。
 pub fn request_build(
     index: Arc<Mutex<AppIndex>>,
@@ -62,8 +97,6 @@ pub fn request_build(
     true
 }
 
-/// 三阶段快扫 + 第四阶段完整扫描：快速索引（首屏可搜索）→ 图标并行补齐 →
-/// UWP 后台合并 → 后台完整递归扫描原子替换。
 fn build_index_inner(
     index: Arc<Mutex<AppIndex>>,
     icon_dir: PathBuf,
@@ -72,180 +105,26 @@ fn build_index_inner(
     options: &ScanOptions,
 ) {
     let _ = std::fs::create_dir_all(&icon_dir);
-
-    // 阶段 1：快速扫描（与 Kite 首屏一致，不提图标）
-    let t0 = Instant::now();
-    let built = app::scanner::scan_apps_pass_with_options(&icon_dir, ScanPass::Fast, options);
-    let n = built.apps.len();
-    if GENERATION.load(Ordering::SeqCst) != generation {
-        plog("fast snapshot skipped; newer build started");
-        return;
-    }
-    if let Ok(mut g) = index.lock() {
-        publish_fast_snapshot(&mut g, built);
-    }
-    plog(&format!("index fast n={n} in {:?}", t0.elapsed()));
-    let _ = tx.unbounded_send(Message::IndexReady(n));
-
-    // 阶段 2：图标并行补齐（对齐 rebuild_index 的后台补图标，全程不持锁）
-    let t1 = Instant::now();
-    let pending = {
-        let g = index.lock().unwrap_or_else(|e| e.into_inner());
-        app::scanner::missing_icon_targets(&g)
-    };
-    let filled = app::scanner::extract_icons_parallel(&pending, &icon_dir);
-    if GENERATION.load(Ordering::SeqCst) == generation {
-        if let Ok(mut g) = index.lock() {
-            apply_filled_icons(&mut g, &filled);
-            let with_icon = g.apps.iter().filter(|a| a.icon.is_some()).count();
-            plog(&format!(
-                "icons filled {with_icon}/{} in {:?}",
-                g.apps.len(),
-                t1.elapsed()
-            ));
-        }
-    }
-    let _ = tx.unbounded_send(Message::IconsFilled(filled.len()));
-
-    // 阶段 3：UWP / Store 应用后台补扫合并（对齐 merge_uwp_apps）
-    let t2 = Instant::now();
-    let mut raw = Vec::new();
-    app::uwp::collect_uwp("uwp", &mut raw);
-    let raw_n = raw.len();
-    let added = merge_uwp(&index, raw, &icon_dir, generation);
-    plog(&format!(
-        "uwp merged +{added} (scanned {raw_n}) in {:?}",
-        t2.elapsed()
-    ));
-    let _ = tx.unbounded_send(Message::UwpMerged(added));
-
-    // 阶段 4：后台完整扫描（无快扫时间预算、更深递归、含 UWP/图标），
-    // 构建完整新快照后原子替换；构建期间旧索引始终可搜。
-    if GENERATION.load(Ordering::SeqCst) != generation {
-        plog("full scan skipped; newer build started");
-        return;
-    }
-    let t3 = Instant::now();
+    let started = Instant::now();
     let full = app::scanner::scan_apps_pass_with_options(&icon_dir, ScanPass::Full, options);
-    let full_n = full.apps.len();
+    let count = full.apps.len();
     if GENERATION.load(Ordering::SeqCst) != generation {
-        plog("full snapshot discarded; newer build started");
+        plog("complete snapshot discarded; newer build started");
         return;
     }
-    if let Ok(mut g) = index.lock() {
-        *g = full;
-    }
+
+    let published = index
+        .lock()
+        .map(|mut current| publish_snapshot(&mut current, full, true))
+        .unwrap_or(false);
+    let status = if published { "published" } else { "unchanged" };
     plog(&format!(
-        "index full n={full_n} in {:?} (generation={generation})",
-        t3.elapsed()
+        "index complete n={count} {status} in {:?} (generation={generation})",
+        started.elapsed()
     ));
-    let _ = tx.unbounded_send(Message::FullIndexReady(full_n));
-}
-
-/// 与 state::merge_uwp_apps 相同的去重合并：按规范化路径 key 去重后并入索引。
-fn merge_uwp(
-    index: &Arc<Mutex<AppIndex>>,
-    raw: Vec<(AppItem, Option<String>)>,
-    icon_dir: &Path,
-    generation: u64,
-) -> usize {
-    let existing = {
-        let g = index.lock().unwrap_or_else(|e| e.into_inner());
-        g.apps.clone()
-    };
-
-    let mut to_add = Vec::new();
-    for (mut item, icon_src) in raw {
-        if existing
-            .iter()
-            .chain(to_add.iter())
-            .any(|known| incremental_identity_matches(known, &item))
-        {
-            continue;
-        }
-        item.attach_search_fields();
-        item.icon_src = icon_src.or_else(|| Some(item.target.clone()));
-        item.icon = system::icons::cache_icon(
-            icon_dir,
-            &item.id,
-            item.icon_src.as_deref(),
-            Some(item.target.as_str()),
-        );
-        to_add.push(item);
+    if published {
+        let _ = tx.unbounded_send(Message::FullIndexReady(count));
     }
-
-    if GENERATION.load(Ordering::SeqCst) != generation {
-        return 0;
-    }
-
-    let mut added = 0usize;
-    if let Ok(mut g) = index.lock() {
-        for item in to_add {
-            if g.apps
-                .iter()
-                .any(|known| incremental_identity_matches(known, &item))
-            {
-                continue;
-            }
-            g.apps.push(item);
-            added += 1;
-        }
-        if added > 0 {
-            g.rebuild_retrieval();
-        }
-    }
-    added
-}
-
-fn publish_fast_snapshot(current: &mut AppIndex, mut built: AppIndex) {
-    let known_icons: std::collections::HashMap<&str, &str> = current
-        .apps
-        .iter()
-        .chain(current.system_entries.iter())
-        .filter_map(|item| Some((item.id.as_str(), item.icon.as_deref()?)))
-        .collect();
-    let mut changed = false;
-    for item in built.apps.iter_mut().chain(built.system_entries.iter_mut()) {
-        if item.icon.is_none() {
-            if let Some(icon) = known_icons.get(item.id.as_str()) {
-                item.icon = Some((*icon).to_string());
-                changed = true;
-            }
-        }
-    }
-    if changed {
-        built.rebuild_retrieval();
-    }
-    *current = built;
-}
-
-fn apply_filled_icons(
-    index: &mut AppIndex,
-    filled: &std::collections::HashMap<String, Option<String>>,
-) {
-    let mut changed = false;
-    for item in index.apps.iter_mut() {
-        if item.icon.is_none() {
-            if let Some(Some(path)) = filled.get(&item.id) {
-                item.icon = Some(path.clone());
-                changed = true;
-            }
-        }
-    }
-    if changed {
-        index.rebuild_retrieval();
-    }
-}
-
-fn incremental_identity_matches(known: &AppItem, incoming: &AppItem) -> bool {
-    if crate::app::scanner::util::normalize_path_key(&known.target)
-        == crate::app::scanner::util::normalize_path_key(&incoming.target)
-    {
-        return true;
-    }
-    incoming.source == "apps-folder"
-        && crate::search::normalize_for_index(&known.name)
-            == crate::search::normalize_for_index(&incoming.name)
 }
 
 #[cfg(test)]
@@ -259,142 +138,59 @@ mod tests {
     }
 
     #[test]
-    fn fast_snapshot_keeps_existing_icon_for_same_application() {
-        let mut existing = app(
-            "lightroom",
-            "Adobe Lightroom Classic",
-            r"D:\Program Files\Lightroom\Lightroom.exe",
-            "start-menu",
-        );
-        existing.icon = Some(r"C:\cache\lightroom.png".into());
+    fn incomplete_snapshot_never_replaces_visible_complete_snapshot() {
         let mut current = AppIndex {
-            apps: vec![existing],
-            system_entries: Vec::new(),
-            retrieval: None,
-        };
-        let built = AppIndex {
             apps: vec![app(
-                "lightroom",
-                "Adobe Lightroom Classic",
-                r"D:\Program Files\Lightroom\Lightroom.exe",
+                "complete",
+                "Complete application",
+                r"C:\Complete.exe",
+                "start-menu",
+            )],
+            system_entries: Vec::new(),
+            retrieval: Some(Arc::new(crate::search::RetrievalIndex::build(&[], &[]))),
+        };
+        let partial = AppIndex {
+            apps: vec![app(
+                "partial",
+                "Partial application",
+                r"C:\Partial.exe",
                 "start-menu",
             )],
             system_entries: Vec::new(),
             retrieval: None,
         };
 
-        publish_fast_snapshot(&mut current, built);
+        let published = publish_snapshot(&mut current, partial, false);
 
-        assert_eq!(
-            current.apps[0].icon.as_deref(),
-            Some(r"C:\cache\lightroom.png"),
-            "publishing a fast snapshot must not make a previously loaded icon disappear"
-        );
-        let hits = crate::search::search_with_index(
-            current.retrieval.as_deref().expect("retrieval index"),
-            "adobe",
-            &[],
-            10,
-        );
-        assert_eq!(
-            hits[0].item.icon.as_deref(),
-            Some(r"C:\cache\lightroom.png"),
-            "the immutable retrieval snapshot must carry the same icon"
-        );
+        assert!(!published, "incomplete snapshots must stay private");
+        assert_eq!(current.apps[0].id, "complete");
     }
 
     #[test]
-    fn classic_apps_folder_wrapper_matches_existing_application_name() {
-        let existing = app(
-            "real",
-            "Adobe Lightroom Classic",
-            r"D:\Program Files\Lightroom\Adobe Lightroom Classic\Lightroom.exe",
-            "start-menu",
-        );
-        let wrapped = app(
-            "shell",
-            "Adobe Lightroom Classic",
-            r"shell:AppsFolder\D:\Program Files\Lightroom\Adobe Lightroom Classic\Lightroom.exe",
-            "apps-folder",
-        );
-
-        assert!(
-            incremental_identity_matches(&existing, &wrapped),
-            "incremental AppsFolder merge must use the same classic-name policy as the full scan"
-        );
-    }
-
-    #[test]
-    fn icon_fill_updates_the_retrieval_snapshot_used_by_nonempty_queries() {
-        let item = app(
-            "lightroom",
-            "Adobe Lightroom Classic",
-            r"D:\Program Files\Lightroom\Lightroom.exe",
-            "start-menu",
-        );
-        let mut index = AppIndex {
-            apps: vec![item],
+    fn complete_snapshot_is_published_only_when_content_changes() {
+        let mut current = AppIndex::empty();
+        let mut complete = AppIndex {
+            apps: vec![app(
+                "complete",
+                "Complete application",
+                r"C:\Complete.exe",
+                "start-menu",
+            )],
             system_entries: Vec::new(),
             retrieval: None,
         };
-        index.rebuild_retrieval();
-        let filled = std::collections::HashMap::from([(
-            "lightroom".to_string(),
-            Some(r"C:\cache\lightroom.png".to_string()),
-        )]);
+        complete.rebuild_retrieval();
 
-        apply_filled_icons(&mut index, &filled);
-
-        let hits = crate::search::search_with_index(
-            index.retrieval.as_deref().expect("retrieval index"),
-            "adobe",
-            &[],
-            10,
-        );
-        assert_eq!(hits.len(), 1);
-        assert_eq!(
-            hits[0].item.icon.as_deref(),
-            Some(r"C:\cache\lightroom.png")
-        );
-    }
-
-    #[test]
-    fn incremental_uwp_merge_does_not_add_classic_name_duplicate() {
-        let existing = app(
-            "real",
-            "Adobe Lightroom Classic",
-            r"D:\Program Files\Lightroom\Adobe Lightroom Classic\Lightroom.exe",
-            "start-menu",
-        );
-        let index = Arc::new(Mutex::new(AppIndex {
-            apps: vec![existing],
-            system_entries: Vec::new(),
+        assert!(publish_snapshot(&mut current, complete, true));
+        let mut identical = AppIndex {
+            apps: current.apps.clone(),
+            system_entries: current.system_entries.clone(),
             retrieval: None,
-        }));
-        let wrapped = app(
-            "shell",
-            "Adobe Lightroom Classic",
-            r"shell:AppsFolder\D:\Program Files\Lightroom\Adobe Lightroom Classic\Lightroom.exe",
-            "apps-folder",
-        );
-        let generation = 4_242;
-        GENERATION.store(generation, Ordering::SeqCst);
-
-        let added = merge_uwp(
-            &index,
-            vec![(wrapped, None)],
-            &std::env::temp_dir(),
-            generation,
-        );
-
-        assert_eq!(added, 0);
-        assert_eq!(
-            index
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .apps
-                .len(),
-            1
+        };
+        identical.rebuild_retrieval();
+        assert!(
+            !publish_snapshot(&mut current, identical, true),
+            "an identical rebuild must not refresh the visible result list"
         );
     }
 
@@ -403,10 +199,7 @@ mod tests {
         let index = Arc::new(Mutex::new(AppIndex::empty()));
         let dir = std::env::temp_dir().join(format!("kite-build-single-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        // 不真正跑完整扫描：用极短存在性验证单飞标志。
-        // request_build 会 spawn 真实扫描（可能访问系统目录），因此只测 swap 语义。
         BUILDING.store(false, Ordering::SeqCst);
-        // 手动模拟：第一次 swap 成功
         assert!(!BUILDING.swap(true, Ordering::SeqCst));
         assert!(BUILDING.load(Ordering::SeqCst));
         assert!(
@@ -415,7 +208,6 @@ mod tests {
         );
         BUILDING.store(false, Ordering::SeqCst);
         let _ = std::fs::remove_dir_all(dir);
-        // index 仅防止 unused；真实 request_build 由 UI 线程触发
         let _ = index;
     }
 }

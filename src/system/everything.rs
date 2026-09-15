@@ -9,6 +9,7 @@ use std::sync::{Mutex, OnceLock};
 
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
 
 /// 文件命中。
 #[derive(Debug, Clone)]
@@ -23,12 +24,13 @@ const REQUEST_PATH: u32 = 0x0000_0002;
 /// Everything.h：ERROR_IPC = Everything search client is not running。
 const ERROR_IPC: u32 = 2;
 const DLL_NAME: &str = "Everything64.dll";
+const IPC_WINDOW_CLASS: windows::core::PCWSTR =
+    windows::core::w!("EVERYTHING_TASKBAR_NOTIFICATION");
 
 type SetSearchW = unsafe extern "system" fn(*const u16);
 type SetRequestFlags = unsafe extern "system" fn(u32);
 type SetMax = unsafe extern "system" fn(u32);
 type QueryW = unsafe extern "system" fn(i32) -> i32;
-type GetMajorVersion = unsafe extern "system" fn() -> u32;
 type GetLastError = unsafe extern "system" fn() -> u32;
 type GetNumResults = unsafe extern "system" fn() -> u32;
 type GetResultPathW = unsafe extern "system" fn(u32) -> *const u16;
@@ -45,7 +47,6 @@ struct Sdk {
     set_request_flags: SetRequestFlags,
     set_max: SetMax,
     query: QueryW,
-    get_major_version: GetMajorVersion,
     get_last_error: GetLastError,
     get_num_results: GetNumResults,
     get_result_path: GetResultPathW,
@@ -55,6 +56,10 @@ struct Sdk {
 
 fn sdk() -> Option<&'static Sdk> {
     SDK.get_or_init(|| unsafe { load_sdk() }).as_ref()
+}
+
+fn everything_ipc_window_available() -> bool {
+    unsafe { FindWindowW(IPC_WINDOW_CLASS, windows::core::PCWSTR::null()).is_ok() }
 }
 
 unsafe fn load_sdk() -> Option<Sdk> {
@@ -98,7 +103,6 @@ unsafe fn build_sdk(h: HMODULE) -> Option<Sdk> {
         set_request_flags: sym(h, b"Everything_SetRequestFlags\0")?,
         set_max: sym(h, b"Everything_SetMax\0")?,
         query: sym(h, b"Everything_QueryW\0")?,
-        get_major_version: sym(h, b"Everything_GetMajorVersion\0")?,
         get_last_error: sym(h, b"Everything_GetLastError\0")?,
         get_num_results: sym(h, b"Everything_GetNumResults\0")?,
         get_result_path: sym(h, b"Everything_GetResultPathW\0")?,
@@ -139,24 +143,20 @@ pub fn search_files(query: &str, max: usize) -> Vec<EverythingHit> {
     if q.is_empty() || max == 0 {
         return Vec::new();
     }
+    // SDK 本质是 Everything IPC 包装。官方 IPC 示例同样先 FindWindow；
+    // 没有服务端窗口时绝不能调用可能等待数秒的阻塞查询。
+    if !everything_ipc_window_available() {
+        if !IPC_MISS_LOGGED.swap(true, Ordering::Relaxed) {
+            crate::log::info("everything not running; file search skipped");
+        }
+        return Vec::new();
+    }
     let Some(sdk) = sdk() else {
         return Vec::new();
     };
     let _guard = QUERY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
     unsafe {
-        // QueryW(TRUE) waits for the Everything IPC server and can block for
-        // several seconds when Everything is not installed or not running.
-        // Probe the SDK first; Flow Launcher uses the same version/error check.
-        // This keeps the UI thread out of the blocking query path.
-        (sdk.get_major_version)();
-        if (sdk.get_last_error)() == ERROR_IPC {
-            if !IPC_MISS_LOGGED.swap(true, Ordering::Relaxed) {
-                crate::log::info("everything not running; file search skipped");
-            }
-            return Vec::new();
-        }
-
         let wide: Vec<u16> = OsStr::new(q)
             .encode_wide()
             .chain(std::iter::once(0))
@@ -263,20 +263,16 @@ mod tests {
 
     #[test]
     fn missing_everything_does_not_wait_for_ipc() {
-        // 回归检查引擎未运行时不会进入 QueryW(TRUE) 的多秒 IPC 等待；
-        // 引擎正在运行的机器跳过此环境测试，避免把真实索引耗时算进去。
-        crate::system::resources::init(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-        let Some(sdk) = sdk() else { return };
-        unsafe {
-            (sdk.get_major_version)();
-            if (sdk.get_last_error)() != ERROR_IPC {
-                return;
-            }
+        // 回归检查引擎未运行时不会进入 SDK 的多秒 IPC 等待；
+        // 引擎正在运行的机器跳过此环境测试。
+        if everything_ipc_window_available() {
+            return;
         }
+        crate::system::resources::init(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
         let started = Instant::now();
         let _ = search_files("we", 5);
         assert!(
-            started.elapsed() < Duration::from_secs(1),
+            started.elapsed() < Duration::from_millis(250),
             "missing Everything probe took {:?}",
             started.elapsed()
         );

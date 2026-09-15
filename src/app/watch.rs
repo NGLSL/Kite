@@ -1,4 +1,4 @@
-//! 入口变化监听：开始菜单 / 桌面 / Scoop shim 目录，以及 App Paths 注册表。
+//! 入口变化监听：开始菜单 / 桌面 / 命令目录，以及应用注册表来源。
 //! 通知 debounce 后合并为一次索引重建；监听失败不影响托盘手动重扫。
 
 use std::path::PathBuf;
@@ -186,11 +186,10 @@ fn registry_watch_specs() -> Vec<(u8, &'static str, bool)> {
         specs.push((hive, uninstall, true));
     }
 
-    let classes = r"SOFTWARE\Classes";
-    for hive in [0, 1] {
-        specs.push((hive, classes, false));
-        specs.push((hive, classes, true));
-    }
+    // 不递归监听完整 Software\Classes。该树包含大量与应用入口无关的
+    // COM、文件关联和临时状态写入，任何一次写入都会造成完整索引重建。
+    // 协议别名仍在 Full 扫描中读取；应用安装通常同时更新开始菜单、
+    // Uninstall 或 App Paths，也可以由设置页手动重新扫描。
     specs
 }
 
@@ -267,9 +266,9 @@ mod tests {
     }
 
     #[test]
-    fn registry_watch_specs_cover_every_registry_search_source() {
+    fn registry_watch_specs_exclude_the_noisy_classes_tree() {
         let specs = registry_watch_specs();
-        for expected in ["App Paths", "Uninstall", "Classes"] {
+        for expected in ["App Paths", "Uninstall"] {
             assert!(
                 specs.iter().any(|(_, key, _)| key.ends_with(expected)),
                 "missing registry watcher for {expected}"
@@ -278,8 +277,9 @@ mod tests {
         assert!(specs
             .iter()
             .any(|(_, key, wow)| key.ends_with("Uninstall") && *wow));
-        assert!(specs
-            .iter()
-            .any(|(_, key, wow)| key.ends_with("Classes") && *wow));
+        assert!(
+            specs.iter().all(|(_, key, _)| key != &r"SOFTWARE\Classes"),
+            "watching the complete Classes tree turns unrelated registry writes into rebuilds"
+        );
     }
 }

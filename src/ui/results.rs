@@ -3,6 +3,30 @@
 use super::*;
 
 impl State {
+    /// 使当前文件结果失效，并在需要时把 Everything 查询放到后台线程。
+    pub(super) fn request_file_search(&mut self) {
+        self.file_query_generation = self.file_query_generation.wrapping_add(1);
+        self.file_results.clear();
+        let query = self.query.trim().to_string();
+        if !self.files_mode || search::normalize_for_index(&query).chars().count() < 2 {
+            return;
+        }
+
+        let generation = self.file_query_generation;
+        let icon_dir = self.icon_dir.clone();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let results = build_file_results(&query, &icon_dir);
+            let elapsed_us = started.elapsed().as_micros();
+            let _ = EVENT_TX
+                .get()
+                .expect("event tx")
+                .unbounded_send(Message::FileSearchReady(
+                    generation, query, results, elapsed_us,
+                ));
+        });
+    }
+
     /// 对齐 commands::search_apps 的完整管线（缺内置设置页 UI，其余全量）：
     /// 空 Query 走固定+最近；非空走 内置项 → 应用召回 → 链接识别 → 文件 →
     /// 历史加权 → 网页搜索槽位；列表出全量（滚动加载在进程内直接滚动可见）。
@@ -39,7 +63,7 @@ impl State {
                         .collect()
                 })
                 .unwrap_or_default();
-            // 克隆同代索引 Arc 后立即释放锁，匹配/IPC 不持全局锁
+            // 克隆同代索引 Arc 后立即释放锁，应用匹配不持全局锁。
             let retrieval = {
                 let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
                 index.retrieval.clone()
@@ -72,21 +96,9 @@ impl State {
                 hits = merged;
             }
 
-            // Everything 文件搜索：仅「文件」开关打开且 query ≥ 2 字符时调用（IPC 上限 20）
+            // Everything 在后台查询；这里只合并当前 query 已完成的不可变结果。
             if self.files_mode && q_norm.chars().count() >= 2 {
-                for fh in system::everything::search_files(&self.query, 20) {
-                    let name = fh.name.clone();
-                    let id = format!("file:{}", fh.path.to_lowercase());
-                    let mut item = AppItem::scanned(id, name, fh.path, None, None, "everything");
-                    item.attach_search_fields();
-                    item.icon =
-                        system::icons::cache_type_icon(&self.icon_dir, &fh.name, fh.is_folder);
-                    hits.push(SearchResult {
-                        item,
-                        score: 400,
-                        matched_by: "file".into(),
-                    });
-                }
+                hits.extend(self.file_results.iter().cloned());
             }
 
             // 个性化加权（历史 + 固定，Match 仍是主信号）
@@ -150,5 +162,48 @@ impl State {
             t0.elapsed().as_micros(),
             self.epoch
         ));
+    }
+}
+
+fn build_file_results(query: &str, icon_dir: &std::path::Path) -> Vec<SearchResult> {
+    system::everything::search_files(query, 20)
+        .into_iter()
+        .map(|hit| {
+            let id = format!("file:{}", hit.path.to_lowercase());
+            let mut item =
+                AppItem::scanned(id, hit.name.clone(), hit.path, None, None, "everything");
+            item.attach_search_fields();
+            item.icon = system::icons::cache_type_icon(icon_dir, &hit.name, hit.is_folder);
+            SearchResult {
+                item,
+                score: 400,
+                matched_by: "file".into(),
+            }
+        })
+        .collect()
+}
+
+pub(super) fn is_current_file_response(
+    files_mode: bool,
+    current_generation: u64,
+    current_query: &str,
+    response_generation: u64,
+    response_query: &str,
+) -> bool {
+    files_mode
+        && current_generation == response_generation
+        && current_query.trim() == response_query
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_current_file_response;
+
+    #[test]
+    fn stale_or_disabled_file_results_are_rejected() {
+        assert!(is_current_file_response(true, 4, "report", 4, "report"));
+        assert!(!is_current_file_response(true, 5, "report", 4, "report"));
+        assert!(!is_current_file_response(true, 4, "reports", 4, "report"));
+        assert!(!is_current_file_response(false, 4, "report", 4, "report"));
     }
 }

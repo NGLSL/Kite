@@ -63,8 +63,8 @@ pub fn view(state: &State) -> Element<'_, Message> {
 
     // 右键菜单以 overlay 叠加（css .ctx-menu）
     let root: Element<'_, Message> = root.into();
-    match state.menu {
-        Some((idx, x, y)) => stack![root, menu_overlay(state, idx, x, y)].into(),
+    match &state.menu {
+        Some((item, x, y)) => stack![root, menu_overlay(state, item, *x, *y)].into(),
         None => root,
     }
 }
@@ -373,13 +373,15 @@ fn footer_bar(_state: &State) -> Element<'static, Message> {
 }
 
 /// 右键菜单 overlay（css .ctx-menu：白底、1px 边框、radius 10、投影、项 hover 高亮）。
-fn menu_overlay(state: &State, idx: usize, x: f32, y: f32) -> Element<'_, Message> {
-    let Some(r) = state.results.get(idx) else {
-        return Space::new().into();
-    };
-    let target_is_fs = std::path::Path::new(&r.item.target).is_file()
-        || std::path::Path::new(&r.item.target).is_dir();
-    let pinned = state.pinned.contains(&r.item.id);
+fn menu_overlay<'a>(
+    state: &'a State,
+    item: &'a crate::model::AppItem,
+    x: f32,
+    y: f32,
+) -> Element<'a, Message> {
+    let target_is_fs =
+        std::path::Path::new(&item.target).is_file() || std::path::Path::new(&item.target).is_dir();
+    let pinned = state.pinned.contains(&item.id);
 
     let mut entries: Vec<(&'static str, MenuAction)> = Vec::new();
     if target_is_fs {
@@ -398,7 +400,7 @@ fn menu_overlay(state: &State, idx: usize, x: f32, y: f32) -> Element<'_, Messag
             button(text(label).size(13.0))
                 .width(Length::Fill)
                 .padding([7.0, 10.0])
-                .on_press(Message::MenuAction(idx, action))
+                .on_press(Message::MenuAction(item.clone(), action))
                 .style(|_t, status| button::Style {
                     background: if status == button::Status::Hovered {
                         Some(Background::Color(Color { a: 0.14, ..MARK }))

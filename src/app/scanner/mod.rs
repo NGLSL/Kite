@@ -570,7 +570,12 @@ fn dedupe(raw: Vec<RawItem>) -> Vec<RawItem> {
                 slot.insert((item, icon));
             }
             Entry::Occupied(mut slot) => {
-                if rank(&slot.get().0.source) <= rank(&item.source) {
+                let current_rank = rank(&slot.get().0.source);
+                let incoming_rank = rank(&item.source);
+                let replace = incoming_rank < current_rank
+                    || (incoming_rank == current_rank
+                        && deterministic_item_key(&item) < deterministic_item_key(&slot.get().0));
+                if !replace {
                     keep_shortcut_names(&mut slot.get_mut().0, &item);
                 } else {
                     let (old_item, _) = slot.get();
@@ -588,8 +593,21 @@ fn dedupe(raw: Vec<RawItem>) -> Vec<RawItem> {
             .to_lowercase()
             .cmp(&b.0.name.to_lowercase())
             .then_with(|| a.0.source.cmp(&b.0.source))
+            .then_with(|| normalize_path_key(&a.0.target).cmp(&normalize_path_key(&b.0.target)))
+            .then_with(|| a.0.args.cmp(&b.0.args))
+            .then_with(|| a.0.id.cmp(&b.0.id))
     });
     list
+}
+
+fn deterministic_item_key(item: &AppItem) -> (String, String, String, String, String) {
+    (
+        item.name.to_lowercase(),
+        item.display_name.to_lowercase(),
+        normalize_path_key(&item.target),
+        item.args.clone().unwrap_or_default(),
+        item.id.clone(),
+    )
 }
 
 fn exclude_system_name_duplicates(apps: &mut Vec<RawItem>, system_entries: &[AppItem]) {
@@ -688,6 +706,25 @@ mod tests {
             "Scoop shim 应进入应用索引"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dedupe_winner_is_independent_of_source_enumeration_order() {
+        let make = |name: &str| {
+            AppItem::scanned(
+                "same-id".to_string(),
+                name.to_string(),
+                r"C:\Apps\same.exe".to_string(),
+                None,
+                None,
+                "start-menu",
+            )
+        };
+        let forward = dedupe(vec![(make("Zeta"), None), (make("Alpha"), None)]);
+        let reverse = dedupe(vec![(make("Alpha"), None), (make("Zeta"), None)]);
+
+        assert_eq!(forward[0].0.name, reverse[0].0.name);
+        assert_eq!(forward[0].0.name, "Alpha");
     }
 
     #[test]

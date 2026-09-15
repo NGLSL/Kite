@@ -179,6 +179,8 @@ mod alt_digit_tests {
             alt_digit_consumed: false,
             index_ready: true,
             files_mode: false,
+            file_query_generation: 0,
+            file_results: Vec::new(),
             menu: None,
             pinned: Default::default(),
             cursor: Default::default(),

@@ -202,7 +202,7 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         }
     });
 
-    // 索引线程：快扫首屏 + 图标/UWP + 后台完整补扫（单飞）
+    // 索引线程：后台构建完整快照，完成后一次发布（单飞）
     {
         let index = index.clone();
         let dir = icon_dir.clone();
@@ -254,6 +254,8 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         alt_digit_consumed: false,
         index_ready: false,
         files_mode: false,
+        file_query_generation: 0,
+        file_results: Vec::new(),
         menu: None,
         pinned: Default::default(),
         cursor: Default::default(),

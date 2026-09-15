@@ -63,7 +63,7 @@ pub fn apply_boosts(
     now: i64,
     pinned: &HashSet<String>,
 ) {
-    let mut keyed: Vec<(i32, i32, SearchResult)> = Vec::with_capacity(hits.len());
+    let mut keyed: Vec<(i32, i32, String, SearchResult)> = Vec::with_capacity(hits.len());
     for hit in hits.iter() {
         let base = hit.score;
         let tier = quality_tier(base);
@@ -83,11 +83,15 @@ pub fn apply_boosts(
         } else if boost > 0 {
             hit.matched_by = format!("{}+history", hit.matched_by);
         }
-        keyed.push((tier, hit.score, hit));
+        keyed.push((tier, hit.score, hit.item.id.clone(), hit));
     }
     // 同层内按加分后分数降序；层号小 = 质量高，优先
-    keyed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
-    for (slot, (_, _, hit)) in hits.iter_mut().zip(keyed.into_iter()) {
+    keyed.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    for (slot, (_, _, _, hit)) in hits.iter_mut().zip(keyed.into_iter()) {
         *slot = hit;
     }
 }
@@ -379,5 +383,29 @@ mod tests {
         assert!(quality_tier(SCORE_NAME_EXACT) < quality_tier(SCORE_PREFIX));
         assert!(quality_tier(SCORE_PREFIX) < quality_tier(SCORE_SUBSTRING));
         assert!(quality_tier(SCORE_SUBSTRING) < quality_tier(SCORE_FUZZY_MAX / 2));
+    }
+
+    #[test]
+    fn equal_history_scores_have_a_stable_order() {
+        let mut forward = vec![hit("b"), hit("a")];
+        let mut reverse = vec![hit("a"), hit("b")];
+        for hits in [&mut forward, &mut reverse] {
+            apply_boosts(
+                hits,
+                HashMap::new(),
+                HashMap::new(),
+                "q",
+                1,
+                &HashSet::new(),
+            );
+        }
+
+        let ids = |hits: &[SearchResult]| {
+            hits.iter()
+                .map(|hit| hit.item.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&forward), ids(&reverse));
+        assert_eq!(ids(&forward), vec!["a".to_string(), "b".to_string()]);
     }
 }

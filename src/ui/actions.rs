@@ -3,11 +3,8 @@
 use super::*;
 
 /// 上下文菜单动作。
-pub(super) fn menu_action(state: &mut State, i: usize, action: MenuAction) -> Task<Message> {
+pub(super) fn menu_action(state: &mut State, item: AppItem, action: MenuAction) -> Task<Message> {
     state.menu = None;
-    let Some(item) = state.results.get(i).map(|r| r.item.clone()) else {
-        return Task::none();
-    };
     match action {
         MenuAction::OpenFolder => {
             let r = app::actions::open_containing_folder(&item.target);
@@ -207,6 +204,7 @@ pub(super) fn hide(state: &mut State) {
     state.alt_digit_consumed = false;
     state.menu = None;
     state.query.clear();
+    state.request_file_search();
     state.refresh_results();
 }
 

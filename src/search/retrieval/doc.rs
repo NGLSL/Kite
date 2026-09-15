@@ -397,7 +397,7 @@ impl RetrievalIndex {
         let mut ctx = QueryContext::build(&q, self);
         let candidates = super::channels::collect(self, &q, user_targets);
         let mut scored = super::verify::verify_all(self, &candidates, &mut ctx, user_targets);
-        scored.sort_by(|a, b| b.score.cmp(&a.score));
+        scored.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.doc_id.cmp(&b.doc_id)));
         // 排序前不物化全部候选：只克隆可能进入 Top K 的窗口
         const FRIENDLY_DISCOUNT_SLACK: i32 = 220;
         let threshold = scored

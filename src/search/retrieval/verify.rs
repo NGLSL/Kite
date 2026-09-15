@@ -125,7 +125,9 @@ pub fn verify_all(
     user_targets: &[UserTarget],
 ) -> Vec<ScoredHit> {
     let mut hits = Vec::new();
-    for &id in &candidates.ids {
+    let mut candidate_ids: Vec<_> = candidates.ids.iter().copied().collect();
+    candidate_ids.sort_unstable();
+    for id in candidate_ids {
         let Some(doc) = index.doc(id) else { continue };
         if let Some((score, matched_by)) = verify_one(doc, ctx, user_targets) {
             hits.push(ScoredHit {
@@ -499,6 +501,7 @@ pub fn reference_search(
         b.0.cmp(&a.0)
             .then_with(|| a.1.cmp(&b.1))
             .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| a.3.cmp(&b.3))
     });
     hits.truncate(max_results);
     hits.into_iter()

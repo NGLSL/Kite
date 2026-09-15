@@ -66,12 +66,13 @@ fn hit_under_friendly_dir(target: &str, dirs: &HashSet<String>) -> bool {
 
 pub fn rank_and_truncate(hits: Vec<SearchResult>, top_n: usize) -> Vec<SearchResult> {
     // 先生成小写键再排序：比较器里不做 to_lowercase，避免 O(n log n) 次分配
-    let mut keyed: Vec<(i32, usize, String, SearchResult)> = hits
+    let mut keyed: Vec<(i32, usize, String, String, SearchResult)> = hits
         .into_iter()
         .map(|h| {
             let lower = h.item.name.to_lowercase();
             let len = h.item.name.len();
-            (h.score, len, lower, h)
+            let id = h.item.id.clone();
+            (h.score, len, lower, id, h)
         })
         .collect();
     keyed.sort_by(|a, b| {
@@ -79,9 +80,10 @@ pub fn rank_and_truncate(hits: Vec<SearchResult>, top_n: usize) -> Vec<SearchRes
             // 同分：短名优先（更精确）
             .then_with(|| a.1.cmp(&b.1))
             .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| a.3.cmp(&b.3))
     });
     keyed.truncate(top_n);
-    keyed.into_iter().map(|(_, _, _, h)| h).collect()
+    keyed.into_iter().map(|(_, _, _, _, h)| h).collect()
 }
 
 fn normalize_windows_path(path: &str) -> String {
@@ -95,5 +97,40 @@ pub fn fuzzy_score(distance: usize) -> i32 {
         1 => 400,
         2 => 280,
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::AppItem;
+
+    fn tied_hit(id: &str) -> SearchResult {
+        SearchResult {
+            item: AppItem::scanned(
+                id.to_string(),
+                "Same name".to_string(),
+                format!(r"C:\{id}.exe"),
+                None,
+                None,
+                "start-menu",
+            ),
+            score: 500,
+            matched_by: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn equal_scores_have_a_stable_order_independent_of_input_order() {
+        let forward = rank_and_truncate(vec![tied_hit("b"), tied_hit("a")], 10);
+        let reverse = rank_and_truncate(vec![tied_hit("a"), tied_hit("b")], 10);
+        let ids = |hits: &[SearchResult]| {
+            hits.iter()
+                .map(|hit| hit.item.id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(ids(&forward), ids(&reverse));
+        assert_eq!(ids(&forward), vec!["a".to_string(), "b".to_string()]);
     }
 }

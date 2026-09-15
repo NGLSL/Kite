@@ -113,6 +113,8 @@ enum Message {
     LaunchIndex(usize),
     /// 「文件」胶囊开关（css .files-toggle）。
     ToggleFiles,
+    /// 后台 Everything 查询完成；代际和查询文本用于丢弃过期结果。
+    FileSearchReady(u64, String, Vec<SearchResult>, u128),
     /// 托盘菜单：重新扫描应用。
     Rescan,
     /// 托盘菜单：退出。
@@ -124,7 +126,8 @@ enum Message {
     /// 右键第 i 行：打开上下文菜单（css .ctx-menu）。
     ContextMenu(usize),
     /// 上下文菜单动作。
-    MenuAction(usize, MenuAction),
+    /// 右键动作携带点击时的条目快照，避免后台刷新后同一行号指向另一项。
+    MenuAction(AppItem, MenuAction),
     /// 按住拖拽窗口（css data-tauri-drag-region）。
     DragWindow,
     // ── 设置页 ──
@@ -168,9 +171,6 @@ enum Message {
     HotkeyUnavailable(String),
     /// 快捷键线程确认本次改键是否真正注册成功。
     HotkeyRegistrationResult(String, Result<(), String>),
-    IndexReady(usize),
-    IconsFilled(usize),
-    UwpMerged(usize),
     /// 后台完整扫描完成并已原子替换快照。
     FullIndexReady(usize),
 }
@@ -206,8 +206,10 @@ struct State {
     alt_digit_consumed: bool,
     index_ready: bool,
     files_mode: bool,
-    /// 右键菜单：(结果下标, x, y)。
-    menu: Option<(usize, f32, f32)>,
+    file_query_generation: u64,
+    file_results: Vec<SearchResult>,
+    /// 右键菜单：(点击时的条目快照, x, y)。
+    menu: Option<(AppItem, f32, f32)>,
     pinned: std::collections::HashSet<String>,
     /// 最新光标（窗口逻辑坐标；Cell 写入不参与视图比较）。
     cursor: std::rc::Rc<std::cell::Cell<iced::Point>>,

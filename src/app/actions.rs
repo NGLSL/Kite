@@ -3,6 +3,10 @@
 
 use std::path::Path;
 
+fn explorer_select_args(target: &Path) -> Vec<std::ffi::OsString> {
+    vec!["/select,".into(), target.as_os_str().to_owned()]
+}
+
 /// 非文件系统目标前缀（UWP / 系统设置 URI / 内置动作）。
 const NON_FS_PREFIXES: &[&str] = &[
     "shell:",
@@ -38,8 +42,8 @@ pub fn open_containing_folder(target: &str) -> Result<(), String> {
         // 打开目录：ShellExecute 同源能力（与启动逻辑一致）
         super::uwp::launch_shell_path(t)
     } else {
-        Command::new("explorer")
-            .arg(format!("/select,{t}"))
+        Command::new("explorer.exe")
+            .args(explorer_select_args(path))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -69,5 +73,15 @@ mod tests {
         assert!(!has_fs_target("http://example.com"));
         assert!(!has_fs_target(""));
         assert!(!has_fs_target("   "));
+    }
+
+    #[test]
+    fn explorer_select_switch_and_path_are_separate_arguments() {
+        let path = Path::new(r"C:\Program Files\Kite\kite.exe");
+        let args = explorer_select_args(path);
+
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "/select,");
+        assert_eq!(args[1], path.as_os_str());
     }
 }
