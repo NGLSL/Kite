@@ -186,10 +186,7 @@ pub fn search_files(query: &str, max: usize) -> Vec<EverythingHit> {
             if name.is_empty() {
                 continue;
             }
-            let full = format!(
-                "{}\\{name}",
-                dir.trim_end_matches(['\\', '/'])
-            );
+            let full = format!("{}\\{name}", dir.trim_end_matches(['\\', '/']));
             hits.push(EverythingHit {
                 path: full,
                 is_folder: (sdk.is_folder)(i) != 0,
@@ -242,7 +239,9 @@ mod tests {
         // 末个交给系统搜索顺序
         assert_eq!(cands.last().unwrap().parent(), Some(Path::new("")));
         // 含编译期 crate 目录兜底
-        assert!(cands.iter().any(|p| p.starts_with(env!("CARGO_MANIFEST_DIR"))));
+        assert!(cands
+            .iter()
+            .any(|p| p.starts_with(env!("CARGO_MANIFEST_DIR"))));
     }
 
     /// 真实 IPC 冒烟：按与运行时一致的布局加载仓库内捆绑的 DLL 查询一次。

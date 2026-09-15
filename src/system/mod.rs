@@ -3,8 +3,8 @@
 
 pub mod autostart;
 pub mod browsers;
-pub mod env;
 pub mod elevation;
+pub mod env;
 pub mod everything;
 pub mod hotkey;
 pub mod icons;

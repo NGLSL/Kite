@@ -68,7 +68,12 @@ impl HistoryDb {
 
     /// 记录一次启动；`query_norm` 为空则只记 Usage，不记 Query History。
     /// 用户暂停记录时整体跳过（设置读取一次，SQLite 本地读开销可忽略）。
-    pub fn record_launch(&mut self, item_id: &str, query_norm: &str, now: i64) -> rusqlite::Result<()> {
+    pub fn record_launch(
+        &mut self,
+        item_id: &str,
+        query_norm: &str,
+        now: i64,
+    ) -> rusqlite::Result<()> {
         if !self.history_recording_enabled() {
             return Ok(());
         }
@@ -154,8 +159,10 @@ impl HistoryDb {
                    last_used_at = max(usage_history.last_used_at, excluded.last_used_at)",
                 params![new_id, count, last],
             )?;
-            self.conn
-                .execute("DELETE FROM usage_history WHERE item_id = ?1", params![old_id])?;
+            self.conn.execute(
+                "DELETE FROM usage_history WHERE item_id = ?1",
+                params![old_id],
+            )?;
         }
 
         // query_history：按 (query, item_id) 合并
@@ -164,7 +171,11 @@ impl HistoryDb {
                 "SELECT query, count, last_used_at FROM query_history WHERE item_id = ?1",
             )?;
             let rows = stmt.query_map(params![old_id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
             })?;
             rows.filter_map(|r| r.ok()).collect()
         };
@@ -179,8 +190,10 @@ impl HistoryDb {
                 params![query, new_id, count, last],
             )?;
         }
-        self.conn
-            .execute("DELETE FROM query_history WHERE item_id = ?1", params![old_id])?;
+        self.conn.execute(
+            "DELETE FROM query_history WHERE item_id = ?1",
+            params![old_id],
+        )?;
 
         // pin：只改 id，保留 pinned_at
         let pinned: Option<i64> = self
@@ -237,7 +250,9 @@ impl HistoryDb {
             }
         }
         if migrated > 0 {
-            crate::log::info(&format!("migrated {migrated} legacy item ids to stable ids"));
+            crate::log::info(&format!(
+                "migrated {migrated} legacy item ids to stable ids"
+            ));
         }
         migrated
     }
@@ -257,7 +272,11 @@ impl HistoryDb {
     }
 
     /// 批量取 Query→App 配对；缺行即无历史（不进结果表）。
-    pub fn query_pair_snapshot(&self, query_norm: &str, ids: &[String]) -> HashMap<String, QueryPairStats> {
+    pub fn query_pair_snapshot(
+        &self,
+        query_norm: &str,
+        ids: &[String],
+    ) -> HashMap<String, QueryPairStats> {
         if ids.is_empty() || query_norm.is_empty() {
             return HashMap::new();
         }
@@ -316,7 +335,12 @@ mod tests {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(format!("{:?}", std::time::Instant::now()).as_bytes());
-        format!("{:x}", h.finalize()[..8].iter().fold(0u64, |a, b| (a << 8) | *b as u64))
+        format!(
+            "{:x}",
+            h.finalize()[..8]
+                .iter()
+                .fold(0u64, |a, b| (a << 8) | *b as u64)
+        )
     }
 
     #[test]
@@ -437,7 +461,10 @@ mod tests {
         db.record_launch("app-a", "aa", 100).unwrap();
         db.record_launch("app-b", "bb", 200).unwrap();
         db.clear_history().unwrap();
-        assert!(db.recent_ids(10).unwrap().is_empty(), "清空后最近使用应为空");
+        assert!(
+            db.recent_ids(10).unwrap().is_empty(),
+            "清空后最近使用应为空"
+        );
         let snap = db.usage_snapshot(&["app-a".into(), "app-b".into()]);
         assert!(snap.is_empty());
         let pairs = db.query_pair_snapshot("aa", &["app-a".into()]);
@@ -521,10 +548,7 @@ mod tests {
             legacy_item_id(t, None, "desktop"),
             legacy_item_id(t, None, "start-menu")
         );
-        assert_eq!(
-            stable_item_id(t, Some("-x")),
-            stable_item_id(t, Some("-x"))
-        );
+        assert_eq!(stable_item_id(t, Some("-x")), stable_item_id(t, Some("-x")));
         assert_ne!(stable_item_id(t, None), stable_item_id(t, Some("-x")));
     }
 }

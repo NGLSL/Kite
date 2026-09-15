@@ -26,7 +26,10 @@ pub fn split_camel(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     for (i, &ch) in chars.iter().enumerate() {
-        if ch.is_uppercase() && !cur.is_empty() && chars.get(i + 1).is_some_and(|n| n.is_lowercase()) {
+        if ch.is_uppercase()
+            && !cur.is_empty()
+            && chars.get(i + 1).is_some_and(|n| n.is_lowercase())
+        {
             out.push(std::mem::take(&mut cur).to_lowercase());
         }
         if ch.is_alphanumeric() {

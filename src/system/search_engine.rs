@@ -26,14 +26,12 @@ pub fn detect_search_template(browser_id: &str) -> Option<String> {
 fn detect_search_template_uncached(browser_id: &str) -> Option<String> {
     let local = std::env::var("LOCALAPPDATA").ok()?;
     let pref = match browser_id {
-        "chrome" => PathBuf::from(&local)
-            .join(r"Google\Chrome\User Data\Default\Preferences"),
-        "edge" => PathBuf::from(&local)
-            .join(r"Microsoft\Edge\User Data\Default\Preferences"),
-        "brave" => PathBuf::from(&local)
-            .join(r"BraveSoftware\Brave-Browser\User Data\Default\Preferences"),
-        "vivaldi" => PathBuf::from(&local)
-            .join(r"Vivaldi\User Data\Default\Preferences"),
+        "chrome" => PathBuf::from(&local).join(r"Google\Chrome\User Data\Default\Preferences"),
+        "edge" => PathBuf::from(&local).join(r"Microsoft\Edge\User Data\Default\Preferences"),
+        "brave" => {
+            PathBuf::from(&local).join(r"BraveSoftware\Brave-Browser\User Data\Default\Preferences")
+        }
+        "vivaldi" => PathBuf::from(&local).join(r"Vivaldi\User Data\Default\Preferences"),
         _ => return None,
     };
     let text = std::fs::read_to_string(pref).ok()?;
@@ -104,7 +102,10 @@ mod tests {
 
     #[test]
     fn apply_replaces() {
-        let u = apply_template("https://www.google.com/search?q={searchTerms}", "rust%20lang");
+        let u = apply_template(
+            "https://www.google.com/search?q={searchTerms}",
+            "rust%20lang",
+        );
         assert_eq!(u, "https://www.google.com/search?q=rust%20lang");
     }
 

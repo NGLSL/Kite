@@ -6,6 +6,7 @@ fn main() {
         res.set("ProductName", "Kite");
         res.set("FileDescription", "Kite Windows launcher");
         res.set("CompanyName", "Kite Contributors");
-        res.compile().expect("failed to embed Windows application icon");
+        res.compile()
+            .expect("failed to embed Windows application icon");
     }
 }

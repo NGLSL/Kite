@@ -17,9 +17,9 @@ use windows::Win32::Security::{
     TOKEN_DUPLICATE, TOKEN_ELEVATION, TOKEN_QUERY,
 };
 use windows::Win32::System::Threading::{
-    CreateProcessWithTokenW, GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_INFORMATION,
-    PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW, CREATE_UNICODE_ENVIRONMENT,
-    LOGON_WITH_PROFILE,
+    CreateProcessWithTokenW, GetCurrentProcess, OpenProcess, OpenProcessToken,
+    CREATE_UNICODE_ENVIRONMENT, LOGON_WITH_PROFILE, PROCESS_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId};
 
@@ -45,9 +45,7 @@ pub fn relaunch_if_elevated() -> Result<bool, String> {
     }
 
     if has_marker {
-        crate::log::info(
-            "de-elevation child is still elevated; skip another relaunch attempt",
-        );
+        crate::log::info("de-elevation child is still elevated; skip another relaunch attempt");
         return Ok(false);
     }
 
@@ -70,9 +68,7 @@ fn is_elevated() -> Result<bool, String> {
 }
 
 fn has_deelevation_marker() -> bool {
-    if std::env::args_os()
-        .any(|arg| arg.to_string_lossy() == DEELEVATION_ATTEMPT_ARG)
-    {
+    if std::env::args_os().any(|arg| arg.to_string_lossy() == DEELEVATION_ATTEMPT_ARG) {
         return true;
     }
 
@@ -177,7 +173,10 @@ fn relaunch_from_explorer_token() -> Result<bool, String> {
         let executable = executable
             .to_str()
             .ok_or_else(|| "current executable path is not valid UTF-8".to_string())?;
-        let executable_wide: Vec<u16> = executable.encode_utf16().chain(std::iter::once(0)).collect();
+        let executable_wide: Vec<u16> = executable
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let mut command_line: Vec<u16> = format!("\"{executable}\" {DEELEVATION_ATTEMPT_ARG}")
             .encode_utf16()
             .chain(std::iter::once(0))
@@ -225,5 +224,4 @@ mod tests {
             r#""C:\Program Files\Kite\kite.exe" --other"#
         ));
     }
-
 }

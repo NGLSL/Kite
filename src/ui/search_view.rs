@@ -4,15 +4,12 @@
 use iced::widget::text_input;
 use iced::widget::{
     button, canvas, column, container, image, mouse_area, row, scrollable, space::Space, stack,
-    text, Id as WidgetId, Button, MouseArea, Scrollable,
+    text, Button, Id as WidgetId, MouseArea, Scrollable,
 };
-use iced::{
-    alignment, border, color, Background, Border, Color, Element, Length, Padding,
-    Theme,
-};
+use iced::{alignment, border, color, Background, Border, Color, Element, Length, Padding, Theme};
 
 use super::font::name_font;
-use super::{Message, MenuAction, State};
+use super::{MenuAction, Message, State};
 
 // ── 设计 token（global.css）──
 pub(crate) const BG_PANEL: Color = color!(0xFF_FF_FF);
@@ -86,8 +83,8 @@ fn divider() -> Element<'static, Message> {
 /// 搜索条（css .search-row）：padding 16/18、bg-elevated、底部 1px 分隔。
 /// 放大镜与顶部 6px 边缘是拖拽区（css data-tauri-drag-region 的对应实现）。
 fn search_row(state: &State) -> Element<'_, Message> {
-    let magnifier = mouse_area(canvas(Magnifier).width(20.0).height(20.0))
-        .on_press(Message::DragWindow);
+    let magnifier =
+        mouse_area(canvas(Magnifier).width(20.0).height(20.0)).on_press(Message::DragWindow);
     let input = text_input("搜索应用、网址，或直接输入关键词", &state.query)
         .id(input_id())
         .on_input(Message::QueryChanged)
@@ -105,33 +102,40 @@ fn search_row(state: &State) -> Element<'_, Message> {
         magnifier,
         input.width(Length::Fill),
         // css .files-toggle：Everything 文件搜索开关（胶囊）
-        button(text("文件").size(12.0).color(if state.files_mode { MARK } else { TEXT_MUTED }))
-            .padding([5.0, 10.0])
-            .on_press(Message::ToggleFiles)
-            .style(move |_t, _s| button::Style {
-                background: if state.files_mode {
-                    Some(Background::Color(Color { a: 0.12, ..MARK }))
+        button(
+            text("文件")
+                .size(12.0)
+                .color(if state.files_mode { MARK } else { TEXT_MUTED })
+        )
+        .padding([5.0, 10.0])
+        .on_press(Message::ToggleFiles)
+        .style(move |_t, _s| button::Style {
+            background: if state.files_mode {
+                Some(Background::Color(Color { a: 0.12, ..MARK }))
+            } else {
+                None
+            },
+            text_color: if state.files_mode { MARK } else { TEXT_MUTED },
+            border: Border {
+                color: if state.files_mode {
+                    Color { a: 0.45, ..MARK }
                 } else {
-                    None
+                    BORDER
                 },
-                text_color: if state.files_mode { MARK } else { TEXT_MUTED },
-                border: Border {
-                    color: if state.files_mode {
-                        Color { a: 0.45, ..MARK }
-                    } else {
-                        BORDER
-                    },
-                    width: 1.0,
-                    radius: border::radius(999.0),
-                },
-                ..button::Style::default()
-            }),
+                width: 1.0,
+                radius: border::radius(999.0),
+            },
+            ..button::Style::default()
+        }),
     ]
     .spacing(12)
     .align_y(alignment::Alignment::Center);
     if !state.query.is_empty() {
         let clear: Button<Message> = button(
-            text("×").size(18.0).color(TEXT_MUTED).align_x(alignment::Alignment::Center),
+            text("×")
+                .size(18.0)
+                .color(TEXT_MUTED)
+                .align_x(alignment::Alignment::Center),
         )
         .padding([4.0, 7.0])
         .on_press(Message::ClearQuery)
@@ -141,7 +145,11 @@ fn search_row(state: &State) -> Element<'_, Message> {
             } else {
                 None
             },
-            text_color: if status == button::Status::Hovered { TEXT } else { TEXT_MUTED },
+            text_color: if status == button::Status::Hovered {
+                TEXT
+            } else {
+                TEXT_MUTED
+            },
             border: Border::default().rounded(6.0),
             ..button::Style::default()
         });
@@ -157,8 +165,8 @@ fn search_row(state: &State) -> Element<'_, Message> {
         });
 
     // 顶部 6px 拖拽条（叠在搜索条上缘）
-    let drag_strip = mouse_area(Space::new().width(Length::Fill).height(6.0))
-        .on_press(Message::DragWindow);
+    let drag_strip =
+        mouse_area(Space::new().width(Length::Fill).height(6.0)).on_press(Message::DragWindow);
 
     stack![styled, drag_strip].into()
 }
@@ -268,13 +276,13 @@ fn item_row<'a>(
 
     // 左侧 3px 高亮条（css .item.active::before，上下缩进 10px）；非选中为空占位
     let bar: Element<'_, Message> = if active {
-        container(container(Space::new().width(3.0).height(32.0)).style(|_t: &Theme| {
-            container::Style {
+        container(
+            container(Space::new().width(3.0).height(32.0)).style(|_t: &Theme| container::Style {
                 background: Some(Background::Color(MARK)),
                 border: Border::default().rounded(2.0),
                 ..container::Style::default()
-            }
-        }))
+            }),
+        )
         .width(Length::Fill)
         .height(Length::Fill)
         .align_x(alignment::Alignment::Start)
@@ -288,11 +296,24 @@ fn item_row<'a>(
         container(content)
             .width(Length::Fill)
             .height(52.0)
-            .padding(Padding { top: 8.0, right: 12.0, bottom: 8.0, left: 14.0 })
+            .padding(Padding {
+                top: 8.0,
+                right: 12.0,
+                bottom: 8.0,
+                left: 14.0
+            })
             .style(move |_t| container::Style {
-                background: Some(Background::Color(if active { ACCENT_BG } else { Color::TRANSPARENT })),
+                background: Some(Background::Color(if active {
+                    ACCENT_BG
+                } else {
+                    Color::TRANSPARENT
+                })),
                 border: Border {
-                    color: if active { Color { a: 0.18, ..MARK } } else { Color::TRANSPARENT },
+                    color: if active {
+                        Color { a: 0.18, ..MARK }
+                    } else {
+                        Color::TRANSPARENT
+                    },
                     width: 1.0,
                     radius: border::radius(10.0),
                 },
@@ -356,8 +377,8 @@ fn menu_overlay(state: &State, idx: usize, x: f32, y: f32) -> Element<'_, Messag
     let Some(r) = state.results.get(idx) else {
         return Space::new().into();
     };
-    let target_is_fs =
-        std::path::Path::new(&r.item.target).is_file() || std::path::Path::new(&r.item.target).is_dir();
+    let target_is_fs = std::path::Path::new(&r.item.target).is_file()
+        || std::path::Path::new(&r.item.target).is_dir();
     let pinned = state.pinned.contains(&r.item.id);
 
     let mut entries: Vec<(&'static str, MenuAction)> = Vec::new();
@@ -384,7 +405,11 @@ fn menu_overlay(state: &State, idx: usize, x: f32, y: f32) -> Element<'_, Messag
                     } else {
                         None
                     },
-                    text_color: if status == button::Status::Hovered { MARK } else { TEXT },
+                    text_color: if status == button::Status::Hovered {
+                        MARK
+                    } else {
+                        TEXT
+                    },
                     border: Border::default().rounded(7.0),
                     ..button::Style::default()
                 }),
@@ -409,7 +434,12 @@ fn menu_overlay(state: &State, idx: usize, x: f32, y: f32) -> Element<'_, Messag
         .height(Length::Fill)
         .align_x(alignment::Alignment::Start)
         .align_y(alignment::Alignment::Start)
-        .padding(Padding { top: y, left: x, right: 0.0, bottom: 0.0 })
+        .padding(Padding {
+            top: y,
+            left: x,
+            right: 0.0,
+            bottom: 0.0,
+        })
         .into()
 }
 

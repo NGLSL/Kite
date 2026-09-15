@@ -177,7 +177,11 @@ mod tests {
         cache.save();
 
         let mut again = ScanCache::load(&dir);
-        assert_eq!(again.lookup(&lnk).as_ref(), Some(&resolved()), "未变化应命中");
+        assert_eq!(
+            again.lookup(&lnk).as_ref(),
+            Some(&resolved()),
+            "未变化应命中"
+        );
         assert_eq!(again.hits, 1);
         let _ = std::fs::remove_dir_all(&dir);
     }

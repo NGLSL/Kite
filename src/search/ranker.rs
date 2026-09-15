@@ -33,7 +33,10 @@ use std::path::Path;
 const RAW_APP_PATH_DISCOUNT: i32 = SCORE_NAME_EXACT - SCORE_PREFIX + 1;
 
 pub fn prefer_friendly_install_entries(hits: &mut [SearchResult]) {
-    let dirs = friendly_dirs_from(hits.iter().map(|h| (h.item.source.as_str(), &h.item.target)));
+    let dirs = friendly_dirs_from(
+        hits.iter()
+            .map(|h| (h.item.source.as_str(), &h.item.target)),
+    );
     for hit in hits.iter_mut().filter(|h| h.item.source == "app-paths") {
         if hit_under_friendly_dir(&hit.item.target, &dirs) {
             hit.score -= RAW_APP_PATH_DISCOUNT;
@@ -41,9 +44,7 @@ pub fn prefer_friendly_install_entries(hits: &mut [SearchResult]) {
     }
 }
 
-fn friendly_dirs_from<'a>(
-    items: impl Iterator<Item = (&'a str, &'a String)>,
-) -> HashSet<String> {
+fn friendly_dirs_from<'a>(items: impl Iterator<Item = (&'a str, &'a String)>) -> HashSet<String> {
     items
         .filter(|(source, _)| matches!(*source, "start-menu" | "desktop"))
         .filter_map(|(_, target)| Path::new(target).parent())

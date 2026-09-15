@@ -128,10 +128,7 @@ fn evaluate_case(apps: &[AppItem], case: &Case) -> CaseOutcome {
         None => 1.0,
     };
 
-    let forbidden_violated = case
-        .forbidden_top
-        .iter()
-        .any(|f| top == Some(f.as_str()));
+    let forbidden_violated = case.forbidden_top.iter().any(|f| top == Some(f.as_str()));
 
     CaseOutcome {
         id: case.id.clone(),
@@ -232,8 +229,8 @@ fn print_report(label: &str, metrics: &Metrics, outcomes: &[CaseOutcome]) {
 
 fn load_cases() -> CasesFile {
     let path = cases_path();
-    let raw = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
 }
 

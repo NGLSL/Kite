@@ -8,7 +8,7 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::UI::Shell::{
-    ApplicationActivationManager, IApplicationActivationManager, AO_NONE, ShellExecuteW,
+    ApplicationActivationManager, IApplicationActivationManager, ShellExecuteW, AO_NONE,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
@@ -64,7 +64,11 @@ fn shell_working_dir(target: &str) -> Option<Vec<u16>> {
 pub fn launch_runas(target: &str, args: &str, working_dir: Option<&Path>) -> Result<(), String> {
     let verb = wide("runas");
     let file = wide(target);
-    let params = if args.is_empty() { None } else { Some(wide(args)) };
+    let params = if args.is_empty() {
+        None
+    } else {
+        Some(wide(args))
+    };
     let dir = working_dir.map(|d| wide(&d.to_string_lossy()));
     let code = unsafe {
         ShellExecuteW(
@@ -152,7 +156,10 @@ mod tests {
 
     #[test]
     fn non_terminal_aumid_gets_no_args() {
-        assert_eq!(activation_args("Microsoft.WindowsStore_8wekyb3d8bbwe!App"), "");
+        assert_eq!(
+            activation_args("Microsoft.WindowsStore_8wekyb3d8bbwe!App"),
+            ""
+        );
         assert_eq!(activation_args(""), "");
     }
 

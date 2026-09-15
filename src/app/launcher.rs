@@ -72,9 +72,11 @@ pub fn launch(item: &AppItem) -> Result<(), String> {
         Ok(_) => Ok(()),
         // requireAdministrator 清单的程序：CreateProcess 无法触发 UAC（os error 740），
         // 退回 ShellExecute("runas") 弹授权框，与资源管理器双击行为一致
-        Err(e) if elevation_required(&e) => {
-            super::uwp::launch_runas(target, item.args.as_deref().unwrap_or(""), working_dir.as_deref())
-        }
+        Err(e) if elevation_required(&e) => super::uwp::launch_runas(
+            target,
+            item.args.as_deref().unwrap_or(""),
+            working_dir.as_deref(),
+        ),
         Err(e) => Err(format!("spawn failed: {e}")),
     }
 }
@@ -116,12 +118,18 @@ mod tests {
     #[test]
     fn env_vars_in_working_dir_are_expanded() {
         // lnk 起始位置常见 %HOMEDRIVE%%HOMEPATH% 这类未展开引用
-        assert_eq!(resolve_working_dir(Some("%TEMP%")), Some(std::env::temp_dir()));
+        assert_eq!(
+            resolve_working_dir(Some("%TEMP%")),
+            Some(std::env::temp_dir())
+        );
     }
 
     #[test]
     fn expand_env_keeps_unknown_var() {
-        assert_eq!(expand_env(r"%KITE_NO_SUCH_VAR_9%\x"), r"%KITE_NO_SUCH_VAR_9%\x");
+        assert_eq!(
+            expand_env(r"%KITE_NO_SUCH_VAR_9%\x"),
+            r"%KITE_NO_SUCH_VAR_9%\x"
+        );
     }
 
     #[test]
@@ -136,7 +144,8 @@ mod tests {
     fn launch_without_working_dir_starts_in_home() {
         let out = std::env::temp_dir().join(format!("kite-cwd-cmd-{}.txt", std::process::id()));
         let _ = std::fs::remove_file(&out);
-        let cmd_path = std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into());
+        let cmd_path =
+            std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into());
         let item = AppItem::scanned(
             "cwd-test".into(),
             "cmd".into(),
@@ -156,7 +165,10 @@ mod tests {
                 assert_eq!(cwd, home_str, "cmd 初始 cwd 应为用户主目录");
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "cmd 未在期限内写出 cwd");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cmd 未在期限内写出 cwd"
+            );
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         let _ = std::fs::remove_file(&out);
@@ -164,10 +176,7 @@ mod tests {
 
     #[test]
     fn launch_preserves_quoted_shortcut_arguments() {
-        let out = std::env::temp_dir().join(format!(
-            "kite quoted args {}.txt",
-            std::process::id()
-        ));
+        let out = std::env::temp_dir().join(format!("kite quoted args {}.txt", std::process::id()));
         let _ = std::fs::remove_file(&out);
         let cmd_path =
             std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into());

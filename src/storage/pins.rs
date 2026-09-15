@@ -33,10 +33,8 @@ impl HistoryDb {
     }
 
     pub fn unpin_item(&mut self, item_id: &str) -> rusqlite::Result<()> {
-        self.conn_mut().execute(
-            "DELETE FROM pinned WHERE item_id = ?1",
-            params![item_id],
-        )?;
+        self.conn_mut()
+            .execute("DELETE FROM pinned WHERE item_id = ?1", params![item_id])?;
         Ok(())
     }
 
@@ -74,7 +72,10 @@ mod tests {
         db.pin_item("app-a", 100).unwrap();
         db.pin_item("app-b", 200).unwrap();
         // 最近固定的在前
-        assert_eq!(db.pinned_ids(), vec!["app-b".to_string(), "app-a".to_string()]);
+        assert_eq!(
+            db.pinned_ids(),
+            vec!["app-b".to_string(), "app-a".to_string()]
+        );
 
         db.unpin_item("app-b").unwrap();
         assert_eq!(db.pinned_ids(), vec!["app-a".to_string()]);
@@ -89,7 +90,10 @@ mod tests {
         db.pin_item("app-a", 100).unwrap();
         db.pin_item("app-b", 200).unwrap();
         db.pin_item("app-a", 300).unwrap();
-        assert_eq!(db.pinned_ids(), vec!["app-a".to_string(), "app-b".to_string()]);
+        assert_eq!(
+            db.pinned_ids(),
+            vec!["app-a".to_string(), "app-b".to_string()]
+        );
     }
 
     #[test]

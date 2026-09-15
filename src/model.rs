@@ -103,8 +103,7 @@ impl AppIndex {
 
     /// 用当前 apps + system_entries 重建检索索引并发布。
     pub fn rebuild_retrieval(&mut self) {
-        let index =
-            crate::search::RetrievalIndex::build(&self.apps, &self.system_entries);
+        let index = crate::search::RetrievalIndex::build(&self.apps, &self.system_entries);
         self.retrieval = Some(std::sync::Arc::new(index));
     }
 }

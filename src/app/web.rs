@@ -38,13 +38,22 @@ pub fn parse_id(id: &str) -> Option<(String, String, String)> {
 }
 
 /// 组装「用浏览器打开」结果列表：偏好优先，其后为其余已安装浏览器 + 系统默认。
-pub fn build_hits(url: &str, preferred: Option<&str>, icon_dir: &std::path::Path) -> Vec<SearchResult> {
+pub fn build_hits(
+    url: &str,
+    preferred: Option<&str>,
+    icon_dir: &std::path::Path,
+) -> Vec<SearchResult> {
     let installed = browsers::sort_preferred(browsers::discover_installed(), preferred);
     let mut hits = Vec::with_capacity(installed.len() + 2);
 
     // 偏好或第一项分最高，其余略低但仍高于普通应用
     for (i, b) in installed.iter().enumerate() {
-        hits.push(browser_hit(b, url, if i == 0 { 980 } else { 960 }, icon_dir));
+        hits.push(browser_hit(
+            b,
+            url,
+            if i == 0 { 980 } else { 960 },
+            icon_dir,
+        ));
     }
 
     hits.push(default_hit(url));
@@ -97,7 +106,13 @@ pub fn build_search_hits(
     let installed = browsers::sort_preferred(browsers::discover_installed(), preferred);
     let mut hits = Vec::with_capacity(installed.len() + 1);
     for (i, b) in installed.iter().enumerate() {
-        hits.push(search_hit(b, q, if i == 0 { 920 } else { 900 }, icon_dir, url_template));
+        hits.push(search_hit(
+            b,
+            q,
+            if i == 0 { 920 } else { 900 },
+            icon_dir,
+            url_template,
+        ));
     }
     hits.push(default_search_hit(q, url_template));
     hits
@@ -149,11 +164,7 @@ fn default_search_hit(query: &str, url_template: Option<&str>) -> SearchResult {
 }
 
 /// 生成搜索 URL：缓存模板 → 浏览器偏好探测 → 中文百度/英文 Bing。
-pub fn resolve_search_url(
-    cached_template: Option<&str>,
-    browser_id: &str,
-    query: &str,
-) -> String {
+pub fn resolve_search_url(cached_template: Option<&str>, browser_id: &str, query: &str) -> String {
     let q = query.trim();
     let encoded = encode_query_component(q);
     if let Some(t) = cached_template.filter(|s| !s.is_empty()) {

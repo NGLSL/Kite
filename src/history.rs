@@ -71,7 +71,11 @@ pub fn apply_boosts(
         let u = usage.get(&hit.item.id).cloned().unwrap_or_default();
         let p = pairs.get(&hit.item.id).cloned().unwrap_or_default();
         let history = history_boost(query_norm, &u, &p, now);
-        let boost = if is_pinned { PIN_BOOST.max(history) } else { history };
+        let boost = if is_pinned {
+            PIN_BOOST.max(history)
+        } else {
+            history
+        };
         let mut hit = hit.clone();
         hit.score = base + boost;
         if is_pinned {
@@ -138,7 +142,14 @@ mod tests {
 
     fn hit(id: &str) -> SearchResult {
         SearchResult {
-            item: AppItem::scanned(id.into(), id.into(), format!("C:\\{id}.exe"), None, None, "t"),
+            item: AppItem::scanned(
+                id.into(),
+                id.into(),
+                format!("C:\\{id}.exe"),
+                None,
+                None,
+                "t",
+            ),
             score: 100,
             matched_by: "test".into(),
         }
@@ -147,7 +158,14 @@ mod tests {
     #[test]
     fn apply_boosts_missing_rows_are_zero() {
         let mut hits = vec![hit("a"), hit("b")];
-        apply_boosts(&mut hits, HashMap::new(), HashMap::new(), "q", 1, &HashSet::new());
+        apply_boosts(
+            &mut hits,
+            HashMap::new(),
+            HashMap::new(),
+            "q",
+            1,
+            &HashSet::new(),
+        );
         assert_eq!(hits[0].score, 100, "无历史记录 → 不加分");
         assert_eq!(hits[0].matched_by, "test");
     }
@@ -163,7 +181,14 @@ mod tests {
                 last_used_at: 1_000,
             },
         );
-        apply_boosts(&mut hits, usage, HashMap::new(), "q", 2_000, &HashSet::new());
+        apply_boosts(
+            &mut hits,
+            usage,
+            HashMap::new(),
+            "q",
+            2_000,
+            &HashSet::new(),
+        );
         assert!(hits[0].score > 100);
         assert!(hits[0].matched_by.ends_with("+history"));
     }
@@ -193,10 +218,7 @@ mod tests {
             last_used_at: 0,
         };
         let weak = QueryPairStats::default();
-        assert!(
-            history_boost("wx", &usage, &strong, 0)
-                > history_boost("wx", &usage, &weak, 0)
-        );
+        assert!(history_boost("wx", &usage, &strong, 0) > history_boost("wx", &usage, &weak, 0));
     }
 
     #[test]
@@ -210,9 +232,7 @@ mod tests {
             launch_count: 1,
             last_used_at: now - 30 * 86_400,
         };
-        assert!(
-            recency_score(fresh.last_used_at, now) > recency_score(old.last_used_at, now)
-        );
+        assert!(recency_score(fresh.last_used_at, now) > recency_score(old.last_used_at, now));
     }
 
     #[test]
@@ -221,7 +241,11 @@ mod tests {
         let pinned: HashSet<String> = ["b".to_string()].into_iter().collect();
         apply_boosts(&mut hits, HashMap::new(), HashMap::new(), "q", 1, &pinned);
         assert_eq!(hits[0].item.id, "b", "固定项在同层内应排到前面");
-        assert_eq!(hits[0].score, 100 + PIN_BOOST, "无历史时固定项获得 PIN_BOOST");
+        assert_eq!(
+            hits[0].score,
+            100 + PIN_BOOST,
+            "无历史时固定项获得 PIN_BOOST"
+        );
         assert!(hits[0].matched_by.ends_with("+pin"));
         assert_eq!(hits[1].item.id, "a");
         assert_eq!(hits[1].score, 100, "未固定不加分");
@@ -243,7 +267,8 @@ mod tests {
         apply_boosts(&mut hits, usage, HashMap::new(), "q", 1, &pinned);
         assert!(
             hits[0].score <= 100 + PIN_BOOST,
-            "固定+历史叠加后得分 {} 超过上限", hits[0].score
+            "固定+历史叠加后得分 {} 超过上限",
+            hits[0].score
         );
     }
 
@@ -258,7 +283,14 @@ mod tests {
     #[test]
     fn pin_boost_empty_set_noop() {
         let mut hits = vec![hit("a")];
-        apply_boosts(&mut hits, HashMap::new(), HashMap::new(), "q", 1, &HashSet::new());
+        apply_boosts(
+            &mut hits,
+            HashMap::new(),
+            HashMap::new(),
+            "q",
+            1,
+            &HashSet::new(),
+        );
         assert_eq!(hits[0].score, 100);
         assert_eq!(hits[0].matched_by, "test");
     }
@@ -287,7 +319,14 @@ mod tests {
             },
         );
         let mut hits = vec![weak, strong];
-        apply_boosts(&mut hits, usage, pairs, "ter", 1_700_086_400, &HashSet::new());
+        apply_boosts(
+            &mut hits,
+            usage,
+            pairs,
+            "ter",
+            1_700_086_400,
+            &HashSet::new(),
+        );
         assert_eq!(
             hits[0].item.id, "strong",
             "更高基础相关性的 word-prefix 不得被弱 substring+历史压过"
@@ -318,13 +357,25 @@ mod tests {
             },
         );
         let mut hits = vec![b, a];
-        apply_boosts(&mut hits, usage, pairs, "ter", 1_700_086_400, &HashSet::new());
-        assert_eq!(hits[0].item.id, "xterminal", "同层内历史应把更常用项提到前面");
+        apply_boosts(
+            &mut hits,
+            usage,
+            pairs,
+            "ter",
+            1_700_086_400,
+            &HashSet::new(),
+        );
+        assert_eq!(
+            hits[0].item.id, "xterminal",
+            "同层内历史应把更常用项提到前面"
+        );
     }
 
     #[test]
     fn quality_tier_orders_exact_before_fuzzy() {
-        use crate::search::ranker::{SCORE_FUZZY_MAX, SCORE_NAME_EXACT, SCORE_PREFIX, SCORE_SUBSTRING};
+        use crate::search::ranker::{
+            SCORE_FUZZY_MAX, SCORE_NAME_EXACT, SCORE_PREFIX, SCORE_SUBSTRING,
+        };
         assert!(quality_tier(SCORE_NAME_EXACT) < quality_tier(SCORE_PREFIX));
         assert!(quality_tier(SCORE_PREFIX) < quality_tier(SCORE_SUBSTRING));
         assert!(quality_tier(SCORE_SUBSTRING) < quality_tier(SCORE_FUZZY_MAX / 2));

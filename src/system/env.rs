@@ -208,8 +208,7 @@ mod tests {
             Some(r"C:\Users\x\bin;c:\A"),
         );
         assert_eq!(
-            merged,
-            r"C:\a;C:\b;C:\Windows\System32;C:\Users\x\bin",
+            merged, r"C:\a;C:\b;C:\Windows\System32;C:\Users\x\bin",
             "缺段按 机器→用户 追加,大小写不敏感去重"
         );
     }

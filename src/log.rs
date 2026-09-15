@@ -154,11 +154,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or_default();
-        std::env::temp_dir().join(format!(
-            "kite-log-{name}-{}-{}",
-            std::process::id(),
-            nonce
-        ))
+        std::env::temp_dir().join(format!("kite-log-{name}-{}-{}", std::process::id(), nonce))
     }
 
     #[test]
@@ -173,7 +169,10 @@ mod tests {
         let bytes = fs::read(&path).expect("read test log");
         assert!(bytes.len() <= 128);
         let text = String::from_utf8_lossy(&bytes);
-        assert!(text.contains("record-39"), "latest record must survive rotation");
+        assert!(
+            text.contains("record-39"),
+            "latest record must survive rotation"
+        );
         let _ = fs::remove_file(&path);
     }
 

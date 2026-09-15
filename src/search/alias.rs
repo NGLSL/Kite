@@ -205,7 +205,9 @@ mod tests {
     #[test]
     fn known_aliases_cover_domains() {
         // 各领域抽查一条，防止误删
-        for alias in ["vscode", "edge", "wt", "wps", "ai", "wyy", "steam", "7z", "snipaste"] {
+        for alias in [
+            "vscode", "edge", "wt", "wps", "ai", "wyy", "steam", "7z", "snipaste",
+        ] {
             assert!(targets_for(alias).is_some(), "缺别名 {alias}");
         }
     }

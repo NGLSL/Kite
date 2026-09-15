@@ -84,9 +84,9 @@ fn parse_release_json(body: &[u8], current: &str) -> Result<CheckResult, String>
     let installer = release.assets.into_iter().find_map(|asset| {
         if asset.name != "kite-setup.exe"
             || asset.size == 0
-            || !asset.browser_download_url.starts_with(
-                "https://github.com/NGLSL/Kite/releases/download/",
-            )
+            || !asset
+                .browser_download_url
+                .starts_with("https://github.com/NGLSL/Kite/releases/download/")
             || !asset.browser_download_url.ends_with("/kite-setup.exe")
         {
             return None;
@@ -172,7 +172,9 @@ fn verify_installer(path: &Path, asset: &InstallerAsset) -> Result<(), String> {
     let mut hasher = Sha256::new();
     let mut chunk = [0u8; 64 * 1024];
     loop {
-        let read = file.read(&mut chunk).map_err(|e| format!("安装包校验失败: {e}"))?;
+        let read = file
+            .read(&mut chunk)
+            .map_err(|e| format!("安装包校验失败: {e}"))?;
         if read == 0 {
             break;
         }
@@ -212,7 +214,13 @@ mod tests {
     #[test]
     fn missing_digest_requires_manual_download() {
         let result = parse_release_json(&release_json(""), "0.2.4").unwrap();
-        assert!(matches!(result, CheckResult::Available { installer: None, .. }));
+        assert!(matches!(
+            result,
+            CheckResult::Available {
+                installer: None,
+                ..
+            }
+        ));
     }
 
     #[test]

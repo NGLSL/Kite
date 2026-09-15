@@ -6,7 +6,7 @@ use std::path::Path;
 
 use windows::core::{Interface, PCWSTR};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, IPersistFile,
+    CoCreateInstance, CoInitializeEx, IPersistFile, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
     STGM_READ,
 };
 use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
@@ -14,7 +14,9 @@ use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 /// 将 .lnk 解析为 (target, args, working_dir, icon_src)。
 /// `icon_src` 为 `path,index`（index 可为负资源 ID）；路径为空时退回 target。
 /// 单文件失败/panic 不拖垮整次扫描。
-pub fn resolve_lnk(path: &Path) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
+pub fn resolve_lnk(
+    path: &Path,
+) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parse_lnk(path)));
     match result {
         Ok(v) => v,
@@ -25,9 +27,7 @@ pub fn resolve_lnk(path: &Path) -> Option<(String, Option<String>, Option<String
     }
 }
 
-fn parse_lnk(
-    path: &Path,
-) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
+fn parse_lnk(path: &Path) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
     unsafe {
         // 扫描线程可能未初始化 COM；重复调用返回 S_FALSE / RPC_E_CHANGED_MODE 可忽略
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -43,7 +43,8 @@ fn parse_lnk(
         persist.Load(PCWSTR(wide_path.as_ptr()), STGM_READ).ok()?;
 
         let mut target_buf = [0u16; 32_768];
-        link.GetPath(&mut target_buf, std::ptr::null_mut(), 0).ok()?;
+        link.GetPath(&mut target_buf, std::ptr::null_mut(), 0)
+            .ok()?;
         let target_raw = wide_to_string(&target_buf);
 
         let mut args_buf = [0u16; 4096];
@@ -98,7 +99,11 @@ fn wide_to_string(buf: &[u16]) -> String {
 }
 
 fn non_empty(s: String) -> Option<String> {
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 #[cfg(test)]
@@ -108,10 +113,7 @@ mod tests {
     #[test]
     fn icon_launch_fallback_expands_windir_and_strips_index() {
         let got = icon_launch_fallback(Some(r"%windir%\explorer.exe,0")).expect("explorer exists");
-        assert!(
-            got.to_lowercase().ends_with("explorer.exe"),
-            "got={got}"
-        );
+        assert!(got.to_lowercase().ends_with("explorer.exe"), "got={got}");
         assert!(!got.contains(','), "不应把资源序号写进 target");
     }
 

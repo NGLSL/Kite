@@ -137,6 +137,9 @@ fn report_search_latency() {
         // 索引构建耗时（快照发布路径，非每键）
         let t0 = Instant::now();
         let _ = super::RetrievalIndex::build(&apps, &[]);
-        println!("| {n} | index-build | (快照) | {} | | | |", t0.elapsed().as_micros());
+        println!(
+            "| {n} | index-build | (快照) | {} | | | |",
+            t0.elapsed().as_micros()
+        );
     }
 }

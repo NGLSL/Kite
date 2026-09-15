@@ -28,9 +28,7 @@ pub fn normalize_url(query: &str) -> Option<String> {
 }
 
 fn host_part(q: &str) -> Option<&str> {
-    let end = q
-        .find(['/', '?', '#'])
-        .unwrap_or(q.len());
+    let end = q.find(['/', '?', '#']).unwrap_or(q.len());
     let host = &q[..end];
     // 去掉端口
     let host = host.split(':').next().unwrap_or(host);

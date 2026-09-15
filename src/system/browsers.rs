@@ -15,8 +15,8 @@ pub struct Browser {
 fn candidates() -> Vec<(String, String, Vec<String>)> {
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
     let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
-    let pf86 = std::env::var("ProgramFiles(x86)")
-        .unwrap_or_else(|_| r"C:\Program Files (x86)".into());
+    let pf86 =
+        std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into());
 
     vec![
         (
