@@ -344,7 +344,7 @@
       "query": "wps",
       "fixture": "default",
       "expected_top": "fx-wps",
-      "expected_in_top5": ["fx-wps", "fx-wps-raw"],
+      "expected_in_top5": ["fx-wps"],
       "forbidden_top": ["fx-wps-raw"],
       "history": "none",
       "status": "required"

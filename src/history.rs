@@ -20,7 +20,7 @@ pub const PIN_BOOST: i32 = 180;
 /// 硬保护层：≤ 此层的候选始终排在其余候选之前，且层内仍按 (tier, FinalScore)。
 /// 用户 Alias / Name Exact / 内置 Alias / Compact Exact；
 /// 其余层允许相近质量用 FinalScore 竞争。
-const PROTECTED_TIER_MAX: i32 = 2;
+pub const PROTECTED_TIER_MAX: i32 = 2;
 
 const FREQUENCY_CAP: i32 = 45;
 const RECENCY_CAP: i32 = 40;

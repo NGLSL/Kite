@@ -190,15 +190,14 @@ pub fn collect(index: &RetrievalIndex, q: &ParsedQuery, user_targets: &[UserTarg
         }
     }
 
-    // SymSpell 纠错：独立通道，不被其他必要条件删除；1 字符不纠错
+    // SymSpell 纠错：独立通道，不被其他必要条件删除；1 字符不纠错。
+    // expand 返回的 dist 是「查询侧再删除的次数」，不是与原词的真实编辑距离；
+    // 输入直接命中词典词的删除变体时 dist=0，必须保留（crome → chrome）。
     if q.chars.len() >= 3 {
         let max_d = crate::search::fuzzy::max_distance(q.raw_norm.len());
         if max_d > 0 {
             for term in &seed_terms {
-                for (orig, dist) in index.deletes().expand(term, max_d) {
-                    if dist == 0 {
-                        continue;
-                    }
+                for (orig, _dist) in index.deletes().expand(term, max_d) {
                     if let Some(list) = index.postings(&orig) {
                         for &id in list {
                             out.ids.insert(id);
@@ -208,10 +207,7 @@ pub fn collect(index: &RetrievalIndex, q: &ParsedQuery, user_targets: &[UserTarg
                 }
             }
             // 整串也查删除索引（chorme → chrome）
-            for (orig, dist) in index.deletes().expand(&q.raw_norm, max_d) {
-                if dist == 0 {
-                    continue;
-                }
+            for (orig, _dist) in index.deletes().expand(&q.raw_norm, max_d) {
                 if let Some(list) = index.postings(&orig) {
                     for &id in list {
                         out.ids.insert(id);
@@ -327,5 +323,37 @@ fn add_pinyin_candidates(index: &RetrievalIndex, q: &ParsedQuery, out: &mut Cand
                 out.stats.pinyin += 1;
             }
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::AppItem;
+
+    fn chrome_item() -> AppItem {
+        let mut item = AppItem::scanned(
+            "chrome".into(),
+            "Google Chrome".into(),
+            "C:\\fake\\chrome.exe".into(),
+            None,
+            None,
+            "start-menu",
+        );
+        item.attach_search_fields();
+        item
+    }
+
+    #[test]
+    fn direct_delete_variant_is_not_dropped_by_symspell_channel() {
+        // crome 是 chrome 的删除变体：查询侧删除深度为 0，不得被当成「非纠错」丢掉。
+        let index = RetrievalIndex::build(&[chrome_item()], &[]);
+        let q = super::super::query::parse("crome");
+        let cand = collect(&index, &q, &[]);
+        assert!(
+            cand.stats.symspell > 0,
+            "crome 应通过删除索引召回 chrome，stats={:?}",
+            cand.stats
+        );
+        assert!(!cand.ids.is_empty());
     }
 }

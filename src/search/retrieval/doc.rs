@@ -10,7 +10,7 @@ use crate::search::normalizer::{compact, split_camel, tokens};
 use crate::search::pinyin_of;
 
 use super::symspell::{self, DeleteIndex};
-use super::verify::{CharBits, QueryContext};
+use super::verify::{cmp_ranked_hit, CharBits, QueryContext, RankedHit, ScoredHit};
 
 /// 内部文档 ID（快照局部，不持久化）。
 pub type DocId = u32;
@@ -457,7 +457,8 @@ impl RetrievalIndex {
     }
 
     /// 统一最终排序入口：验证后在完整候选上应用个性化，再一次截断。
-    /// `personalization` 为 None 时行为与仅按 MatchScore 排序一致。
+    /// 证据与稳定 id 保留到截断后再物化展示对象。
+    /// `personalization` 为 None 时行为与仅按 MatchScore 排序一致（同分仍比证据）。
     pub fn search_personalized(
         &self,
         query: &str,
@@ -471,60 +472,192 @@ impl RetrievalIndex {
         }
         let mut ctx = QueryContext::build(&q, self);
         let candidates = super::channels::collect(self, &q, user_targets);
-        let mut scored = super::verify::verify_all(self, &candidates, &mut ctx, user_targets);
-        // 分 → 证据细排 → 稳定 id
-        scored.sort_by(|a, b| {
-            b.score
-                .cmp(&a.score)
-                .then_with(|| {
-                    if a.evidence.outranks(&b.evidence) {
-                        std::cmp::Ordering::Less
-                    } else if b.evidence.outranks(&a.evidence) {
-                        std::cmp::Ordering::Greater
-                    } else {
-                        std::cmp::Ordering::Equal
-                    }
-                })
-                .then_with(|| a.doc_id.cmp(&b.doc_id))
-        });
-
-        // 个性化必须作用在截断前的完整候选集上；无个性化时仍保留折扣窗口。
-        let materialize_all = personalization.is_some();
-        const FRIENDLY_DISCOUNT_SLACK: i32 = 220;
-        let threshold = if materialize_all {
-            i32::MIN
-        } else {
-            scored
-                .get(max_results.saturating_sub(1))
-                .map(|s| s.score)
-                .unwrap_or(i32::MIN)
-        };
-        let slack = if materialize_all {
-            0
-        } else {
-            FRIENDLY_DISCOUNT_SLACK
-        };
-        let mut results: Vec<crate::model::SearchResult> = scored
+        let scored = super::verify::verify_all(self, &candidates, &mut ctx, user_targets);
+        let mut ranked = self.into_ranked(scored);
+        self.suppress_raw_app_paths_behind_friendly(&mut ranked);
+        self.collapse_same_name_launch_entries(&mut ranked);
+        if let Some(prefs) = personalization {
+            self.apply_personalization_ranked(&mut ranked, prefs);
+        }
+        ranked.sort_by(cmp_ranked_hit);
+        ranked.truncate(max_results);
+        ranked
             .into_iter()
-            .filter(|s| s.score >= threshold.saturating_sub(slack))
+            .filter_map(|r| {
+                let doc = self.doc(r.doc_id)?;
+                Some(crate::model::SearchResult {
+                    item: doc.item.clone(),
+                    score: r.score,
+                    matched_by: r.matched_by,
+                    quality_tier: r.quality_tier,
+                })
+            })
+            .collect()
+    }
+
+    fn into_ranked(&self, scored: Vec<ScoredHit>) -> Vec<RankedHit> {
+        scored
+            .into_iter()
             .filter_map(|s| {
                 let doc = self.doc(s.doc_id)?;
-                Some(crate::model::SearchResult::scored(
-                    doc.item.clone(),
-                    s.score,
-                    s.matched_by,
-                ))
+                Some(RankedHit {
+                    doc_id: s.doc_id,
+                    quality_tier: crate::history::quality_tier(s.score),
+                    score: s.score,
+                    matched_by: s.matched_by,
+                    evidence: s.evidence,
+                    name_len: doc.item.name.len(),
+                    name_lower: doc.item.name.to_lowercase(),
+                    stable_id: doc.item.id.clone(),
+                })
             })
-            .collect();
-        crate::search::ranker::prefer_friendly_install_entries(&mut results);
-        match personalization {
-            Some(prefs) => {
-                crate::history::apply_personalization(&mut results, prefs);
-                results.truncate(max_results);
-                results
-            }
-            None => crate::search::ranker::rank_and_truncate(results, max_results),
+            .collect()
+    }
+
+    /// 同安装目录已有开始菜单/桌面友好入口时，隐藏 App Paths 裸 exe。
+    fn suppress_raw_app_paths_behind_friendly(&self, ranked: &mut Vec<RankedHit>) {
+        let dirs = crate::search::ranker::friendly_dirs_from(ranked.iter().filter_map(|h| {
+            self.doc(h.doc_id)
+                .map(|d| (d.item.source.as_str(), &d.item.target))
+        }));
+        if dirs.is_empty() {
+            return;
         }
+        ranked.retain(|hit| {
+            let Some(doc) = self.doc(hit.doc_id) else {
+                return false;
+            };
+            !(doc.item.source == "app-paths"
+                && crate::search::ranker::hit_under_friendly_dir(&doc.item.target, &dirs))
+        });
+    }
+
+    /// 同一规范化显示名只保留一条启动入口，避免「微信.lnk + 微信(AppsFolder/exe)」并排。
+    /// 优先开始菜单/桌面，再按 target 稳定决出。
+    fn collapse_same_name_launch_entries(&self, ranked: &mut Vec<RankedHit>) {
+        use std::collections::HashMap;
+
+        fn source_priority(source: &str) -> u8 {
+            match source {
+                "start-menu" => 0,
+                "desktop" => 1,
+                "portable" => 2,
+                "uninstall" => 3,
+                "app-paths" => 4,
+                "uwp" | "apps-folder" => 5,
+                "commands" => 6,
+                _ => 7,
+            }
+        }
+
+        let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, hit) in ranked.iter().enumerate() {
+            let Some(doc) = self.doc(hit.doc_id) else {
+                continue;
+            };
+            let key = crate::search::normalize_for_index(&doc.item.name);
+            if key.is_empty() {
+                continue;
+            }
+            by_name.entry(key).or_default().push(i);
+        }
+
+        let mut keep = vec![true; ranked.len()];
+        for (_, idxs) in by_name {
+            if idxs.len() < 2 {
+                continue;
+            }
+            let mut best: Option<usize> = None;
+            for i in idxs {
+                let Some(doc) = self.doc(ranked[i].doc_id) else {
+                    continue;
+                };
+                let key = (
+                    source_priority(&doc.item.source),
+                    doc.item.target.to_lowercase(),
+                    doc.item.args.clone().unwrap_or_default(),
+                    doc.item.id.clone(),
+                );
+                match best {
+                    None => best = Some(i),
+                    Some(b) => {
+                        let Some(bdoc) = self.doc(ranked[b].doc_id) else {
+                            best = Some(i);
+                            continue;
+                        };
+                        let bkey = (
+                            source_priority(&bdoc.item.source),
+                            bdoc.item.target.to_lowercase(),
+                            bdoc.item.args.clone().unwrap_or_default(),
+                            bdoc.item.id.clone(),
+                        );
+                        if key < bkey {
+                            keep[b] = false;
+                            best = Some(i);
+                        } else {
+                            keep[i] = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut i = 0usize;
+        ranked.retain(|_| {
+            let ok = keep[i];
+            i += 1;
+            ok
+        });
+    }
+
+    /// 在完整候选上应用查询偏好；保护层在前，层内用统一比较器（含证据）。
+    fn apply_personalization_ranked(
+        &self,
+        ranked: &mut Vec<RankedHit>,
+        prefs: &crate::history::Personalization,
+    ) {
+        use crate::history::{history_boost, PIN_BOOST, PROTECTED_TIER_MAX};
+        let mut protected: Vec<RankedHit> = Vec::new();
+        let mut open: Vec<RankedHit> = Vec::new();
+        for hit in ranked.iter() {
+            let Some(doc) = self.doc(hit.doc_id) else {
+                continue;
+            };
+            let id = &doc.item.id;
+            let base = hit.score;
+            let tier = if hit.quality_tier != 0 {
+                hit.quality_tier
+            } else {
+                crate::history::quality_tier(base)
+            };
+            let is_pinned = prefs.pinned.contains(id);
+            let usage = prefs.usage.get(id).cloned().unwrap_or_default();
+            let pair = prefs.pairs.get(id).cloned().unwrap_or_default();
+            let history = history_boost(&prefs.query_norm, &usage, &pair, prefs.now);
+            let boost = if is_pinned {
+                PIN_BOOST.max(history)
+            } else {
+                history
+            };
+            let mut next = hit.clone();
+            next.quality_tier = tier;
+            next.score = base + boost;
+            if is_pinned {
+                next.matched_by = format!("{}+pin", next.matched_by);
+            } else if boost > 0 {
+                next.matched_by = format!("{}+history", next.matched_by);
+            }
+            if tier <= PROTECTED_TIER_MAX {
+                protected.push(next);
+            } else {
+                open.push(next);
+            }
+        }
+        protected.sort_by(cmp_ranked_hit);
+        open.sort_by(cmp_ranked_hit);
+        let mut ordered = protected;
+        ordered.extend(open);
+        *ranked = ordered;
     }
 }
 

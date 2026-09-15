@@ -36,25 +36,9 @@ use crate::model::SearchResult;
 use std::collections::HashSet;
 use std::path::Path;
 
-// App Paths 只有 exe 文件名。若同一安装目录已有可搜索的开始菜单/桌面入口，
-// 让这个更易辨认的入口排在前面，但保留原始 exe 供用户直接启动。
-const RAW_APP_PATH_DISCOUNT: i32 = SCORE_NAME_EXACT - SCORE_PREFIX + 1;
-
-pub fn prefer_friendly_install_entries(hits: &mut [SearchResult]) {
-    let dirs = friendly_dirs_from(
-        hits.iter()
-            .map(|h| (h.item.source.as_str(), &h.item.target)),
-    );
-    for hit in hits.iter_mut().filter(|h| h.item.source == "app-paths") {
-        if hit_under_friendly_dir(&hit.item.target, &dirs) {
-            hit.score -= RAW_APP_PATH_DISCOUNT;
-            // 折扣改变基础分后必须重算层，否则精确 app-paths 仍占高层压过友好前缀。
-            hit.quality_tier = crate::history::quality_tier(hit.score);
-        }
-    }
-}
-
-fn friendly_dirs_from<'a>(items: impl Iterator<Item = (&'a str, &'a String)>) -> HashSet<String> {
+pub(crate) fn friendly_dirs_from<'a>(
+    items: impl Iterator<Item = (&'a str, &'a String)>,
+) -> HashSet<String> {
     items
         .filter(|(source, _)| matches!(*source, "start-menu" | "desktop"))
         .filter_map(|(_, target)| Path::new(target).parent())
@@ -67,7 +51,7 @@ fn friendly_dirs_from<'a>(items: impl Iterator<Item = (&'a str, &'a String)>) ->
         .collect()
 }
 
-fn hit_under_friendly_dir(target: &str, dirs: &HashSet<String>) -> bool {
+pub(crate) fn hit_under_friendly_dir(target: &str, dirs: &HashSet<String>) -> bool {
     let target = normalize_windows_path(target);
     target
         .match_indices('\\')

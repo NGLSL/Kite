@@ -33,6 +33,15 @@ pub struct ParsedQuery {
     pub cjk_parts: Vec<String>,
     /// 混输时的拉丁/数字段（用于拼音/英文解释）。
     pub latin_parts: Vec<String>,
+    /// 按 Query 原文顺序的混输段（有序对齐用）。
+    pub ordered_mixed_parts: Vec<MixedPart>,
+}
+
+/// 混输 Query 中的一段（保持输入顺序）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MixedPart {
+    Cjk(String),
+    Latin(String),
 }
 
 impl ParsedQuery {
@@ -45,36 +54,42 @@ fn is_cjk(c: char) -> bool {
     matches!(c as u32, 0x4e00..=0x9fff | 0x3400..=0x4dbf)
 }
 
-fn split_script_parts(s: &str) -> (Vec<String>, Vec<String>) {
+fn split_script_parts(s: &str) -> (Vec<String>, Vec<String>, Vec<MixedPart>) {
     let mut cjk_parts = Vec::new();
     let mut latin_parts = Vec::new();
+    let mut ordered = Vec::new();
     let mut cjk_buf = String::new();
     let mut latin_buf = String::new();
-    let flush_cjk = |buf: &mut String, out: &mut Vec<String>| {
+    let flush_cjk = |buf: &mut String, cjk_parts: &mut Vec<String>, ordered: &mut Vec<MixedPart>| {
         if !buf.is_empty() {
-            out.push(std::mem::take(buf));
+            let part = std::mem::take(buf);
+            cjk_parts.push(part.clone());
+            ordered.push(MixedPart::Cjk(part));
         }
     };
-    let flush_latin = |buf: &mut String, out: &mut Vec<String>| {
-        if !buf.is_empty() {
-            out.push(std::mem::take(buf));
-        }
-    };
+    let flush_latin =
+        |buf: &mut String, latin_parts: &mut Vec<String>, ordered: &mut Vec<MixedPart>| {
+            if !buf.is_empty() {
+                let part = std::mem::take(buf);
+                latin_parts.push(part.clone());
+                ordered.push(MixedPart::Latin(part));
+            }
+        };
     for c in s.chars() {
         if is_cjk(c) {
-            flush_latin(&mut latin_buf, &mut latin_parts);
+            flush_latin(&mut latin_buf, &mut latin_parts, &mut ordered);
             cjk_buf.push(c);
         } else if c.is_ascii_alphanumeric() {
-            flush_cjk(&mut cjk_buf, &mut cjk_parts);
+            flush_cjk(&mut cjk_buf, &mut cjk_parts, &mut ordered);
             latin_buf.push(c);
         } else {
-            flush_cjk(&mut cjk_buf, &mut cjk_parts);
-            flush_latin(&mut latin_buf, &mut latin_parts);
+            flush_cjk(&mut cjk_buf, &mut cjk_parts, &mut ordered);
+            flush_latin(&mut latin_buf, &mut latin_parts, &mut ordered);
         }
     }
-    flush_cjk(&mut cjk_buf, &mut cjk_parts);
-    flush_latin(&mut latin_buf, &mut latin_parts);
-    (cjk_parts, latin_parts)
+    flush_cjk(&mut cjk_buf, &mut cjk_parts, &mut ordered);
+    flush_latin(&mut latin_buf, &mut latin_parts, &mut ordered);
+    (cjk_parts, latin_parts, ordered)
 }
 
 pub fn parse(query: &str) -> ParsedQuery {
@@ -92,10 +107,10 @@ pub fn parse(query: &str) -> ParsedQuery {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c.is_whitespace());
     let mixed = has_ascii_alnum && has_cjk;
-    let (cjk_parts, latin_parts) = if mixed {
+    let (cjk_parts, latin_parts, ordered_mixed_parts) = if mixed {
         split_script_parts(&raw_norm)
     } else {
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new())
     };
     ParsedQuery {
         raw_norm,
@@ -107,5 +122,6 @@ pub fn parse(query: &str) -> ParsedQuery {
         mixed,
         cjk_parts,
         latin_parts,
+        ordered_mixed_parts,
     }
 }

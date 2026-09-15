@@ -21,7 +21,7 @@ use crate::search::ranker::{
 };
 use crate::search::retrieval::channels::Candidates;
 use crate::search::retrieval::doc::{DocId, IndexedDoc, RetrievalIndex};
-use crate::search::retrieval::query::ParsedQuery;
+use crate::search::retrieval::query::{MixedPart, ParsedQuery};
 
 /// 有序跳字命中分：低于 fuzzy(2)，避免压过真正的编辑距离命中。
 pub const SCORE_SKIP: i32 = 320;
@@ -157,6 +157,42 @@ pub struct ScoredHit {
     pub score: i32,
     pub matched_by: String,
     pub evidence: MatchEvidence,
+}
+
+/// 最终排序用的轻量候选：证据与稳定 id 保留到截断后再物化展示对象。
+#[derive(Debug, Clone)]
+pub struct RankedHit {
+    pub doc_id: DocId,
+    /// 最终分（含偏好加分后）。
+    pub score: i32,
+    pub quality_tier: i32,
+    pub matched_by: String,
+    pub evidence: MatchEvidence,
+    pub name_len: usize,
+    pub name_lower: String,
+    pub stable_id: String,
+}
+
+/// 同分证据比较：更早起点 / 更少跳空 / 更低代价 / 更长覆盖优先。
+pub fn cmp_evidence(a: &MatchEvidence, b: &MatchEvidence) -> std::cmp::Ordering {
+    if a.outranks(b) {
+        std::cmp::Ordering::Less
+    } else if b.outranks(a) {
+        std::cmp::Ordering::Greater
+    } else {
+        std::cmp::Ordering::Equal
+    }
+}
+
+/// 统一最终比较器：层 → 分 → 证据 → 名称长度 → 名称 → 稳定 id。
+pub fn cmp_ranked_hit(a: &RankedHit, b: &RankedHit) -> std::cmp::Ordering {
+    a.quality_tier
+        .cmp(&b.quality_tier)
+        .then_with(|| b.score.cmp(&a.score))
+        .then_with(|| cmp_evidence(&a.evidence, &b.evidence))
+        .then_with(|| a.name_len.cmp(&b.name_len))
+        .then_with(|| a.name_lower.cmp(&b.name_lower))
+        .then_with(|| a.stable_id.cmp(&b.stable_id))
 }
 
 /// 每 Query 构建一次的匹配上下文：ib-pinyin 混合拼音 + nucleo 对齐缓冲。
@@ -450,20 +486,22 @@ fn verify_one(
     }
 
     // 2d) 有序多词
-    if q.tokens.len() >= 2 && ordered_token_match(&q.tokens, &doc.tokens) {
-        best = take_best(
-            best,
-            SCORE_TOKEN_SEQ,
-            "token-seq",
-            MatchEvidence {
-                field: MatchField::Name,
-                kind: MatchKind::Contiguous,
-                start: 0,
-                span: q_len,
-                gaps: 0,
-                edit_cost: 0,
-            },
-        );
+    if q.tokens.len() >= 2 {
+        if let Some(gaps) = ordered_token_gaps(&q.tokens, &doc.tokens) {
+            best = take_best(
+                best,
+                SCORE_TOKEN_SEQ,
+                "token-seq",
+                MatchEvidence {
+                    field: MatchField::Name,
+                    kind: MatchKind::Contiguous,
+                    start: 0,
+                    span: q_len,
+                    gaps,
+                    edit_cost: 0,
+                },
+            );
+        }
     }
 
     // 2e) 英文缩写
@@ -483,44 +521,48 @@ fn verify_one(
         );
     }
 
-    // 2f) 混输：CJK 段锚定名称，拉丁段走拼音/英文（微信xin / w微）
-    if q.mixed {
-        for src in [name, display] {
-            let cjk_hit = q
-                .cjk_parts
-                .iter()
-                .all(|part| src.contains(part.as_str()) || src.starts_with(part.as_str()));
-            if !cjk_hit || q.cjk_parts.is_empty() {
-                continue;
-            }
-            let latin_ok = q.latin_parts.is_empty()
-                || q.latin_parts.iter().all(|part| {
-                    !doc.pinyin.is_empty() && doc.pinyin.contains(part.as_str())
-                        || !doc.pinyin_initials.is_empty()
-                            && doc.pinyin_initials.contains(part.as_str())
-                        || src.contains(part.as_str())
-                        || doc
-                            .tokens
-                            .iter()
-                            .any(|t| t.starts_with(part.as_str()) || t.contains(part.as_str()))
-                });
-            if latin_ok {
-                let field = if src == name {
-                    MatchField::Name
-                } else {
-                    MatchField::Display
-                };
+    // 2f) 混输：有序对齐给高分；仅片段各自碰巧出现作宽召回低分
+    if q.mixed && !q.ordered_mixed_parts.is_empty() {
+        for (field, src) in [(MatchField::Name, name), (MatchField::Display, display)] {
+            if let Some((start, gaps, span)) = ordered_mixed_align(
+                &q.ordered_mixed_parts,
+                src,
+                &doc.pinyin,
+                &doc.pinyin_syllables,
+            ) {
+                best = take_best(
+                    best,
+                    SCORE_WORD_EXACT,
+                    "mixed-cjk-latin-ordered",
+                    MatchEvidence {
+                        field,
+                        kind: MatchKind::Contiguous,
+                        start,
+                        span,
+                        gaps,
+                        edit_cost: 0,
+                    },
+                );
+            } else if loose_mixed_fragments(q, src, doc) {
+                // 宽召回：片段分别出现但未按名称/拼音顺序对齐，不得与有序同权。
                 let start = q
                     .cjk_parts
                     .first()
                     .and_then(|p| src.find(p.as_str()))
                     .map(|b| src[..b].chars().count())
-                    .unwrap_or(0);
+                    .unwrap_or(usize::MAX);
                 best = take_best(
                     best,
-                    SCORE_WORD_EXACT,
-                    "mixed-cjk-latin",
-                    MatchEvidence::contiguous(field, start, q.cjk_parts.iter().map(|p| p.chars().count()).sum()),
+                    SCORE_WORD_PREFIX - 40,
+                    "mixed-cjk-latin-loose",
+                    MatchEvidence {
+                        field,
+                        kind: MatchKind::Contiguous,
+                        start,
+                        span: q.cjk_parts.iter().map(|p| p.chars().count()).sum::<usize>().max(1),
+                        gaps: usize::MAX / 4,
+                        edit_cost: 0,
+                    },
                 );
             }
         }
@@ -622,7 +664,7 @@ fn verify_one(
         if let Some(matcher) = ctx.pinyin.as_ref() {
             let haystack = &doc.item.display_name;
             if matcher.is_match(haystack.as_str()) {
-                // 前缀式匹配（is_pattern_partial）略低于完整全拼
+                // 前缀式匹配（is_pattern_partial）略低于完整全拼；位置未知记 MAX，不当作最优起点
                 best = take_best(
                     best,
                     SCORE_PINYIN_EXACT - 20,
@@ -630,7 +672,7 @@ fn verify_one(
                     MatchEvidence {
                         field: MatchField::Pinyin,
                         kind: MatchKind::Contiguous,
-                        start: 0,
+                        start: usize::MAX,
                         span: q_len,
                         gaps: 0,
                         edit_cost: 0,
@@ -962,11 +1004,13 @@ fn fuzzy_name_or_tokens(q: &str, name: &str) -> Option<(i32, usize)> {
 }
 
 /// Query 各词按序匹配名称词：整词、前缀，或连续词首字母串。
-fn ordered_token_match(q_tokens: &[String], n_tokens: &[String]) -> bool {
+/// 返回跳过的名称词元数（gaps）。
+fn ordered_token_gaps(q_tokens: &[String], n_tokens: &[String]) -> Option<usize> {
     if q_tokens.is_empty() || n_tokens.is_empty() {
-        return false;
+        return None;
     }
     let mut ni = 0usize;
+    let mut gaps = 0usize;
     for qt in q_tokens {
         let mut matched = false;
         while ni < n_tokens.len() {
@@ -992,12 +1036,171 @@ fn ordered_token_match(q_tokens: &[String], n_tokens: &[String]) -> bool {
                 }
             }
             ni += 1;
+            gaps += 1;
         }
         if !matched {
-            return false;
+            return None;
         }
     }
-    true
+    Some(gaps)
+}
+
+/// 按 Query 混输段顺序对齐名称 + 拼音流。
+/// 成功返回 (名称字符起点, 跳空, 名称覆盖跨度)。
+fn ordered_mixed_align(
+    parts: &[MixedPart],
+    name: &str,
+    pinyin: &str,
+    syllables: &[String],
+) -> Option<(usize, usize, usize)> {
+    if parts.is_empty() || name.is_empty() {
+        return None;
+    }
+    let name_chars: Vec<char> = name.chars().collect();
+    let syllables_for_name = syllables.len() == name_chars.len();
+    let mut name_i = 0usize;
+    let mut py_i = 0usize;
+    let mut first_start = None;
+    let mut end = 0usize;
+    let mut gaps = 0usize;
+    let mut last_cjk = (0usize, 0usize);
+
+    let name_index_at_pinyin_end = |abs_end: usize| -> usize {
+        if !syllables_for_name {
+            return name_chars.len();
+        }
+        let mut acc = 0usize;
+        let mut i = 0usize;
+        for syl in syllables {
+            if acc >= abs_end {
+                break;
+            }
+            acc += syl.len();
+            i += 1;
+        }
+        i.min(name_chars.len())
+    };
+
+    for part in parts {
+        match part {
+            MixedPart::Cjk(s) => {
+                let need: Vec<char> = s.chars().collect();
+                if need.is_empty() {
+                    continue;
+                }
+                let mut found = None;
+                let mut search = name_i;
+                while search + need.len() <= name_chars.len() {
+                    if name_chars[search..search + need.len()] == need[..] {
+                        found = Some(search);
+                        break;
+                    }
+                    search += 1;
+                }
+                let start = found?;
+                if start > name_i {
+                    gaps += 1;
+                }
+                if first_start.is_none() {
+                    first_start = Some(start);
+                }
+                name_i = start + need.len();
+                end = end.max(name_i);
+                last_cjk = (start, name_i);
+                if syllables_for_name {
+                    py_i = syllables[..name_i].iter().map(|s| s.len()).sum();
+                }
+            }
+            MixedPart::Latin(s) => {
+                if s.is_empty() {
+                    continue;
+                }
+                let need: Vec<char> = s.chars().collect();
+                let mut found_name = None;
+                let mut search = name_i;
+                while search + need.len() <= name_chars.len() {
+                    if name_chars[search..search + need.len()] == need[..] {
+                        found_name = Some(search);
+                        break;
+                    }
+                    search += 1;
+                }
+                if let Some(start) = found_name {
+                    if start > name_i {
+                        gaps += 1;
+                    }
+                    if first_start.is_none() {
+                        first_start = Some(start);
+                    }
+                    name_i = start + need.len();
+                    end = end.max(name_i);
+                    if syllables_for_name {
+                        py_i = syllables[..name_i].iter().map(|x| x.len()).sum();
+                    }
+                    continue;
+                }
+                // 拼音流从当前游标继续，并推进名称下标，保证不倒序复用前面音节
+                if py_i < pinyin.len() {
+                    if let Some(rel) = pinyin[py_i..].find(s.as_str()) {
+                        let abs = py_i + rel;
+                        py_i = abs + s.len();
+                        name_i = name_i.max(name_index_at_pinyin_end(py_i));
+                        end = end.max(name_i);
+                        if first_start.is_none() {
+                            first_start = Some(usize::MAX);
+                        }
+                        continue;
+                    }
+                }
+                // 刚匹配的 CJK 段拼音尾部复述（微信xin ← weixin 的 xin）
+                if last_cjk.1 > last_cjk.0 {
+                    let region_py: String = if syllables_for_name {
+                        syllables[last_cjk.0..last_cjk.1].concat()
+                    } else {
+                        pinyin.to_string()
+                    };
+                    if region_py.ends_with(s.as_str()) || region_py.contains(s.as_str()) {
+                        if first_start.is_none() {
+                            first_start = Some(last_cjk.0);
+                        }
+                        continue;
+                    }
+                }
+                return None;
+            }
+        }
+    }
+
+    let start = first_start?;
+    let span = if start == usize::MAX {
+        name_chars.len().max(1)
+    } else {
+        end.saturating_sub(start).max(1)
+    };
+    Some((start, gaps, span))
+}
+
+/// 宽召回：汉字段与拉丁段分别能命中，但不要求顺序。
+fn loose_mixed_fragments(q: &ParsedQuery, src: &str, doc: &IndexedDoc) -> bool {
+    if q.cjk_parts.is_empty() {
+        return false;
+    }
+    let cjk_hit = q
+        .cjk_parts
+        .iter()
+        .all(|part| src.contains(part.as_str()));
+    if !cjk_hit {
+        return false;
+    }
+    q.latin_parts.iter().all(|part| {
+        (!doc.pinyin.is_empty() && doc.pinyin.contains(part.as_str()))
+            || (!doc.pinyin_initials.is_empty() && doc.pinyin_initials.contains(part.as_str()))
+            || src.contains(part.as_str())
+            || doc
+                .tokens
+                .iter()
+                .any(|t| t.starts_with(part.as_str()) || t.contains(part.as_str()))
+    })
 }
 
 /// 有序子序列命中：字符按序出现，跨度与词边界受控。
@@ -1210,6 +1413,28 @@ mod tests {
     }
 
     #[test]
+    fn ordered_mixed_accepts_name_then_pinyin_suffix() {
+        let parts = vec![
+            MixedPart::Cjk("微信".into()),
+            MixedPart::Latin("xin".into()),
+        ];
+        let syl = vec!["wei".to_string(), "xin".to_string()];
+        let hit = ordered_mixed_align(&parts, "微信", "weixin", &syl);
+        assert!(hit.is_some(), "微信xin 应有序对齐到微信");
+    }
+
+    #[test]
+    fn ordered_mixed_rejects_pinyin_before_hanzi() {
+        let parts = vec![
+            MixedPart::Latin("xin".into()),
+            MixedPart::Cjk("微信".into()),
+        ];
+        let syl = vec!["wei".to_string(), "xin".to_string()];
+        let hit = ordered_mixed_align(&parts, "微信", "weixin", &syl);
+        assert!(hit.is_none(), "xin微信 不得视为有序对齐");
+    }
+
+    #[test]
     fn char_bits_contains_all() {
         let bits = CharBits::from_str("google chrome");
         assert!(bits.contains_all(&['g', 'o', 'c']));
@@ -1224,19 +1449,19 @@ mod tests {
             .filter_map(|t| t.chars().next())
             .collect();
         assert_eq!(ac, "ndm");
-        let q = tokens("visual code");
-        let n: Vec<String> = tokens("visual studio code")
-            .iter()
+        let q: Vec<String> = tokens("visual code")
+            .into_iter()
             .map(|s| s.to_string())
             .collect();
-        assert!(ordered_token_match(
-            &q.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-            &n
-        ));
-        let wrong = tokens("code visual")
-            .iter()
+        let n: Vec<String> = tokens("visual studio code")
+            .into_iter()
             .map(|s| s.to_string())
-            .collect::<Vec<_>>();
-        assert!(!ordered_token_match(&wrong, &n));
+            .collect();
+        assert!(ordered_token_gaps(&q, &n).is_some());
+        let wrong: Vec<String> = tokens("code visual")
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(ordered_token_gaps(&wrong, &n).is_none());
     }
 }
