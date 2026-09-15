@@ -106,7 +106,7 @@ fn collect_apps_folder(source: &str, out: &mut Vec<RawItem>) {
             if is_auxiliary_display_name(&name) {
                 continue;
             }
-            let Some(target) = classic_shell_target(&item) else {
+            let Some((target, icon_src)) = classic_shell_target(&item) else {
                 continue;
             };
             if out
@@ -118,7 +118,7 @@ fn collect_apps_folder(source: &str, out: &mut Vec<RawItem>) {
             }
             let id = stable_item_id(&target, None);
             let classic = AppItem::scanned(id, name, target.clone(), None, None, "apps-folder");
-            out.push((classic, Some(target)));
+            out.push((classic, Some(icon_src)));
             continue;
         }
 
@@ -141,7 +141,7 @@ fn collect_apps_folder(source: &str, out: &mut Vec<RawItem>) {
     }
 }
 
-fn classic_shell_target(item: &IShellItem) -> Option<String> {
+fn classic_shell_target(item: &IShellItem) -> Option<(String, String)> {
     let parsing_name = display_name_with_flag(item, SIGDN_DESKTOPABSOLUTEPARSING)?;
     if is_web_identifier(&parsing_name) {
         return None;
@@ -150,7 +150,16 @@ fn classic_shell_target(item: &IShellItem) -> Option<String> {
     let _: IShellItem = unsafe {
         SHCreateItemFromParsingName(PCWSTR(wide(&target).as_ptr()), None::<&IBindCtx>).ok()?
     };
-    Some(target)
+    let icon_src = classic_icon_source(&parsing_name, &target);
+    Some((target, icon_src))
+}
+
+fn classic_icon_source(parsing_name: &str, shell_target: &str) -> String {
+    if Path::new(parsing_name).is_file() {
+        parsing_name.to_string()
+    } else {
+        shell_target.to_string()
+    }
 }
 
 fn is_web_identifier(value: &str) -> bool {
@@ -339,6 +348,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn classic_apps_folder_uses_real_file_as_icon_source() {
+        let dir = std::env::temp_dir().join(format!(
+            "kite-apps-folder-icon-source-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let exe = dir.join("Lightroom.exe");
+        std::fs::write(&exe, b"fixture").unwrap();
+        let parsing_name = exe.to_string_lossy();
+        let shell_target = format!(r"shell:AppsFolder\{parsing_name}");
+
+        assert_eq!(
+            classic_icon_source(&parsing_name, &shell_target),
+            parsing_name,
+            "classic AppsFolder entries should extract icons from the real file"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn websites_in_apps_folder_are_not_software() {
         assert!(is_web_identifier("https://example.com"));
         assert!(is_web_identifier("HTTP://example.com"));
@@ -387,7 +417,7 @@ mod tests {
                     if parsing.to_ascii_lowercase().ends_with("cleanmgr.exe") {
                         expected = Some((
                             display_name(&shell_item).unwrap(),
-                            classic_shell_target(&shell_item).unwrap(),
+                            classic_shell_target(&shell_item).unwrap().0,
                         ));
                         break;
                     }
