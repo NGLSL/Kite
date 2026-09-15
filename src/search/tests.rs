@@ -1106,7 +1106,7 @@
             for hit in reference {
                 if matches!(
                     hit.matched_by.as_str(),
-                    "nucleo" | "fuzzy" | "keyword-fuzzy"
+                    "nucleo" | "fuzzy" | "keyword-fuzzy" | "pinyin-fuzzy"
                 ) {
                     continue;
                 }
@@ -1625,6 +1625,107 @@
         assert_eq!(
             hits[0].item.id, "tight",
             "同分 token-seq 应偏好更紧名称: {:?}",
+            hits.iter().map(|h| (&h.item.id, &h.matched_by, h.score)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn token_seq_prefers_earlier_start_even_when_name_longer() {
+        // 同为 token-seq（gaps 均为 1）：zzz 名称更长但 visual 起点 0；
+        // aaa 名称更短但起点更晚。证据 start 必须写真实位置。
+        let apps = vec![
+            named_item("zzz", "Visual Studio Code Extra Long"),
+            named_item("aaa", "A Visual Code"),
+        ];
+        let hits = search_with_personalization(
+            &RetrievalIndex::build(&apps, &[]),
+            "visual code",
+            &[],
+            None,
+            MAX_RESULTS,
+        );
+        assert!(
+            hits.len() >= 2,
+            "两条 token-seq 都应召回: {:?}",
+            hits.iter().map(|h| (&h.item.id, &h.matched_by)).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            hits[0].item.id, "zzz",
+            "同分应偏好更早原名称起点，不得被更短名/name_lower 覆盖: {:?}",
+            hits.iter().map(|h| (&h.item.id, &h.matched_by, h.score)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn skip_prefers_earlier_start_even_when_name_longer() {
+        // 同为有序跳字（均非连续 gchrome，避免 substring 分档不同）：
+        // zzz 起点 0、名称更长；aaa 起点更晚、名称更短。
+        let apps = vec![
+            named_item("zzz", "gxxchromeyyy"),
+            named_item("aaa", "xxgxxchrome"),
+        ];
+        let hits = search_with_personalization(
+            &RetrievalIndex::build(&apps, &[]),
+            "gchrome",
+            &[],
+            None,
+            MAX_RESULTS,
+        );
+        assert!(
+            hits.len() >= 2,
+            "两条 skip 都应召回: {:?}",
+            hits.iter().map(|h| (&h.item.id, &h.matched_by)).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            hits[0].item.id, "zzz",
+            "skip 同分应偏好更早原名称起点: {:?}",
+            hits.iter().map(|h| (&h.item.id, &h.matched_by, h.score)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn pinyin_field_typo_still_recalls() {
+        // 全拼字段参与受限纠错：jisunqi → jisuanqi（计算器）
+        let apps = vec![item("计算器")];
+        let hits = search(&apps, "jisunqi", &[], TOP_N);
+        assert!(
+            hits.iter().any(|h| h.item.id == "计算器" || h.item.name == "计算器"),
+            "jisunqi 应召回计算器: {:?}",
+            hits.iter()
+                .map(|h| (&h.item.name, &h.matched_by, h.score))
+                .collect::<Vec<_>>()
+        );
+        let hits = search(&apps, "jisuanqi", &[], TOP_N);
+        assert!(
+            hits.iter().any(|h| h.item.name == "计算器"),
+            "正确全拼 jisuanqi 不得回退: {:?}",
+            hits.iter().map(|h| &h.item.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn pinyin_initial_inner_prefers_earlier_mapped_start() {
+        // 「kz」在两条名称中部命中（同为 pinyin-initial-inner 分档）：
+        // 键盘控制… 起点更早，向日葵…更晚但名称更短。
+        let apps = vec![
+            named_item("zzz", "向日葵远程控制"),
+            named_item("aaa", "键盘控制鼠标设置"),
+        ];
+        let hits = search_with_personalization(
+            &RetrievalIndex::build(&apps, &[]),
+            "kz",
+            &[],
+            None,
+            MAX_RESULTS,
+        );
+        assert!(
+            hits.len() >= 2,
+            "kz 应召回两条: {:?}",
+            hits.iter().map(|h| (&h.item.id, &h.matched_by)).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            hits[0].item.id, "aaa",
+            "首字母中部命中应按映射回原名称的 start 排序: {:?}",
             hits.iter().map(|h| (&h.item.id, &h.matched_by, h.score)).collect::<Vec<_>>()
         );
     }

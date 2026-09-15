@@ -14,6 +14,8 @@ mod normalizer;
 mod pinyin;
 pub mod ranker;
 pub mod retrieval;
+pub mod diagnose;
+pub mod service;
 #[cfg(test)]
 mod tests;
 pub mod url;

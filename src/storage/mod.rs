@@ -1,6 +1,7 @@
 //! SQLite 历史库：启动频次、最近使用、Query→App 配对。
 //! 手写 SQL，无 ORM。连接可被 `Mutex` 串行使用。
 
+pub mod demote;
 pub mod pins;
 pub mod settings;
 
@@ -55,6 +56,7 @@ impl HistoryDb {
         let mut db = Self { conn };
         db.ensure_schema()?;
         db.ensure_pins_schema()?;
+        db.ensure_demote_schema()?;
         Ok(db)
     }
 

@@ -67,6 +67,8 @@ pub struct Personalization {
     pub usage: HashMap<String, UsageStats>,
     pub pairs: HashMap<String, QueryPairStats>,
     pub pinned: HashSet<String>,
+    /// 用户降权标记：非保护层候选扣分后移，可恢复。
+    pub demoted: HashSet<String>,
     pub now: i64,
     pub query_norm: String,
 }
@@ -84,6 +86,7 @@ pub fn apply_boosts(
         usage,
         pairs,
         pinned: pinned.clone(),
+        demoted: HashSet::new(),
         now,
         query_norm: query_norm.to_string(),
     };
@@ -108,20 +111,28 @@ pub fn apply_personalization(hits: &mut [SearchResult], prefs: &Personalization)
             quality_tier(base)
         };
         let is_pinned = prefs.pinned.contains(&hit.item.id);
+        let is_demoted = prefs.demoted.contains(&hit.item.id);
         let u = prefs.usage.get(&hit.item.id).cloned().unwrap_or_default();
         let p = prefs.pairs.get(&hit.item.id).cloned().unwrap_or_default();
         let history = history_boost(&prefs.query_norm, &u, &p, prefs.now);
-        let boost = if is_pinned {
+        let mut boost = if is_pinned {
             PIN_BOOST.max(history)
         } else {
             history
         };
+        // 降权：非保护层扣分；保护精确匹配仍可召回，不被压到弱匹配之下。
+        if is_demoted && tier > PROTECTED_TIER_MAX {
+            boost -= crate::storage::demote::DEMOTE_PENALTY;
+        }
         let mut hit = hit.clone();
         hit.quality_tier = tier;
         hit.score = base + boost;
         if is_pinned {
             hit.matched_by = format!("{}+pin", hit.matched_by);
-        } else if boost > 0 {
+        }
+        if is_demoted {
+            hit.matched_by = format!("{}+demote", hit.matched_by);
+        } else if !is_pinned && boost > 0 {
             hit.matched_by = format!("{}+history", hit.matched_by);
         }
         let keyed = (tier, hit.score, hit.item.id.clone(), hit);
@@ -621,5 +632,76 @@ mod tests {
         };
         assert_eq!(ids(&forward), ids(&reverse));
         assert_eq!(ids(&forward), vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn demote_pushes_equal_quality_peer_down_and_is_restorable() {
+        let mut prefs = Personalization::default();
+        prefs.query_norm = "code".into();
+        prefs.demoted.insert("b".into());
+        let mut hits = vec![hit("a"), hit("b")];
+        apply_personalization(&mut hits, &prefs);
+        assert_eq!(hits[0].item.id, "a");
+        assert!(hits[1].matched_by.contains("+demote"));
+        assert!(
+            hits[1].score < hits[0].score,
+            "降权后应低于同分未降权 peer"
+        );
+
+        prefs.demoted.clear();
+        let mut hits2 = vec![hit("a"), hit("b")];
+        apply_personalization(&mut hits2, &prefs);
+        assert_eq!(hits2[0].score, hits2[1].score, "恢复后同分回默认稳定序");
+    }
+
+    #[test]
+    fn demote_survives_max_history_boost() {
+        let mut prefs = Personalization::default();
+        prefs.query_norm = "code".into();
+        prefs.demoted.insert("b".into());
+        prefs.usage.insert(
+            "b".into(),
+            UsageStats {
+                launch_count: 99,
+                last_used_at: prefs.now,
+            },
+        );
+        prefs.now = 1_700_086_400;
+        let mut hits = vec![hit("a"), hit("b")];
+        apply_personalization(&mut hits, &prefs);
+        assert_eq!(
+            hits[0].item.id, "a",
+            "历史正向偏好不得轻易抵消降权: {:?}",
+            hits.iter().map(|h| (&h.item.id, h.score)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn pin_and_demote_tags_can_coexist() {
+        let mut prefs = Personalization::default();
+        prefs.pinned.insert("a".into());
+        prefs.demoted.insert("a".into());
+        let mut hits = vec![hit("a")];
+        apply_personalization(&mut hits, &prefs);
+        assert!(hits[0].matched_by.contains("+pin"));
+        assert!(hits[0].matched_by.contains("+demote"));
+    }
+
+    #[test]
+    fn demote_does_not_hide_protected_name_exact() {
+        let mut exact = hit("exact");
+        exact.score = 1000;
+        exact.quality_tier = 1;
+        let mut weak = hit("weak");
+        weak.score = 500;
+        weak.quality_tier = 4;
+        let mut prefs = Personalization::default();
+        prefs.demoted.insert("exact".into());
+        let mut hits = vec![exact, weak];
+        apply_personalization(&mut hits, &prefs);
+        assert_eq!(
+            hits[0].item.id, "exact",
+            "保护层 Name Exact 不得被降权挤出前排"
+        );
     }
 }

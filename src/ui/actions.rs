@@ -23,6 +23,17 @@ pub(super) fn menu_action(state: &mut State, item: AppItem, action: MenuAction) 
             }
             state.refresh_results();
         }
+        MenuAction::Demote | MenuAction::Undemote => {
+            if let Some(db) = &mut state.history {
+                let r = if matches!(action, MenuAction::Demote) {
+                    db.demote_item(&item.id, storage::now_ts())
+                } else {
+                    db.undemote_item(&item.id)
+                };
+                plog(&format!("ctx demote action={action:?} ok={} id={}", r.is_ok(), item.id));
+            }
+            state.refresh_search_for_query();
+        }
     }
     Task::none()
 }

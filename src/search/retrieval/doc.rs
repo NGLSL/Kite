@@ -542,6 +542,12 @@ impl RetrievalIndex {
         &self.deletes
     }
 
+    /// 归并后的启动代表 stable id（诊断用；未分组返回自身）。
+    pub fn launch_rep_stable_id(&self, doc_id: DocId) -> Option<String> {
+        let rep = self.launch_rep.get(&doc_id).copied().unwrap_or(doc_id);
+        self.doc(rep).map(|d| d.item.id.clone())
+    }
+
     pub fn first_char_postings(&self, c: char) -> Option<&[DocId]> {
         self.first_char.get(&c).map(|v| v.as_slice())
     }
@@ -613,6 +619,32 @@ impl RetrievalIndex {
             .collect()
     }
 
+    /// 与 `search_personalized` 同一条排序链，返回截断后的轻量候选（含证据）。
+    /// 供诊断使用；不物化 AppItem。
+    pub fn search_personalized_ranked(
+        &self,
+        query: &str,
+        user_targets: &[UserTarget],
+        personalization: Option<&crate::history::Personalization>,
+        max_results: usize,
+    ) -> Vec<RankedHit> {
+        let q = super::query::parse(query);
+        if q.is_empty() {
+            return Vec::new();
+        }
+        let mut ctx = QueryContext::build(&q, self);
+        let candidates = super::channels::collect(self, &q, user_targets);
+        let scored = super::verify::verify_all(self, &candidates, &mut ctx, user_targets);
+        let mut ranked = self.into_ranked(scored);
+        if let Some(prefs) = personalization {
+            self.apply_personalization_boosts(&mut ranked, prefs);
+        }
+        let mut ranked = self.collapse_launch_groups(ranked, personalization);
+        ranked.sort_by(cmp_ranked_hit);
+        ranked.truncate(max_results);
+        ranked
+    }
+
     fn into_ranked(&self, scored: Vec<ScoredHit>) -> Vec<RankedHit> {
         scored
             .into_iter()
@@ -647,18 +679,25 @@ impl RetrievalIndex {
             let id = &doc.item.id;
             let base = hit.score;
             let is_pinned = prefs.pinned.contains(id);
+            let is_demoted = prefs.demoted.contains(id);
             let usage = prefs.usage.get(id).cloned().unwrap_or_default();
             let pair = prefs.pairs.get(id).cloned().unwrap_or_default();
             let history = history_boost(&prefs.query_norm, &usage, &pair, prefs.now);
-            let boost = if is_pinned {
+            let mut boost = if is_pinned {
                 PIN_BOOST.max(history)
             } else {
                 history
             };
+            if is_demoted && hit.quality_tier > crate::history::PROTECTED_TIER_MAX {
+                boost -= crate::storage::demote::DEMOTE_PENALTY;
+            }
             hit.score = base + boost;
             if is_pinned {
                 hit.matched_by = format!("{}+pin", hit.matched_by);
-            } else if boost > 0 {
+            }
+            if is_demoted {
+                hit.matched_by = format!("{}+demote", hit.matched_by);
+            } else if !is_pinned && boost > 0 {
                 hit.matched_by = format!("{}+history", hit.matched_by);
             }
         }

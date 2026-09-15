@@ -115,6 +115,8 @@ enum Message {
     ToggleFiles,
     /// 后台 Everything 查询完成；代际和查询文本用于丢弃过期结果。
     FileSearchReady(u64, String, Vec<SearchResult>, u128),
+    /// 后台应用搜索完成；代际和查询文本用于丢弃过期结果。
+    AppSearchReady(u64, String, Vec<SearchResult>, u128),
     /// 托盘菜单：重新扫描应用。
     Rescan,
     /// 托盘菜单：退出。
@@ -183,6 +185,10 @@ enum MenuAction {
     CopyPath,
     CopyName,
     TogglePin,
+    /// 降低此结果优先级（可恢复）。
+    Demote,
+    /// 恢复被降权结果的默认优先级。
+    Undemote,
 }
 
 struct State {
@@ -212,6 +218,12 @@ struct State {
     files_mode: bool,
     file_query_generation: u64,
     file_results: Vec<SearchResult>,
+    /// 应用搜索 Query 代际（后台 worker 丢弃过期结果）。
+    app_query_generation: u64,
+    /// 索引代际：扫描完成后递增，用于基础命中缓存失效。
+    index_generation: u64,
+    /// 基础命中缓存（仅无个性化时；有历史/Pin/降权则重算）。
+    base_hit_cache: std::sync::Arc<std::sync::Mutex<search::service::BaseHitCache>>,
     /// 右键菜单：(点击时的条目快照, x, y)。
     menu: Option<(AppItem, f32, f32)>,
     pinned: std::collections::HashSet<String>,

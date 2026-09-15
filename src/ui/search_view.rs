@@ -394,6 +394,23 @@ fn menu_overlay<'a>(
             if pinned { "取消固定" } else { "固定" },
             MenuAction::TogglePin,
         ));
+        let demoted = state
+            .history
+            .as_ref()
+            .map(|db| db.is_demoted(&item.id))
+            .unwrap_or(false);
+        entries.push((
+            if demoted {
+                "恢复优先级"
+            } else {
+                "降低此结果优先级"
+            },
+            if demoted {
+                MenuAction::Undemote
+            } else {
+                MenuAction::Demote
+            },
+        ));
     }
 
     let mut col = column![].width(Length::Fill);

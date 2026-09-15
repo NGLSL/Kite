@@ -105,7 +105,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             state.query = q;
             state.request_file_search();
-            state.refresh_results();
+            state.refresh_search_for_query();
             state.hover_suppressed = false;
             sync_scroll(state)
         }
@@ -160,8 +160,12 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 hits.len()
             ));
             state.file_results = hits;
-            state.refresh_results();
+            state.refresh_search_for_query();
             Task::none()
+        }
+        Message::AppSearchReady(generation, query, hits, elapsed_us) => {
+            state.apply_app_search_ready(generation, query, hits, elapsed_us);
+            sync_scroll(state)
         }
         Message::Rescan => {
             plog("rescan requested from settings/tray");
@@ -487,7 +491,13 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 }
                 state.pinned = db.pinned_ids().into_iter().collect();
             }
-            state.refresh_results();
+            state.index_generation = state.index_generation.wrapping_add(1);
+            state
+                .base_hit_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            state.refresh_search_for_query();
             if std::mem::take(&mut state.rescan_pending) {
                 flash(state, &format!("扫描完成，共 {n} 条"))
             } else {

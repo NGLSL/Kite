@@ -22,6 +22,9 @@ impl DeleteIndex {
     }
 
     /// Query 词的删除变体（含自身）在索引中找到的原词元。
+    ///
+    /// 返回的 `usize` 是**查询侧再删除次数**，不是与原词的真实编辑距离。
+    /// 候选是否符合纠错，由验证阶段对所属字段做真实距离判定。
     pub fn expand(&self, word: &str, max_distance: usize) -> Vec<(String, usize)> {
         let mut found: HashMap<String, usize> = HashMap::new();
         let mut seen_variants: HashSet<String> = HashSet::new();
