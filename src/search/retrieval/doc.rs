@@ -148,6 +148,51 @@ impl IndexedDoc {
         }
     }
 
+    /// 参与 SymSpell 删除变体生成的主词元。
+    ///
+    /// 故意不含 compact、系统词 context、超长拼音全拼：它们已有 term/gram 召回，
+    /// 但对距离 2 删除会把 deletes 表撑到数十 MB。
+    fn deletes_seed_terms(&self) -> impl Iterator<Item = &str> {
+        const MAX_FUZZY_CHARS: usize = 12;
+        const MAX_INITIALS_CHARS: usize = 8;
+        let name = (!self.name.is_empty()).then_some(self.name.as_str());
+        let display = (!self.display.is_empty()).then_some(self.display.as_str());
+        let tokens = self
+            .tokens
+            .iter()
+            .filter(|t| !t.is_empty() && t.chars().count() <= MAX_FUZZY_CHARS)
+            .map(String::as_str);
+        let keywords = self
+            .keywords
+            .iter()
+            .filter(|k| !k.is_empty() && k.chars().count() <= MAX_FUZZY_CHARS)
+            .map(String::as_str);
+        let keyword_initials = self
+            .keyword_initials
+            .iter()
+            .filter(|s| s.chars().count() >= 2 && s.chars().count() <= MAX_INITIALS_CHARS)
+            .map(String::as_str);
+        let pinyin = (!self.pinyin.is_empty()
+            && self.pinyin.chars().count() <= MAX_FUZZY_CHARS)
+            .then_some(self.pinyin.as_str());
+        let pinyin_initials = {
+            let n = self.pinyin_initials.chars().count();
+            (2..=MAX_INITIALS_CHARS)
+                .contains(&n)
+                .then_some(self.pinyin_initials.as_str())
+        };
+        let acronym = (!self.acronym.is_empty() && self.acronym.chars().count() <= MAX_INITIALS_CHARS)
+            .then_some(self.acronym.as_str());
+        name.into_iter()
+            .chain(display)
+            .chain(tokens)
+            .chain(keywords)
+            .chain(keyword_initials)
+            .chain(pinyin)
+            .chain(pinyin_initials)
+            .chain(acronym)
+    }
+
     /// 参与倒排的全部规范化词元（名称、显示名、token、关键词、拼音、缩写）。
     fn all_terms(&self) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
@@ -196,6 +241,28 @@ impl IndexedDoc {
         }
         out
     }
+}
+
+/// 索引结构规模（诊断用）。
+#[derive(Debug, Clone, Copy)]
+pub struct StructureStats {
+    pub docs: usize,
+    pub term_postings_keys: usize,
+    pub term_postings_ids: usize,
+    pub compact_postings_keys: usize,
+    pub compact_postings_ids: usize,
+    pub gram2_keys: usize,
+    pub gram2_ids: usize,
+    pub gram3_keys: usize,
+    pub gram3_ids: usize,
+    pub deletes_keys: usize,
+    pub deletes_values: usize,
+    pub first_char_keys: usize,
+    pub char_postings_keys: usize,
+    pub pinyin_char_postings_keys: usize,
+    pub by_stable_id_keys: usize,
+    pub launch_rep_keys: usize,
+    pub launch_members_keys: usize,
 }
 
 /// 同代只读检索索引。
@@ -257,6 +324,7 @@ impl RetrievalIndex {
         let mut gram3: HashMap<(char, char, char), Vec<DocId>> = HashMap::new();
         let mut by_stable_id: HashMap<String, DocId> = HashMap::new();
         let mut term_set: HashSet<String> = HashSet::new();
+        let mut deletes_seed: HashSet<String> = HashSet::new();
         let mut first_char: HashMap<char, Vec<DocId>> = HashMap::new();
         let mut char_postings: HashMap<char, Vec<DocId>> = HashMap::new();
         let mut pinyin_char_postings: HashMap<char, Vec<DocId>> = HashMap::new();
@@ -271,6 +339,9 @@ impl RetrievalIndex {
                     .entry(term.to_string())
                     .or_default()
                     .push(doc.id);
+            }
+            for term in doc.deletes_seed_terms() {
+                deletes_seed.insert(term.to_string());
             }
             for c in std::iter::once(&doc.compact_name)
                 .chain(std::iter::once(&doc.compact_display))
@@ -352,7 +423,7 @@ impl RetrievalIndex {
             list.dedup();
         }
 
-        let deletes = symspell::build(&term_set, 2);
+        let deletes = symspell::build(&deletes_seed, 2);
 
         // FST 词典：字典序插入（值暂存序号，便于日后挂倒排地址）
         let mut term_list: Vec<String> = term_set.into_iter().collect();
@@ -435,6 +506,36 @@ impl RetrievalIndex {
 
     pub fn gram3_postings(&self, g: (char, char, char)) -> Option<&[DocId]> {
         self.gram3.get(&g).map(|v| v.as_slice())
+    }
+
+    /// 结构规模统计（诊断/内存归因用；非热路径）。
+    pub fn structure_stats(&self) -> StructureStats {
+        fn posting_len(m: &HashMap<String, Vec<DocId>>) -> (usize, usize) {
+            let keys = m.len();
+            let ids = m.values().map(|v| v.len()).sum();
+            (keys, ids)
+        }
+        let term_keys_ids = posting_len(&self.term_postings);
+        let compact_keys_ids = posting_len(&self.compact_postings);
+        StructureStats {
+            docs: self.docs.len(),
+            term_postings_keys: term_keys_ids.0,
+            term_postings_ids: term_keys_ids.1,
+            compact_postings_keys: compact_keys_ids.0,
+            compact_postings_ids: compact_keys_ids.1,
+            gram2_keys: self.gram2.len(),
+            gram2_ids: self.gram2.values().map(|v| v.len()).sum(),
+            gram3_keys: self.gram3.len(),
+            gram3_ids: self.gram3.values().map(|v| v.len()).sum(),
+            deletes_keys: self.deletes.stats().0,
+            deletes_values: self.deletes.stats().1,
+            first_char_keys: self.first_char.len(),
+            char_postings_keys: self.char_postings.len(),
+            pinyin_char_postings_keys: self.pinyin_char_postings.len(),
+            by_stable_id_keys: self.by_stable_id.len(),
+            launch_rep_keys: self.launch_rep.len(),
+            launch_members_keys: self.launch_members.len(),
+        }
     }
 
     pub fn deletes(&self) -> &DeleteIndex {
@@ -654,14 +755,6 @@ impl RetrievalIndex {
                 }
             }
 
-            crate::log::info(&format!(
-                "launch-group: keep={}({}) icon={} score={} from={}",
-                rep.stable_id,
-                rep.source,
-                rep.has_icon,
-                rep.score,
-                best.stable_id
-            ));
             out.push(rep);
         }
         out
@@ -963,4 +1056,57 @@ fn word_acronym(name: &str) -> String {
         return String::new();
     }
     toks.iter().filter_map(|t| t.chars().next()).collect()
+}
+
+#[cfg(test)]
+mod memory_shape_tests {
+    use super::*;
+
+    fn app(id: &str, name: &str) -> AppItem {
+        let mut item = AppItem::scanned(id.into(), name.into(), format!(r"C:\{id}.exe"), None, None, "test");
+        item.attach_search_fields();
+        item
+    }
+
+    #[test]
+    fn deletes_budget_stays_small_for_app_scale_index() {
+        // 反馈回路：deletes 键若回到 10 万级，驻留内存会再次膨胀。
+        let apps: Vec<AppItem> = (0..200)
+            .map(|i| {
+                let mut item = app(
+                    &format!("a{i}"),
+                    &format!("Sample Application {i:04}"),
+                );
+                item.search_context = vec![format!("系统设置标准词{i}"), format!("context term {i}")];
+                item.attach_search_fields();
+                item
+            })
+            .collect();
+        let index = RetrievalIndex::build(&apps, &[]);
+        let stats = index.structure_stats();
+        assert!(
+            stats.deletes_keys < 25_000,
+            "deletes_keys={} 应远小于历史 139k 水位",
+            stats.deletes_keys
+        );
+        assert!(
+            stats.deletes_keys < stats.term_postings_keys * 8,
+            "deletes_keys={} term_postings_keys={}",
+            stats.deletes_keys,
+            stats.term_postings_keys
+        );
+    }
+
+    #[test]
+    fn deletes_seed_excludes_context_and_compact() {
+        let mut item = app("x", "微信开发者工具");
+        item.search_context = vec!["启动任务管理器".into()];
+        item.search_keywords = vec!["wxkfzgj".into()];
+        item.attach_search_fields();
+        let doc = IndexedDoc::from_item(0, item, vec![]);
+        let seed: HashSet<&str> = doc.deletes_seed_terms().collect();
+        assert!(seed.contains("微信开发者工具") || seed.contains("weixinkaifazhegongju"));
+        assert!(!seed.iter().any(|t| t.contains("启动任务")), "{seed:?}");
+        assert!(seed.contains("wxkfzgj"));
+    }
 }

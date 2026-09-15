@@ -9,7 +9,7 @@ pub(crate) mod query;
 mod symspell;
 pub(crate) mod verify;
 
-pub use doc::{IndexedDoc, RetrievalIndex};
+pub use doc::{IndexedDoc, RetrievalIndex, StructureStats};
 pub use query::{ChannelStats, ParsedQuery};
 pub use verify::{reference_search, QueryContext, RankedHit, SCORE_SKIP};
 

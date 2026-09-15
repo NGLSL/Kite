@@ -5,6 +5,8 @@ mod alias;
 mod bench;
 #[cfg(test)]
 mod eval;
+#[cfg(test)]
+mod memory_probe;
 mod fuzzy;
 mod lists;
 mod matcher;

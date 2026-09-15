@@ -5,13 +5,20 @@ use std::collections::{HashMap, HashSet};
 /// 删除变体 → 原词元列表。
 #[derive(Debug, Default)]
 pub struct DeleteIndex {
-    map: HashMap<String, Vec<String>>,
+    pub(crate) map: HashMap<String, Vec<String>>,
     max_deletes: usize,
 }
 
 impl DeleteIndex {
     pub fn lookup(&self, variant: &str) -> Option<&[String]> {
         self.map.get(variant).map(|v| v.as_slice())
+    }
+
+    pub fn stats(&self) -> (usize, usize) {
+        (
+            self.map.len(),
+            self.map.values().map(|v| v.len()).sum(),
+        )
     }
 
     /// Query 词的删除变体（含自身）在索引中找到的原词元。
@@ -44,14 +51,15 @@ impl DeleteIndex {
     }
 }
 
-/// 从词元集合构建删除索引。控制长词成本：词长 > 16 只做距离 1。
+/// 从词元集合构建删除索引。控制长词成本：词长 > 10 只做距离 1，> 18 不建 deletes。
 pub fn build(terms: &HashSet<String>, max_deletes: usize) -> DeleteIndex {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     for term in terms {
-        if term.chars().count() < 2 {
+        let len = term.chars().count();
+        if len < 2 || len > 18 {
             continue;
         }
-        let limit = if term.chars().count() > 16 {
+        let limit = if len > 10 {
             1
         } else {
             max_deletes
