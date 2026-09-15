@@ -33,30 +33,6 @@ pub const CONTEXT_COMPACT_DISCOUNT: i32 = 220;
 pub const CONTEXT_PINYIN_DISCOUNT: i32 = 130;
 
 use crate::model::SearchResult;
-use std::collections::HashSet;
-use std::path::Path;
-
-pub(crate) fn friendly_dirs_from<'a>(
-    items: impl Iterator<Item = (&'a str, &'a String)>,
-) -> HashSet<String> {
-    items
-        .filter(|(source, _)| matches!(*source, "start-menu" | "desktop"))
-        .filter_map(|(_, target)| Path::new(target).parent())
-        // 不将 Program Files 等公共父目录误判为同一款应用。
-        .filter(|dir| dir.components().count() >= 4)
-        .map(|dir| {
-            let normalized = normalize_windows_path(&dir.to_string_lossy());
-            format!("{}\\", normalized.trim_end_matches('\\'))
-        })
-        .collect()
-}
-
-pub(crate) fn hit_under_friendly_dir(target: &str, dirs: &HashSet<String>) -> bool {
-    let target = normalize_windows_path(target);
-    target
-        .match_indices('\\')
-        .any(|(end, _)| dirs.contains(&target[..=end]))
-}
 
 pub fn rank_and_truncate(hits: Vec<SearchResult>, top_n: usize) -> Vec<SearchResult> {
     // 先生成小写键再排序：比较器里不做 to_lowercase，避免 O(n log n) 次分配
@@ -84,10 +60,6 @@ pub fn rank_and_truncate(hits: Vec<SearchResult>, top_n: usize) -> Vec<SearchRes
     });
     keyed.truncate(top_n);
     keyed.into_iter().map(|(_, _, _, _, _, h)| h).collect()
-}
-
-fn normalize_windows_path(path: &str) -> String {
-    path.replace('/', "\\").to_lowercase()
 }
 
 /// 编辑距离 → fuzzy 分数。

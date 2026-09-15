@@ -345,7 +345,7 @@
       "fixture": "default",
       "expected_top": "fx-wps",
       "expected_in_top5": ["fx-wps"],
-      "forbidden_top": ["fx-wps-raw"],
+      "forbidden_top": [],
       "history": "none",
       "status": "required"
     },

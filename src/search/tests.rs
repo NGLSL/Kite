@@ -16,11 +16,20 @@
     }
 
     fn sourced_item(name: &str, target: &str, source: &str) -> AppItem {
+        sourced_item_with_args(name, target, source, None)
+    }
+
+    fn sourced_item_with_args(
+        name: &str,
+        target: &str,
+        source: &str,
+        args: Option<String>,
+    ) -> AppItem {
         let mut it = AppItem::scanned(
-            format!("{source}:{target}"),
+            format!("{source}:{target}:{}", args.clone().unwrap_or_default()),
             name.into(),
             target.into(),
-            None,
+            args,
             None,
             source,
         );
@@ -139,44 +148,387 @@
     }
 
     #[test]
-    fn friendly_shortcut_hides_raw_app_path_in_same_installation() {
-        let raw = sourced_item(
-            "wps",
-            r"D:\Program Files\WPS Office\12.1.0\office6\wps.exe",
-            "app-paths",
-        );
-        let shortcut = sourced_item(
-            "WPS Office",
-            r"D:\Program Files\WPS Office\ksolaunch.exe",
-            "start-menu",
-        );
-
-        let hits = search(&[raw, shortcut], "wps", &[], TOP_N);
+    fn same_name_different_targets_are_both_kept() {
+        let a = sourced_item("微信", r"C:\A\WeChat\WeChat.exe", "start-menu");
+        let b = sourced_item("微信", r"C:\B\Weixin\Weixin.exe", "start-menu");
+        let hits = search(&[a, b], "微信", &[], TOP_N);
         assert_eq!(
-            hits.iter().map(|h| h.item.name.as_str()).collect::<Vec<_>>(),
-            vec!["WPS Office"],
-            "同安装目录已有友好入口时，app-paths 裸 exe 不应并排出现: {:?}",
-            hits.iter().map(|h| &h.item.name).collect::<Vec<_>>()
+            hits.len(),
+            2,
+            "同名不同目标不得合并: {:?}",
+            hits.iter().map(|h| &h.item.target).collect::<Vec<_>>()
         );
     }
 
     #[test]
-    fn same_display_name_from_start_menu_and_apps_folder_collapses() {
-        let lnk = sourced_item(
-            "微信",
-            r"C:\Program Files (x86)\Tencent\WeChat\WeChat.exe",
+    fn wps_uninstall_merges_into_app_row_without_becoming_launch_target() {
+        // 真机：卸载注册表 DisplayName = WPS Office (12.1.0.28505)，与主程序同一安装
+        let app = sourced_item_with_args(
+            "WPS Office",
+            r"D:\Program Files\WPS Office\ksolaunch.exe",
+            "start-menu",
+            Some("/prometheus /fromksolaunch /from=startmenu".into()),
+        );
+        let uninstall = sourced_item(
+            "WPS Office (12.1.0.28505)",
+            r"D:\Program Files\WPS Office\12.1.0.28505\utility\uninst.exe",
+            "uninstall",
+        );
+        let hits = search(&[app, uninstall], "wps", &[], TOP_N);
+        assert_eq!(
+            hits.len(),
+            1,
+            "同一安装的主程序与卸载项只展示一条: {:?}",
+            hits.iter()
+                .map(|h| (&h.item.name, &h.item.source, &h.item.target))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(hits[0].item.source, "start-menu");
+        assert!(
+            hits[0].item.target.ends_with("ksolaunch.exe"),
+            "启动不得落到 uninst.exe: {}",
+            hits[0].item.target
+        );
+    }
+
+    #[test]
+    fn wps_merge_keeps_startmenu_launch_args_and_borrows_icon() {
+        let launch = r"D:\Program Files\WPS Office\ksolaunch.exe";
+        let mut menu = AppItem::scanned(
+            "menu".into(),
+            "WPS Office".into(),
+            launch.into(),
+            Some("/prometheus /fromksolaunch /from=startmenu".into()),
+            Some(r"D:\Program Files\WPS Office".into()),
             "start-menu",
         );
+        menu.attach_search_fields();
+        menu.icon = None;
+        menu.icon_src = None;
+        let mut exe = AppItem::scanned(
+            "exe".into(),
+            "wps".into(),
+            r"D:\Program Files\WPS Office\12.1.0.28505\office6\wps.exe".into(),
+            None,
+            None,
+            "app-paths",
+        );
+        exe.attach_search_fields();
+        exe.icon = Some(r"C:\cache\wps.png".into());
+        exe.icon_src = Some(exe.target.clone());
+
+        let hits = search(&[menu, exe], "wps", &[], TOP_N);
+        assert_eq!(hits.len(), 1, "应归并一条");
+        let h = &hits[0];
+        assert_eq!(h.item.source, "start-menu", "启动代表必须是开始菜单");
+        assert_eq!(
+            h.item.target, launch,
+            "target 保持 ksolaunch，不能被换成 wps.exe"
+        );
+        assert!(
+            h.item.args.as_deref().unwrap_or("").contains("/from=startmenu"),
+            "args 保留 lnk 启动语义: {:?}",
+            h.item.args
+        );
+        assert!(
+            h.item.icon.is_some(),
+            "图标应从 app-paths 借用: {:?}",
+            h.item.icon
+        );
+    }
+
+    #[test]
+    fn wps_all_ksolaunch_and_shell_entries_display_one_row() {
+        // 真机：多个入口都落到 ksolaunch.exe / 同一 WPS 安装
+        let launch = r"D:\Program Files\WPS Office\ksolaunch.exe";
+        let wps_exe = r"D:\Program Files\WPS Office\12.1.0.28505\office6\wps.exe";
+        let mut menu = sourced_item_with_args(
+            "WPS Office",
+            launch,
+            "start-menu",
+            Some("/prometheus /fromksolaunch /from=startmenu".into()),
+        );
+        menu.working_dir = Some(r"D:\Program Files\WPS Office".into());
+        let mut desk = sourced_item_with_args(
+            "WPS Office",
+            launch,
+            "desktop",
+            Some("/prometheus /fromksolaunch /from=desktop_shortcut".into()),
+        );
+        desk.working_dir = Some(r"D:\Program Files\WPS Office".into());
+        let apps = vec![
+            menu,
+            desk,
+            sourced_item("wps", wps_exe, "app-paths"),
+            sourced_item(
+                "WPS Office",
+                r"shell:AppsFolder\Kingsoft.Office.KPrometheus",
+                "apps-folder",
+            ),
+            sourced_item("WPS Office (12.1.0.28505)", wps_exe, "start-menu"),
+        ];
+        let hits = search(&apps, "wps", &[], TOP_N);
+        assert_eq!(
+            hits.len(),
+            1,
+            "真机 WPS 多入口应只展示一条: {:?}",
+            hits.iter()
+                .map(|h| (&h.item.name, &h.item.source, &h.item.target, &h.item.args))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            hits[0].item.target, launch,
+            "启动必须走开始菜单 ksolaunch，不能换成裸 wps.exe"
+        );
+        assert!(
+            hits[0].item.args.as_deref().unwrap_or("").contains("startmenu"),
+            "应保留 lnk 的 /from=startmenu: {:?}",
+            hits[0].item.args
+        );
+    }
+
+    #[test]
+    fn same_name_same_install_different_launcher_args_display_one_row() {
+        // 真机 WPS：startmenu / desktop_shortcut 仅启动来源参数不同
+        let base = r"D:\Program Files\WPS Office";
+        let apps = vec![
+            sourced_item_with_args(
+                "WPS Office",
+                &format!("{base}\\ksolaunch.exe"),
+                "start-menu",
+                Some("/prometheus /fromksolaunch /from=startmenu".into()),
+            ),
+            sourced_item_with_args(
+                "WPS Office",
+                &format!("{base}\\ksolaunch.exe"),
+                "desktop",
+                Some("/prometheus /fromksolaunch /from=desktop_shortcut".into()),
+            ),
+        ];
+        let hits = search(&apps, "wps office", &[], TOP_N);
+        assert_eq!(
+            hits.len(),
+            1,
+            "同安装同名不同 /from= 参数应归并: {:?}",
+            hits.iter()
+                .map(|h| (&h.item.source, &h.item.args))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn utools_desktop_exe_and_appsfolder_package_merge() {
+        let lnk = sourced_item(
+            "uTools",
+            r"C:\Users\admin\AppData\Local\Programs\utools\uTools.exe",
+            "start-menu",
+        );
+        let mut shell = AppItem::scanned(
+            "shell:org.yuanli.utools".into(),
+            "uTools".into(),
+            r"shell:AppsFolder\org.yuanli.utools".into(),
+            None,
+            None,
+            "apps-folder",
+        );
+        shell.attach_search_fields();
+        shell.icon = Some(r"C:\cache\utools-shell.png".into());
+        shell.icon_src = Some(r"shell:AppsFolder\org.yuanli.utools".into());
+
+        let hits = search(&[lnk, shell], "utools", &[], TOP_N);
+        assert_eq!(
+            hits.len(),
+            1,
+            "桌面 uTools + AppsFolder 包应归并: {:?}",
+            hits.iter()
+                .map(|h| (&h.item.source, &h.item.target))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn same_launch_identity_displays_one_friendly_row() {
+        let target = r"C:\Program Files\Example\app.exe";
+        let mut a = AppItem::scanned(
+            "id-a".into(),
+            "Example".into(),
+            target.into(),
+            None,
+            None,
+            "start-menu",
+        );
+        a.attach_search_fields();
+        let mut b = AppItem::scanned(
+            "id-b".into(),
+            "Example".into(),
+            target.into(),
+            None,
+            None,
+            "app-paths",
+        );
+        b.attach_search_fields();
+        let hits = search(&[a, b], "Example", &[], TOP_N);
+        assert_eq!(hits.len(), 1, "同一启动身份只展示一条");
+        assert_eq!(hits[0].item.source, "start-menu");
+    }
+
+    #[test]
+    fn utools_lnk_and_exe_same_target_merge_to_one_with_icon() {
+        // 真机截图形态：开始菜单 lnk 无图 + app-paths exe 有图，指向同一 exe
+        let target = r"C:\Users\admin\AppData\Local\uTools\uTools.exe";
+        let mut lnk = AppItem::scanned(
+            "start-menu:utools".into(),
+            "uTools".into(),
+            target.into(),
+            None,
+            None,
+            "start-menu",
+        );
+        lnk.attach_search_fields();
+        lnk.icon = None;
+        lnk.icon_src = None;
+        let mut exe = AppItem::scanned(
+            "app-paths:utools".into(),
+            "uTools".into(),
+            target.into(),
+            None,
+            None,
+            "app-paths",
+        );
+        exe.attach_search_fields();
+        exe.icon = Some(r"C:\cache\utools.png".into());
+        exe.icon_src = Some(target.into());
+
+        let hits = search(&[lnk, exe], "utools", &[], TOP_N);
+        assert_eq!(
+            hits.len(),
+            1,
+            "同一 target 的 lnk+exe 应只展示一条: {:?}",
+            hits.iter()
+                .map(|h| (&h.item.source, &h.item.icon, &h.item.target))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(hits[0].item.source, "start-menu", "启动保留 lnk");
+        assert!(
+            hits[0].item.icon.is_some(),
+            "图标从 exe 入口借用"
+        );
+    }
+
+    #[test]
+    fn utools_different_install_roots_stay_two_rows() {
+        // AppData 与 Program Files 两套安装：不能合并
+        let apps = vec![
+            sourced_item(
+                "uTools",
+                r"C:\Users\admin\AppData\Local\uTools\uTools.exe",
+                "start-menu",
+            ),
+            sourced_item(
+                "uTools",
+                r"C:\Program Files\uTools\uTools.exe",
+                "app-paths",
+            ),
+        ];
+        let hits = search(&apps, "utools", &[], TOP_N);
+        assert_eq!(
+            hits.len(),
+            2,
+            "不同安装根必须保留: {:?}",
+            hits.iter().map(|h| &h.item.target).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn merged_row_prefers_entry_with_icon() {
+        let target = r"C:\Program Files\uTools\uTools.exe";
+        let mut lnk = AppItem::scanned(
+            "lnk".into(),
+            "uTools".into(),
+            target.into(),
+            None,
+            None,
+            "start-menu",
+        );
+        lnk.attach_search_fields();
+        // 模拟 lnk 未解析出图标
+        lnk.icon = None;
+        lnk.icon_src = None;
+        let mut exe = AppItem::scanned(
+            "exe".into(),
+            "uTools".into(),
+            target.into(),
+            None,
+            None,
+            "app-paths",
+        );
+        exe.attach_search_fields();
+        exe.icon = Some("C:\\cache\\utools.png".into());
+        exe.icon_src = Some(target.into());
+
+        let hits = search(&[lnk, exe], "uTools", &[], TOP_N);
+        assert_eq!(hits.len(), 1, "同一启动身份只一条");
+        assert_eq!(hits[0].item.source, "start-menu", "启动仍用开始菜单入口");
+        assert!(
+            hits[0].item.icon.is_some() || hits[0].item.icon_src.is_some(),
+            "图标应从同组带图入口借用: {:?}",
+            (hits[0].item.source.as_str(), &hits[0].item.icon)
+        );
+    }
+
+    #[test]
+    fn wps_multi_entry_same_install_displays_one_row() {
+        let base = r"D:\Program Files\WPS Office";
+        let apps = vec![
+            sourced_item("wps", &format!("{base}\\12.1.0.28505\\office6\\wps.exe"), "app-paths"),
+            sourced_item("WPS Office", &format!("{base}\\ksolaunch.exe"), "start-menu"),
+            sourced_item("WPS Office", &format!("{base}\\12.1.0.28505\\office6\\wps.exe"), "desktop"),
+            sourced_item(
+                "WPS Office",
+                &format!("shell:AppsFolder\\{base}\\ksolaunch.exe"),
+                "apps-folder",
+            ),
+            sourced_item(
+                "WPS Office (12.1.0.28505)",
+                &format!("{base}\\12.1.0.28505\\office6\\wps.exe"),
+                "start-menu",
+            ),
+        ];
+        let hits = search(&apps, "wps", &[], TOP_N);
+        assert_eq!(
+            hits.len(),
+            1,
+            "同一 WPS 安装族只应展示一条: {:?}",
+            hits.iter()
+                .map(|h| (&h.item.name, &h.item.source, &h.item.target))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn different_install_roots_with_same_name_are_both_kept() {
+        let apps = vec![
+            sourced_item("WPS Office", r"D:\Apps\WPSA\wps.exe", "start-menu"),
+            sourced_item("WPS Office", r"D:\Apps\WPSB\wps.exe", "start-menu"),
+        ];
+        let hits = search(&apps, "wps office", &[], TOP_N);
+        assert_eq!(hits.len(), 2, "不同安装根不得合并");
+    }
+
+    #[test]
+    fn wechat_lnk_and_apps_folder_same_exe_display_one_row() {
+        let exe = r"C:\Program Files (x86)\Tencent\WeChat\WeChat.exe";
+        let lnk = sourced_item("微信", exe, "start-menu");
         let shell = sourced_item(
             "微信",
-            r"shell:AppsFolder\TencentWeChat_abc!App",
+            &format!("shell:AppsFolder\\{exe}"),
             "apps-folder",
         );
         let hits = search(&[lnk, shell], "微信", &[], TOP_N);
         assert_eq!(
-            hits.iter().map(|h| h.item.name.as_str()).collect::<Vec<_>>(),
-            vec!["微信"],
-            "同名微信应只保留开始菜单入口: {:?}",
+            hits.len(),
+            1,
+            "开始菜单与 AppsFolder 指向同一 exe 应只展示一条: {:?}",
             hits.iter()
                 .map(|h| (&h.item.source, &h.item.target))
                 .collect::<Vec<_>>()
@@ -185,29 +537,63 @@
     }
 
     #[test]
-    fn same_name_start_menu_and_desktop_keep_single_friendly() {
-        let menu = sourced_item("微信", r"C:\A\WeChat\WeChat.exe", "start-menu");
-        let desk = sourced_item("微信", r"C:\B\Weixin\Weixin.exe", "desktop");
-        let hits = search(&[menu, desk], "微信", &[], TOP_N);
-        assert_eq!(
-            hits.len(),
-            1,
-            "同名两条友好入口也只留一条: {:?}",
-            hits.iter().map(|h| &h.item.target).collect::<Vec<_>>()
+    fn open_group_history_can_cross_adjacent_quality_tiers() {
+        // 前缀命中 800（层4） vs 词前缀 720（层6）+ 强历史：普通组按最终分竞争
+        let prefix = named_item("prefix", "Terra");
+        let weaker = named_item("weaker", "Windows Terminal");
+        let index = RetrievalIndex::build(&[prefix, weaker], &[]);
+        let mut prefs = crate::history::Personalization::default();
+        prefs.query_norm = "ter".into();
+        prefs.pairs.insert(
+            "weaker".into(),
+            crate::storage::QueryPairStats {
+                count: 50,
+                last_used_at: 1,
+            },
         );
-        assert_eq!(hits[0].item.source, "start-menu");
+        prefs.usage.insert(
+            "weaker".into(),
+            crate::storage::UsageStats {
+                launch_count: 10_000,
+                last_used_at: 1_700_000_000,
+            },
+        );
+        prefs.now = 1_700_086_400;
+        let hits = search_with_personalization(&index, "ter", &[], Some(&prefs), MAX_RESULTS);
+        assert!(
+            hits.iter().any(|h| h.item.id == "weaker"),
+            "两条都应召回: {:?}",
+            hits.iter().map(|h| (&h.item.id, h.score)).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            hits[0].item.id, "weaker",
+            "普通组最终分应允许弱一层候选靠前: {:?}",
+            hits.iter().map(|h| (&h.item.id, &h.matched_by, h.score)).collect::<Vec<_>>()
+        );
     }
 
     #[test]
-    fn raw_app_path_remains_when_no_friendly_entry_in_results() {
-        let raw = sourced_item(
-            "wps",
-            r"D:\Program Files\WPS Office\12.1.0\office6\wps.exe",
-            "app-paths",
+    fn mixed_pinyin_restatement_is_not_ordered_high() {
+        let apps = vec![named_item("wechat", "微信")];
+        let ordered = search(&apps, "微xin", &[], TOP_N);
+        let restated = search(&apps, "微信xin", &[], TOP_N);
+        assert!(ordered.iter().any(|h| h.item.id == "wechat"));
+        assert!(restated.iter().any(|h| h.item.id == "wechat"));
+        let o = ordered.iter().find(|h| h.item.id == "wechat").unwrap();
+        let r = restated.iter().find(|h| h.item.id == "wechat").unwrap();
+        assert!(
+            o.matched_by.contains("ordered"),
+            "微xin 应有序: {}",
+            o.matched_by
         );
-        let hits = search(&[raw], "wps", &[], TOP_N);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].item.name, "wps");
+        assert!(
+            r.score < o.score || !r.matched_by.contains("ordered"),
+            "微信xin 复述不得与有序同权: ordered={} {} vs restated={} {}",
+            o.score,
+            o.matched_by,
+            r.score,
+            r.matched_by
+        );
     }
 
     #[test]
@@ -218,7 +604,7 @@
         assert_eq!(
             hits.iter().map(|h| h.item.name.as_str()).collect::<Vec<_>>(),
             vec!["Aurora Studio"],
-            "同安装目录友好入口应隐藏 app-paths: {:?}",
+            "同安装 aurora.exe ↔ Aurora Studio 归并一条: {:?}",
             hits.iter().map(|h| &h.item.name).collect::<Vec<_>>()
         );
 
@@ -1055,43 +1441,6 @@
             hits.iter()
                 .map(|h| (&h.item.id, &h.matched_by))
                 .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn mixed_ordered_alignment_scores_higher_than_loose_fragments() {
-        let apps = vec![named_item("wechat", "微信")];
-        let ordered = search(&apps, "微信xin", &[], TOP_N);
-        let loose = search(&apps, "xin微信", &[], TOP_N);
-        assert!(
-            ordered.iter().any(|h| h.item.id == "wechat"),
-            "微信xin 应召回: {:?}",
-            ordered.iter().map(|h| &h.matched_by).collect::<Vec<_>>()
-        );
-        assert!(
-            loose.iter().any(|h| h.item.id == "wechat"),
-            "xin微信 应宽召回: {:?}",
-            loose.iter().map(|h| &h.matched_by).collect::<Vec<_>>()
-        );
-        let o = ordered.iter().find(|h| h.item.id == "wechat").unwrap();
-        let l = loose.iter().find(|h| h.item.id == "wechat").unwrap();
-        assert!(
-            o.score > l.score,
-            "有序混输分应高于宽召回: ordered={} {} vs loose={} {}",
-            o.score,
-            o.matched_by,
-            l.score,
-            l.matched_by
-        );
-        assert!(
-            o.matched_by.contains("ordered"),
-            "有序应标记 ordered: {}",
-            o.matched_by
-        );
-        assert!(
-            l.matched_by.contains("loose") || l.score < o.score,
-            "宽召回不得与有序同权: {}",
-            l.matched_by
         );
     }
 

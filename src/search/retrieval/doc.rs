@@ -474,19 +474,28 @@ impl RetrievalIndex {
         let candidates = super::channels::collect(self, &q, user_targets);
         let scored = super::verify::verify_all(self, &candidates, &mut ctx, user_targets);
         let mut ranked = self.into_ranked(scored);
-        self.suppress_raw_app_paths_behind_friendly(&mut ranked);
-        self.collapse_same_name_launch_entries(&mut ranked);
         if let Some(prefs) = personalization {
-            self.apply_personalization_ranked(&mut ranked, prefs);
+            self.apply_personalization_boosts(&mut ranked, prefs);
         }
+        let mut ranked = self.group_same_install_family(self.group_by_launch_identity(ranked));
         ranked.sort_by(cmp_ranked_hit);
         ranked.truncate(max_results);
         ranked
             .into_iter()
             .filter_map(|r| {
                 let doc = self.doc(r.doc_id)?;
+                let mut item = doc.item.clone();
+                // 启动身份保持友好入口；图标可从同组另一入口借用
+                if item.icon.is_none() {
+                    if let Some(icon_doc) = self.doc(r.icon_doc_id) {
+                        if icon_doc.item.icon.is_some() || icon_doc.item.icon_src.is_some() {
+                            item.icon.clone_from(&icon_doc.item.icon);
+                            item.icon_src.clone_from(&icon_doc.item.icon_src);
+                        }
+                    }
+                }
                 Some(crate::model::SearchResult {
-                    item: doc.item.clone(),
+                    item,
                     score: r.score,
                     matched_by: r.matched_by,
                     quality_tier: r.quality_tier,
@@ -509,127 +518,24 @@ impl RetrievalIndex {
                     name_len: doc.item.name.len(),
                     name_lower: doc.item.name.to_lowercase(),
                     stable_id: doc.item.id.clone(),
+                    source: doc.item.source.clone(),
+                    has_icon: doc.item.icon.is_some() || doc.item.icon_src.is_some(),
+                    icon_doc_id: s.doc_id,
+                    has_working_dir: doc.item.working_dir.is_some(),
                 })
             })
             .collect()
     }
 
-    /// 同安装目录已有开始菜单/桌面友好入口时，隐藏 App Paths 裸 exe。
-    fn suppress_raw_app_paths_behind_friendly(&self, ranked: &mut Vec<RankedHit>) {
-        let dirs = crate::search::ranker::friendly_dirs_from(ranked.iter().filter_map(|h| {
-            self.doc(h.doc_id)
-                .map(|d| (d.item.source.as_str(), &d.item.target))
-        }));
-        if dirs.is_empty() {
-            return;
-        }
-        ranked.retain(|hit| {
-            let Some(doc) = self.doc(hit.doc_id) else {
-                return false;
-            };
-            !(doc.item.source == "app-paths"
-                && crate::search::ranker::hit_under_friendly_dir(&doc.item.target, &dirs))
-        });
-    }
-
-    /// 同一规范化显示名只保留一条启动入口，避免「微信.lnk + 微信(AppsFolder/exe)」并排。
-    /// 优先开始菜单/桌面，再按 target 稳定决出。
-    fn collapse_same_name_launch_entries(&self, ranked: &mut Vec<RankedHit>) {
-        use std::collections::HashMap;
-
-        fn source_priority(source: &str) -> u8 {
-            match source {
-                "start-menu" => 0,
-                "desktop" => 1,
-                "portable" => 2,
-                "uninstall" => 3,
-                "app-paths" => 4,
-                "uwp" | "apps-folder" => 5,
-                "commands" => 6,
-                _ => 7,
-            }
-        }
-
-        let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
-        for (i, hit) in ranked.iter().enumerate() {
-            let Some(doc) = self.doc(hit.doc_id) else {
-                continue;
-            };
-            let key = crate::search::normalize_for_index(&doc.item.name);
-            if key.is_empty() {
-                continue;
-            }
-            by_name.entry(key).or_default().push(i);
-        }
-
-        let mut keep = vec![true; ranked.len()];
-        for (_, idxs) in by_name {
-            if idxs.len() < 2 {
-                continue;
-            }
-            let mut best: Option<usize> = None;
-            for i in idxs {
-                let Some(doc) = self.doc(ranked[i].doc_id) else {
-                    continue;
-                };
-                let key = (
-                    source_priority(&doc.item.source),
-                    doc.item.target.to_lowercase(),
-                    doc.item.args.clone().unwrap_or_default(),
-                    doc.item.id.clone(),
-                );
-                match best {
-                    None => best = Some(i),
-                    Some(b) => {
-                        let Some(bdoc) = self.doc(ranked[b].doc_id) else {
-                            best = Some(i);
-                            continue;
-                        };
-                        let bkey = (
-                            source_priority(&bdoc.item.source),
-                            bdoc.item.target.to_lowercase(),
-                            bdoc.item.args.clone().unwrap_or_default(),
-                            bdoc.item.id.clone(),
-                        );
-                        if key < bkey {
-                            keep[b] = false;
-                            best = Some(i);
-                        } else {
-                            keep[i] = false;
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut i = 0usize;
-        ranked.retain(|_| {
-            let ok = keep[i];
-            i += 1;
-            ok
-        });
-    }
-
-    /// 在完整候选上应用查询偏好；保护层在前，层内用统一比较器（含证据）。
-    fn apply_personalization_ranked(
-        &self,
-        ranked: &mut Vec<RankedHit>,
-        prefs: &crate::history::Personalization,
-    ) {
-        use crate::history::{history_boost, PIN_BOOST, PROTECTED_TIER_MAX};
-        let mut protected: Vec<RankedHit> = Vec::new();
-        let mut open: Vec<RankedHit> = Vec::new();
-        for hit in ranked.iter() {
+    /// 只写偏好信息与最终分；排序交给统一比较器，不在个性化阶段分叉。
+    fn apply_personalization_boosts(&self, ranked: &mut [RankedHit], prefs: &crate::history::Personalization) {
+        use crate::history::{history_boost, PIN_BOOST};
+        for hit in ranked.iter_mut() {
             let Some(doc) = self.doc(hit.doc_id) else {
                 continue;
             };
             let id = &doc.item.id;
             let base = hit.score;
-            let tier = if hit.quality_tier != 0 {
-                hit.quality_tier
-            } else {
-                crate::history::quality_tier(base)
-            };
             let is_pinned = prefs.pinned.contains(id);
             let usage = prefs.usage.get(id).cloned().unwrap_or_default();
             let pair = prefs.pairs.get(id).cloned().unwrap_or_default();
@@ -639,25 +545,185 @@ impl RetrievalIndex {
             } else {
                 history
             };
-            let mut next = hit.clone();
-            next.quality_tier = tier;
-            next.score = base + boost;
+            hit.score = base + boost;
             if is_pinned {
-                next.matched_by = format!("{}+pin", next.matched_by);
+                hit.matched_by = format!("{}+pin", hit.matched_by);
             } else if boost > 0 {
-                next.matched_by = format!("{}+history", next.matched_by);
-            }
-            if tier <= PROTECTED_TIER_MAX {
-                protected.push(next);
-            } else {
-                open.push(next);
+                hit.matched_by = format!("{}+history", hit.matched_by);
             }
         }
-        protected.sort_by(cmp_ranked_hit);
-        open.sort_by(cmp_ranked_hit);
-        let mut ordered = protected;
-        ordered.extend(open);
-        *ranked = ordered;
+    }
+
+    /// 同一启动身份（规范 exe/AUMID + args）只展示一条：
+    /// 保留分最高的匹配证据与最终分，代表入口优先友好来源。
+    fn group_by_launch_identity(&self, ranked: Vec<RankedHit>) -> Vec<RankedHit> {
+        use crate::app::scanner::util::launch_identity;
+        use std::collections::HashMap;
+
+        let mut groups: HashMap<String, RankedHit> = HashMap::new();
+        for hit in ranked {
+            let Some(doc) = self.doc(hit.doc_id) else {
+                continue;
+            };
+            let key = launch_identity(&doc.item.target, doc.item.args.as_deref());
+            match groups.entry(key) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(hit);
+                }
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    let current = slot.get().clone();
+                    let (strong, weak) = if hit.score >= current.score {
+                        (hit, current)
+                    } else {
+                        (current, hit)
+                    };
+                    let rep = merge_display_rep(strong, weak);
+                    crate::log::info(&format!(
+                        "launch-group: keep={}({}) icon={} score={}",
+                        rep.stable_id, rep.source, rep.has_icon, rep.score
+                    ));
+                    slot.insert(rep);
+                }
+            }
+        }
+        groups.into_values().collect()
+    }
+
+    /// 同产品多入口只展示一条：同安装根（可不同 args）或 AppsFolder 包 + 桌面/开始菜单同名。
+    fn group_same_install_family(&self, ranked: Vec<RankedHit>) -> Vec<RankedHit> {
+        use crate::app::scanner::util::{install_root_dir, names_share_install_family};
+
+        fn is_shell_package(target: &str) -> bool {
+            let t = target.trim();
+            t.len() >= 16
+                && t.is_char_boundary(16)
+                && t[..16].eq_ignore_ascii_case("shell:appsfolder")
+        }
+
+        fn is_friendly(source: &str) -> bool {
+            matches!(source, "start-menu" | "desktop" | "portable")
+        }
+
+        fn should_merge(a: &AppItem, b: &AppItem) -> bool {
+            use crate::app::scanner::util::normalize_path_key;
+            let same_name = names_share_install_family(&a.name, &b.name);
+            let stem_link = exe_stem_matches_name(a, b) || exe_stem_matches_name(b, a);
+            if !same_name && !stem_link {
+                return false;
+            }
+            // 同一 exe 路径：args 可不同（WPS /from=startmenu vs /from=desktop_shortcut）
+            let ta = normalize_path_key(a.target.trim());
+            let tb = normalize_path_key(b.target.trim());
+            if ta == tb && !ta.is_empty() {
+                return true;
+            }
+            let root_a = install_root_dir(&a.target);
+            let root_b = install_root_dir(&b.target);
+            match (root_a, root_b) {
+                (Some(x), Some(y)) => x == y,
+                (None, Some(_)) | (Some(_), None) => {
+                    // AppsFolder/AUMID 无路径安装根：与友好入口同名则视为同一产品
+                    let shell = is_shell_package(&a.target) || is_shell_package(&b.target);
+                    let pair_ok = (is_friendly(&a.source) || is_friendly(&b.source))
+                        || a.source == "app-paths"
+                        || b.source == "app-paths";
+                    same_name && shell && pair_ok
+                }
+                (None, None) => same_name && is_shell_package(&a.target) && is_shell_package(&b.target),
+            }
+        }
+
+        let mut kept: Vec<RankedHit> = Vec::with_capacity(ranked.len());
+        for hit in ranked {
+            let Some(doc) = self.doc(hit.doc_id) else {
+                continue;
+            };
+            if doc.item.source == "uninstall" {
+                // 与同族主程序归并；启动代表由 merge_display_rep 优先友好来源，不会落到 uninst.exe
+                let mut merged = false;
+                for slot in kept.iter_mut() {
+                    let Some(sdoc) = self.doc(slot.doc_id) else {
+                        continue;
+                    };
+                    if sdoc.item.source == "uninstall" {
+                        continue;
+                    }
+                    if !should_merge(&sdoc.item, &doc.item) {
+                        continue;
+                    }
+                    let (strong, weak) = if hit.score >= slot.score {
+                        (hit.clone(), slot.clone())
+                    } else {
+                        (slot.clone(), hit.clone())
+                    };
+                    let rep = merge_display_rep(strong, weak);
+                    *slot = rep;
+                    merged = true;
+                    break;
+                }
+                if !merged {
+                    kept.push(hit);
+                }
+                continue;
+            }
+            let mut merged = false;
+            for slot in kept.iter_mut() {
+                let Some(sdoc) = self.doc(slot.doc_id) else {
+                    continue;
+                };
+                if sdoc.item.source == "uninstall" {
+                    // 主应用后到：挤掉同族卸载项
+                    continue;
+                }
+                if !should_merge(&sdoc.item, &doc.item) {
+                    continue;
+                }
+                let (strong, weak) = if hit.score >= slot.score {
+                    (hit.clone(), slot.clone())
+                } else {
+                    (slot.clone(), hit.clone())
+                };
+                let rep = merge_display_rep(strong, weak);
+                // 卸载项不得成为启动代表
+                let rep = if rep.source == "uninstall" && slot.source != "uninstall" {
+                    let mut r = slot.clone();
+                    r.score = rep.score;
+                    r.quality_tier = rep.quality_tier;
+                    r.matched_by = rep.matched_by;
+                    r.evidence = rep.evidence;
+                    if !r.has_icon && rep.has_icon {
+                        r.icon_doc_id = rep.icon_doc_id;
+                        r.has_icon = true;
+                    }
+                    r
+                } else {
+                    rep
+                };
+                crate::log::info(&format!(
+                    "install-family: keep={}({}) icon={} score={} from={}+{}",
+                    rep.stable_id,
+                    rep.source,
+                    rep.has_icon,
+                    rep.score,
+                    sdoc.item.source,
+                    doc.item.source
+                ));
+                *slot = rep;
+                merged = true;
+                break;
+            }
+            if !merged {
+                // 新可启动应用进入时，清掉同名族的卸载占位
+                kept.retain(|s| {
+                    self.doc(s.doc_id).is_none_or(|d| {
+                        !(d.item.source == "uninstall"
+                            && names_share_install_family(&d.item.name, &doc.item.name))
+                    })
+                });
+                kept.push(hit);
+            }
+        }
+        kept
     }
 }
 
@@ -671,6 +737,74 @@ fn push_unique_nonempty(values: &mut Vec<String>, value: String) {
     if !value.is_empty() {
         push_unique(values, value);
     }
+}
+
+fn launch_source_priority(source: &str) -> u8 {
+    match source {
+        "start-menu" => 0,
+        "desktop" => 1,
+        "portable" => 2,
+        "uninstall" => 3,
+        "app-paths" => 4,
+        "uwp" | "apps-folder" => 5,
+        "commands" => 6,
+        _ => 7,
+    }
+}
+
+/// 相关性取 strong；启动代表优先友好来源（保留 lnk 的 target/args/working_dir）；
+/// 展示图标可从组内带图标的入口借用。
+fn merge_display_rep(strong: RankedHit, weak: RankedHit) -> RankedHit {
+    // 启动代表：来源友好 → 带 working_dir 的 lnk → 带图标
+    let launch_key = |h: &RankedHit| {
+        (
+            launch_source_priority(&h.source),
+            if h.has_working_dir { 0u8 } else { 1u8 },
+            if h.has_icon { 0u8 } else { 1u8 },
+        )
+    };
+    let launch = if launch_key(&weak) < launch_key(&strong) {
+        weak.clone()
+    } else {
+        strong.clone()
+    };
+    let other = if launch.doc_id == strong.doc_id {
+        weak.clone()
+    } else {
+        strong.clone()
+    };
+    let mut rep = launch.clone();
+    rep.score = strong.score;
+    rep.quality_tier = strong.quality_tier;
+    rep.matched_by = strong.matched_by;
+    rep.evidence = strong.evidence;
+    if !rep.has_icon && other.has_icon {
+        rep.icon_doc_id = other.doc_id;
+        rep.has_icon = true;
+    }
+    rep
+}
+
+/// exe 文件名（去扩展）与另一条展示名一致：app-paths 的 `wps` ↔ 快捷方式 `WPS Office` 用。
+fn exe_stem_matches_name(item: &AppItem, other: &AppItem) -> bool {
+    use std::path::Path;
+    let body = item
+        .target
+        .trim()
+        .strip_prefix("shell:AppsFolder\\")
+        .or_else(|| item.target.trim().strip_prefix("shell:appsfolder\\"))
+        .unwrap_or(item.target.trim());
+    let Some(stem) = Path::new(body)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase())
+    else {
+        return false;
+    };
+    if stem.len() < 3 || stem.contains(' ') {
+        return false;
+    }
+    let family = crate::app::scanner::util::display_family_key(&other.name);
+    family == stem || family.starts_with(&format!("{stem} "))
 }
 
 fn item_extra_keywords(item: &AppItem) -> Vec<String> {

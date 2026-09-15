@@ -171,6 +171,13 @@ pub struct RankedHit {
     pub name_len: usize,
     pub name_lower: String,
     pub stable_id: String,
+    pub source: String,
+    /// 是否已有可展示图标；归并时优先用带图标的入口做代表。
+    pub has_icon: bool,
+    /// 图标可来自组内另一入口（启动仍用 doc_id 对应的 target/args）。
+    pub icon_doc_id: DocId,
+    /// 快捷方式通常带 working_dir；同源时优先作为启动代表。
+    pub has_working_dir: bool,
 }
 
 /// 同分证据比较：更早起点 / 更少跳空 / 更低代价 / 更长覆盖优先。
@@ -184,15 +191,34 @@ pub fn cmp_evidence(a: &MatchEvidence, b: &MatchEvidence) -> std::cmp::Ordering 
     }
 }
 
-/// 统一最终比较器：层 → 分 → 证据 → 名称长度 → 名称 → 稳定 id。
+/// 统一最终比较器：
+/// 明确匹配保护组（Alias/Name Exact 等）始终在前，组内按 层→分→证据；
+/// 普通组不按小层锁死，按 最终分→证据→稳定兜底，允许偏好抬升相近候选。
 pub fn cmp_ranked_hit(a: &RankedHit, b: &RankedHit) -> std::cmp::Ordering {
-    a.quality_tier
-        .cmp(&b.quality_tier)
-        .then_with(|| b.score.cmp(&a.score))
-        .then_with(|| cmp_evidence(&a.evidence, &b.evidence))
-        .then_with(|| a.name_len.cmp(&b.name_len))
-        .then_with(|| a.name_lower.cmp(&b.name_lower))
-        .then_with(|| a.stable_id.cmp(&b.stable_id))
+    use crate::history::PROTECTED_TIER_MAX;
+    let a_protected = a.quality_tier <= PROTECTED_TIER_MAX;
+    let b_protected = b.quality_tier <= PROTECTED_TIER_MAX;
+    let stable = |a: &RankedHit, b: &RankedHit| {
+        a.name_len
+            .cmp(&b.name_len)
+            .then_with(|| a.name_lower.cmp(&b.name_lower))
+            .then_with(|| a.stable_id.cmp(&b.stable_id))
+    };
+    match (a_protected, b_protected) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        (true, true) => a
+            .quality_tier
+            .cmp(&b.quality_tier)
+            .then_with(|| b.score.cmp(&a.score))
+            .then_with(|| cmp_evidence(&a.evidence, &b.evidence))
+            .then_with(|| stable(a, b)),
+        (false, false) => b
+            .score
+            .cmp(&a.score)
+            .then_with(|| cmp_evidence(&a.evidence, &b.evidence))
+            .then_with(|| stable(a, b)),
+    }
 }
 
 /// 每 Query 构建一次的匹配上下文：ib-pinyin 混合拼音 + nucleo 对齐缓冲。
@@ -1063,7 +1089,6 @@ fn ordered_mixed_align(
     let mut first_start = None;
     let mut end = 0usize;
     let mut gaps = 0usize;
-    let mut last_cjk = (0usize, 0usize);
 
     let name_index_at_pinyin_end = |abs_end: usize| -> usize {
         if !syllables_for_name {
@@ -1106,7 +1131,6 @@ fn ordered_mixed_align(
                 }
                 name_i = start + need.len();
                 end = end.max(name_i);
-                last_cjk = (start, name_i);
                 if syllables_for_name {
                     py_i = syllables[..name_i].iter().map(|s| s.len()).sum();
                 }
@@ -1152,20 +1176,7 @@ fn ordered_mixed_align(
                         continue;
                     }
                 }
-                // 刚匹配的 CJK 段拼音尾部复述（微信xin ← weixin 的 xin）
-                if last_cjk.1 > last_cjk.0 {
-                    let region_py: String = if syllables_for_name {
-                        syllables[last_cjk.0..last_cjk.1].concat()
-                    } else {
-                        pinyin.to_string()
-                    };
-                    if region_py.ends_with(s.as_str()) || region_py.contains(s.as_str()) {
-                        if first_start.is_none() {
-                            first_start = Some(last_cjk.0);
-                        }
-                        continue;
-                    }
-                }
+                // 拒绝复用刚匹配汉字区域的拼音（微信xin）；这类只能走宽召回。
                 return None;
             }
         }
@@ -1413,14 +1424,22 @@ mod tests {
     }
 
     #[test]
-    fn ordered_mixed_accepts_name_then_pinyin_suffix() {
+    fn ordered_mixed_accepts_hanzi_then_remaining_pinyin() {
+        let parts = vec![MixedPart::Cjk("微".into()), MixedPart::Latin("xin".into())];
+        let syl = vec!["wei".to_string(), "xin".to_string()];
+        let hit = ordered_mixed_align(&parts, "微信", "weixin", &syl);
+        assert!(hit.is_some(), "微xin 应有序对齐到微信");
+    }
+
+    #[test]
+    fn ordered_mixed_rejects_pinyin_restatement_of_full_hanzi() {
         let parts = vec![
             MixedPart::Cjk("微信".into()),
             MixedPart::Latin("xin".into()),
         ];
         let syl = vec!["wei".to_string(), "xin".to_string()];
         let hit = ordered_mixed_align(&parts, "微信", "weixin", &syl);
-        assert!(hit.is_some(), "微信xin 应有序对齐到微信");
+        assert!(hit.is_none(), "微信xin 不得视为有序对齐（复用已消费拼音）");
     }
 
     #[test]
