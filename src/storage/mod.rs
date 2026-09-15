@@ -303,6 +303,49 @@ impl HistoryDb {
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default()
     }
+
+    /// 全量 Usage 快照（统一排序在截断前需要完整候选集的个性化）。
+    pub fn usage_all(&self) -> HashMap<String, UsageStats> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT item_id, launch_count, last_used_at FROM usage_history",
+        ) else {
+            return HashMap::new();
+        };
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                UsageStats {
+                    launch_count: row.get(1)?,
+                    last_used_at: row.get(2)?,
+                },
+            ))
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    }
+
+    /// 某 Query 的全部配对快照（不按候选 id 过滤）。
+    pub fn query_pairs_for(&self, query_norm: &str) -> HashMap<String, QueryPairStats> {
+        if query_norm.is_empty() {
+            return HashMap::new();
+        }
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT item_id, count, last_used_at FROM query_history WHERE query = ?1",
+        ) else {
+            return HashMap::new();
+        };
+        stmt.query_map(params![query_norm], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                QueryPairStats {
+                    count: row.get(1)?,
+                    last_used_at: row.get(2)?,
+                },
+            ))
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    }
 }
 
 /// 生成 `?,?,?` 占位符。

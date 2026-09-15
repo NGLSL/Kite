@@ -1,16 +1,18 @@
 //! 固定 Query 评估：加载 `tests/search_cases.json`，输出 Top1 / Recall@5 / MRR 与缺口。
 //!
 //! 运行：`cargo test search_eval -- --nocapture`
-//! `known-gap` 样本计入报告但不在 CI 硬失败；票 07/08/09 合入后应改为 `required`。
+//! `known-gap` 样本计入报告但不在 CI 硬失败。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Instant;
 
 use serde::Deserialize;
 
+use crate::history::Personalization;
 use crate::model::AppItem;
-use crate::search::{search, TOP_N};
+use crate::search::{search_with_personalization, RetrievalIndex, TOP_N};
+use crate::storage::{QueryPairStats, UsageStats};
 
 #[derive(Debug, Deserialize)]
 struct CasesFile {
@@ -33,6 +35,45 @@ struct FixtureApp {
     source: String,
 }
 
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(untagged)]
+enum HistoryField {
+    #[default]
+    Missing,
+    NoneToken(#[allow(dead_code)] String),
+    Spec(HistorySpecObj),
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+struct HistorySpecObj {
+    #[serde(default)]
+    pairs: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    usage: HashMap<String, i64>,
+    #[serde(default)]
+    pinned: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct HistorySpec {
+    pairs: HashMap<String, Vec<String>>,
+    usage: HashMap<String, i64>,
+    pinned: Vec<String>,
+}
+
+impl From<HistoryField> for HistorySpec {
+    fn from(value: HistoryField) -> Self {
+        match value {
+            HistoryField::Missing | HistoryField::NoneToken(_) => HistorySpec::default(),
+            HistoryField::Spec(s) => HistorySpec {
+                pairs: s.pairs,
+                usage: s.usage,
+                pinned: s.pinned,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct Case {
     id: String,
@@ -44,9 +85,13 @@ struct Case {
     #[serde(default)]
     forbidden_top: Vec<String>,
     #[serde(default)]
+    history: HistoryField,
+    #[serde(default)]
     status: Status,
     #[serde(default)]
     gap_ticket: Option<String>,
+    #[serde(default)]
+    family: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +106,7 @@ enum Status {
 struct CaseOutcome {
     id: String,
     query: String,
+    family: Option<String>,
     top1_hit: bool,
     recall5: f64,
     reciprocal_rank: f64,
@@ -94,9 +140,49 @@ fn build_index(fixture: &Fixture) -> Vec<AppItem> {
         .collect()
 }
 
-fn evaluate_case(apps: &[AppItem], case: &Case) -> CaseOutcome {
+fn personalization_for(case: &Case) -> Option<Personalization> {
+    let history: HistorySpec = case.history.clone().into();
+    if history.pairs.is_empty() && history.usage.is_empty() && history.pinned.is_empty() {
+        return None;
+    }
+    let query_norm = crate::search::normalize_for_index(&case.query);
+    let mut prefs = Personalization {
+        query_norm: query_norm.clone(),
+        now: 1_700_086_400,
+        ..Personalization::default()
+    };
+    // 同一 Query 的选择次数 = 列表长度
+    for (q, ids) in &history.pairs {
+        let key = crate::search::normalize_for_index(q);
+        if key != query_norm {
+            continue;
+        }
+        for id in ids {
+            let entry = prefs
+                .pairs
+                .entry(id.clone())
+                .or_insert_with(QueryPairStats::default);
+            entry.count += 1;
+            entry.last_used_at = 1_700_000_000;
+        }
+    }
+    for (id, count) in &history.usage {
+        prefs.usage.insert(
+            id.clone(),
+            UsageStats {
+                launch_count: *count,
+                last_used_at: 1_700_000_000,
+            },
+        );
+    }
+    prefs.pinned = history.pinned.iter().cloned().collect::<HashSet<_>>();
+    Some(prefs)
+}
+
+fn evaluate_case(index: &RetrievalIndex, case: &Case) -> CaseOutcome {
     let t0 = Instant::now();
-    let hits = search(apps, &case.query, &[], TOP_N);
+    let prefs = personalization_for(case);
+    let hits = search_with_personalization(index, &case.query, &[], prefs.as_ref(), TOP_N);
     let latency_us = t0.elapsed().as_micros();
     let ids: Vec<&str> = hits.iter().map(|h| h.item.id.as_str()).collect();
     let top_names: Vec<String> = hits.iter().map(|h| h.item.display_name.clone()).collect();
@@ -133,6 +219,7 @@ fn evaluate_case(apps: &[AppItem], case: &Case) -> CaseOutcome {
     CaseOutcome {
         id: case.id.clone(),
         query: case.query.clone(),
+        family: case.family.clone(),
         top1_hit,
         recall5,
         reciprocal_rank,
@@ -173,8 +260,9 @@ fn aggregate(outcomes: &[CaseOutcome]) -> Metrics {
         .filter(|o| !o.top1_hit || o.forbidden_violated || o.recall5 < 1.0)
         .map(|o| {
             format!(
-                "{} q={:?} top={:?} top1={} recall5={:.2} forbidden={}",
+                "{}[{}] q={:?} top={:?} top1={} recall5={:.2} forbidden={}",
                 o.id,
+                o.family.as_deref().unwrap_or("-"),
                 o.query,
                 o.top_names.first(),
                 o.top1_hit,
@@ -205,6 +293,22 @@ fn print_report(label: &str, metrics: &Metrics, outcomes: &[CaseOutcome]) {
         metrics.latency_p50_us,
         metrics.latency_p95_us
     );
+    // 按算法族汇总
+    let mut families: Vec<(String, Vec<&CaseOutcome>)> = Vec::new();
+    for o in outcomes {
+        let fam = o.family.clone().unwrap_or_else(|| "other".into());
+        if let Some(slot) = families.iter_mut().find(|(n, _)| *n == fam) {
+            slot.1.push(o);
+        } else {
+            families.push((fam, vec![o]));
+        }
+    }
+    for (fam, list) in &families {
+        let n = list.len().max(1);
+        let top1 = list.iter().filter(|o| o.top1_hit).count() as f64 / n as f64;
+        let r5 = list.iter().map(|o| o.recall5).sum::<f64>() / n as f64;
+        println!("  family {fam}: n={} top1={top1:.3} recall@5={r5:.3}", list.len());
+    }
     for o in outcomes {
         let mark = if o.status == Status::KnownGap {
             "GAP"
@@ -218,8 +322,9 @@ fn print_report(label: &str, metrics: &Metrics, outcomes: &[CaseOutcome]) {
             .as_deref()
             .map(|t| format!(" ticket#{t}"))
             .unwrap_or_default();
+        let fam = o.family.as_deref().unwrap_or("-");
         println!(
-            "  [{mark}] {} q={:?} -> {:?}{ticket}",
+            "  [{mark}] {fam} {} q={:?} -> {:?}{ticket}",
             o.id,
             o.query,
             o.top_names.iter().take(3).collect::<Vec<_>>()
@@ -243,11 +348,12 @@ fn search_eval_baseline() {
         .get("default")
         .expect("default fixture present");
     let apps = build_index(fixture);
+    let index = RetrievalIndex::build(&apps, &[]);
 
     let mut outcomes = Vec::with_capacity(file.cases.len());
     for case in &file.cases {
         assert_eq!(case.fixture, "default", "case {} fixture", case.id);
-        outcomes.push(evaluate_case(&apps, case));
+        outcomes.push(evaluate_case(&index, case));
     }
 
     print_report("all", &aggregate(&outcomes), &outcomes);

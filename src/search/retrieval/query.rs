@@ -23,14 +23,58 @@ pub struct ParsedQuery {
     pub compact: String,
     pub tokens: Vec<String>,
     pub chars: Vec<char>,
-    /// 拉丁字母/数字串（可走英文缩写与拼音解释）。
+    /// 全串为拉丁字母/数字（可走英文缩写与纯拼音解释）。
     pub latin: bool,
+    /// 含 ASCII 字母/数字即可参与拼音解释（允许汉字+拼音/英文混输）。
+    pub has_ascii_alnum: bool,
+    /// 同时含 CJK 与 ASCII 字母数字（混输）。
+    pub mixed: bool,
+    /// 混输时的 CJK 连续段（用于名称精确/包含锚定）。
+    pub cjk_parts: Vec<String>,
+    /// 混输时的拉丁/数字段（用于拼音/英文解释）。
+    pub latin_parts: Vec<String>,
 }
 
 impl ParsedQuery {
     pub fn is_empty(&self) -> bool {
         self.raw_norm.is_empty()
     }
+}
+
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32, 0x4e00..=0x9fff | 0x3400..=0x4dbf)
+}
+
+fn split_script_parts(s: &str) -> (Vec<String>, Vec<String>) {
+    let mut cjk_parts = Vec::new();
+    let mut latin_parts = Vec::new();
+    let mut cjk_buf = String::new();
+    let mut latin_buf = String::new();
+    let flush_cjk = |buf: &mut String, out: &mut Vec<String>| {
+        if !buf.is_empty() {
+            out.push(std::mem::take(buf));
+        }
+    };
+    let flush_latin = |buf: &mut String, out: &mut Vec<String>| {
+        if !buf.is_empty() {
+            out.push(std::mem::take(buf));
+        }
+    };
+    for c in s.chars() {
+        if is_cjk(c) {
+            flush_latin(&mut latin_buf, &mut latin_parts);
+            cjk_buf.push(c);
+        } else if c.is_ascii_alphanumeric() {
+            flush_cjk(&mut cjk_buf, &mut cjk_parts);
+            latin_buf.push(c);
+        } else {
+            flush_cjk(&mut cjk_buf, &mut cjk_parts);
+            flush_latin(&mut latin_buf, &mut latin_parts);
+        }
+    }
+    flush_cjk(&mut cjk_buf, &mut cjk_parts);
+    flush_latin(&mut latin_buf, &mut latin_parts);
+    (cjk_parts, latin_parts)
 }
 
 pub fn parse(query: &str) -> ParsedQuery {
@@ -41,15 +85,27 @@ pub fn parse(query: &str) -> ParsedQuery {
         .map(str::to_string)
         .collect::<Vec<_>>();
     let chars: Vec<char> = raw_norm.chars().collect();
+    let has_ascii_alnum = chars.iter().any(|c| c.is_ascii_alphanumeric());
+    let has_cjk = chars.iter().copied().any(is_cjk);
     let latin = !raw_norm.is_empty()
         && raw_norm
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c.is_whitespace());
+    let mixed = has_ascii_alnum && has_cjk;
+    let (cjk_parts, latin_parts) = if mixed {
+        split_script_parts(&raw_norm)
+    } else {
+        (Vec::new(), Vec::new())
+    };
     ParsedQuery {
         raw_norm,
         compact: compact_q,
         tokens: toks,
         chars,
         latin,
+        has_ascii_alnum,
+        mixed,
+        cjk_parts,
+        latin_parts,
     }
 }

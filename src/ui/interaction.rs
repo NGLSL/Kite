@@ -113,6 +113,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             state.query = q;
             state.request_file_search();
             state.refresh_results();
+            state.hover_suppressed = false;
             sync_scroll(state)
         }
         Message::ClearQuery => {
@@ -126,7 +127,11 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             ])
         }
         Message::HoverSelect(i) => {
-            // 对齐前端 onMouseMove：悬停只改选中，不滚动（否则滚轮一滚就被 scroll_to 拽走）
+            // 对齐前端 onMouseMove：悬停只改选中，不滚动。
+            // 键盘导航/scroll_to 后抑制，避免列表内容换行触发 on_enter 抢选中。
+            if state.hover_suppressed {
+                return Task::none();
+            }
             if state.selected != i {
                 state.selected = i;
             }
@@ -168,6 +173,13 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::Rescan => {
             plog("rescan requested from settings/tray");
             state.rescan_pending = true;
+            {
+                let mut options = state
+                    .scan_options
+                    .write()
+                    .unwrap_or_else(|error| error.into_inner());
+                options.force_uwp_refresh = true;
+            }
             let index = state.index.clone();
             let dir = state.icon_dir.clone();
             let options = state.scan_options.clone();
@@ -428,6 +440,15 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::CursorMoved(p) => {
             state.cursor.set(p);
+            // 鼠标有实际位移才恢复悬停选中；scroll_to 造成的 on_enter 不算。
+            let moved = match state.last_hover_pt {
+                Some(last) => (last.x - p.x).abs() > 1.0 || (last.y - p.y).abs() > 1.0,
+                None => true,
+            };
+            if moved {
+                state.hover_suppressed = false;
+                state.last_hover_pt = Some(p);
+            }
             Task::none()
         }
         Message::MousePressed(_btn) => {
@@ -492,8 +513,8 @@ mod context_menu_tests {
     use super::*;
 
     fn result(id: &str, target: &str) -> SearchResult {
-        SearchResult {
-            item: AppItem::scanned(
+        SearchResult::scored(
+            AppItem::scanned(
                 id.to_string(),
                 id.to_string(),
                 target.to_string(),
@@ -501,9 +522,9 @@ mod context_menu_tests {
                 None,
                 "test",
             ),
-            score: 1,
-            matched_by: "test".to_string(),
-        }
+            1,
+            "test",
+        )
     }
 
     #[test]

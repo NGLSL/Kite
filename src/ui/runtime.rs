@@ -280,6 +280,8 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         update_asset: None,
         update_checking: false,
         epoch: 0,
+        hover_suppressed: false,
+        last_hover_pt: None,
     };
     // 启动时载入设置（副本库）
     state.hide_on_blur = saved_settings.hide_on_blur;

@@ -20,7 +20,7 @@ use walkdir::WalkDir;
 
 use crate::model::{AppIndex, AppItem};
 use crate::system::icons;
-use cache::ScanCache;
+use cache::{ScanCache, UwpCache};
 use util::{app_display_name, hash_id, normalize_path_key};
 
 type RawItem = (AppItem, Option<String>);
@@ -52,6 +52,8 @@ pub enum ScanPass {
 pub struct ScanOptions {
     pub extra_scoop_shim_dirs: Vec<PathBuf>,
     pub portable_dirs: Vec<PathBuf>,
+    /// 设置/托盘「重新扫描」：强制重枚举 UWP，忽略结果缓存 TTL。
+    pub force_uwp_refresh: bool,
 }
 
 /// 完整扫描。`fast` 为 true 时只建列表、不提图标（首屏用）。
@@ -72,6 +74,7 @@ pub fn scan_apps_pass(
         &ScanOptions {
             extra_scoop_shim_dirs: extra_scoop_shim_dirs.to_vec(),
             portable_dirs: Vec::new(),
+            force_uwp_refresh: false,
         },
     )
 }
@@ -121,6 +124,66 @@ fn scan_apps_with_options(icon_dir: &Path, pass: ScanPass, options: &ScanOptions
     let scoop_global_root = std::env::var_os("SCOOP_GLOBAL").map(PathBuf::from);
 
     crate::log::info(&format!("scan pass={pass:?} start"));
+
+    // Full：UWP/Store 枚举（COM，较慢）与目录扫描并行。
+    // 结果落盘缓存：TTL 内自动重建直接复用；force_uwp_refresh 强制重枚举。
+    let uwp_force = options.force_uwp_refresh;
+    let uwp_icon_dir = icon_dir.to_path_buf();
+    let uwp_worker = if fast {
+        None
+    } else {
+        Some(std::thread::spawn(move || {
+            let t = Instant::now();
+            let cache = UwpCache::load(&uwp_icon_dir);
+            let now = crate::storage::now_ts().max(0) as u64;
+            if let Some(cached) = cache.fresh_items(uwp_force, now) {
+                crate::log::info(&format!(
+                    "uwp cache hit: {} items (force={uwp_force}) in {:?}",
+                    cached.len(),
+                    t.elapsed()
+                ));
+                return cached
+                    .into_iter()
+                    .map(|c| {
+                        let source = if c.source.is_empty() {
+                            "uwp"
+                        } else {
+                            c.source.as_str()
+                        };
+                        let mut item = crate::model::AppItem::scanned(
+                            c.id,
+                            c.name,
+                            c.target,
+                            None,
+                            None,
+                            source,
+                        );
+                        item.attach_search_fields();
+                        (item, c.icon_src)
+                    })
+                    .collect::<Vec<_>>();
+            }
+            let mut items = Vec::new();
+            crate::app::uwp::collect_uwp("uwp", &mut items);
+            let snapshot: Vec<cache::CachedUwpItem> = items
+                .iter()
+                .map(|(item, icon_src)| cache::CachedUwpItem {
+                    id: item.id.clone(),
+                    name: item.name.clone(),
+                    target: item.target.clone(),
+                    source: item.source.clone(),
+                    icon_src: icon_src.clone(),
+                })
+                .collect();
+            cache.save(snapshot, now);
+            crate::log::info(&format!(
+                "uwp fresh: {} items in {:?}",
+                items.len(),
+                t.elapsed()
+            ));
+            items
+        }))
+    };
 
     // Scoop exposes installed applications through its shims directory rather
     // than Start Menu shortcuts. Scan this small, well-known directory first so
@@ -254,15 +317,22 @@ fn scan_apps_with_options(icon_dir: &Path, pass: ScanPass, options: &ScanOptions
         t0.elapsed()
     ));
 
-    // AppsFolder 枚举较慢，含 Store 应用和经典系统入口；后台完整扫描再补齐。
-    if !fast {
+    // AppsFolder 枚举较慢；Full 档已在扫描开始时后台启动。
+    if let Some(handle) = uwp_worker {
         let t = Instant::now();
-        crate::app::uwp::collect_uwp("uwp", &mut raw);
-        crate::log::info(&format!(
-            "apps-folder: total {} in {:?}",
-            raw.len(),
-            t.elapsed()
-        ));
+        match handle.join() {
+            Ok(mut items) => {
+                let before = raw.len();
+                raw.append(&mut items);
+                crate::log::info(&format!(
+                    "apps-folder: +{} -> total {} in {:?} (joined)",
+                    raw.len() - before,
+                    raw.len(),
+                    t.elapsed()
+                ));
+            }
+            Err(_) => crate::log::info("uwp worker panicked; skip"),
+        }
     }
 
     let mut items = dedupe(raw);
@@ -279,33 +349,44 @@ fn scan_apps_with_options(icon_dir: &Path, pass: ScanPass, options: &ScanOptions
     let t = Instant::now();
     let mut py = Duration::ZERO;
     let mut metadata_time = Duration::ZERO;
-    for (mut item, icon_src) in items {
+    // Full：先并行取版本资源关键词（缓存 + 线程池），再逐条合并，避免串行 ~50ms/文件。
+    let meta_batch: Vec<Vec<String>> = if fast {
+        Vec::new()
+    } else {
+        let tm = Instant::now();
+        let paths: Vec<PathBuf> = items
+            .iter()
+            .map(|(item, _)| PathBuf::from(&item.target))
+            .collect();
+        let mut meta_cache = metadata::MetaCache::load(icon_dir);
+        let batch = metadata::executable_keywords_batch(&paths, &mut meta_cache);
+        meta_cache.save();
+        crate::log::info(&format!(
+            "meta cache: {} hits / {} misses",
+            meta_cache.hits, meta_cache.misses
+        ));
+        metadata_time += tm.elapsed();
+        batch
+    };
+    for (idx, (mut item, icon_src)) in items.into_iter().enumerate() {
         if !fast {
-            let tm = Instant::now();
-            for keyword in metadata::executable_keywords(Path::new(&item.target)) {
-                if !item
-                    .search_keywords
-                    .iter()
-                    .any(|known| known.eq_ignore_ascii_case(&keyword))
-                {
-                    item.search_keywords.push(keyword);
+            if let Some(keywords) = meta_batch.get(idx) {
+                for keyword in keywords {
+                    if !item
+                        .search_keywords
+                        .iter()
+                        .any(|known| known.eq_ignore_ascii_case(keyword))
+                    {
+                        item.search_keywords.push(keyword.clone());
+                    }
                 }
             }
-            metadata_time += tm.elapsed();
         }
         let tp = Instant::now();
         item.attach_search_fields();
         py += tp.elapsed();
-        // 保留提取源，快速扫描阶段先不提图标，稍后统一补
+        // 保留提取源；Full 档在列表收齐后并行提图标，避免串行 Shell 提取。
         item.icon_src = icon_src.or_else(|| Some(item.target.clone()));
-        if !fast {
-            item.icon = icons::cache_icon(
-                icon_dir,
-                &item.id,
-                item.icon_src.as_deref(),
-                Some(item.target.as_str()),
-            );
-        }
         apps.push(item);
     }
 
@@ -318,17 +399,36 @@ fn scan_apps_with_options(icon_dir: &Path, pass: ScanPass, options: &ScanOptions
     for item in &mut apps[existing_len..] {
         item.attach_search_fields();
         item.icon_src = Some(item.target.clone());
-        if !fast {
-            item.icon = icons::cache_icon(
-                icon_dir,
-                &item.id,
-                item.icon_src.as_deref(),
-                Some(item.target.as_str()),
-            );
+    }
+
+    let mut icon_time = Duration::ZERO;
+    if !fast {
+        let t_icon = Instant::now();
+        let pending: Vec<(String, Option<String>, Option<String>)> = apps
+            .iter()
+            .filter(|a| a.icon.is_none())
+            .map(|a| {
+                let src = a.icon_src.clone().filter(|s| !s.is_empty());
+                let target = Some(a.target.clone()).filter(|s| !s.is_empty());
+                (a.id.clone(), src, target)
+            })
+            .collect();
+        let extracted = extract_icons_parallel(&pending, icon_dir);
+        for app in apps.iter_mut() {
+            if app.icon.is_none() {
+                if let Some(path) = extracted.get(&app.id) {
+                    app.icon = path.clone();
+                }
+            }
         }
+        icon_time = t_icon.elapsed();
+        crate::log::info(&format!(
+            "icons parallel: {} pending in {icon_time:?}",
+            pending.len()
+        ));
     }
     crate::log::info(&format!(
-        "fields/icons pass={pass:?}: {} apps in {:?} metadata={metadata_time:?} pinyin={py:?}",
+        "fields pass={pass:?}: {} apps in {:?} metadata={metadata_time:?} pinyin={py:?} icons={icon_time:?}",
         apps.len(),
         t.elapsed()
     ));

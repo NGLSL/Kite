@@ -34,11 +34,129 @@ const MIN_ACRONYM_LEN: usize = 2;
 /// 跳字最大额外跨度（Query 长度之外允许跳过的字符数）。
 const SKIP_EXTRA_SPAN: usize = 3;
 
+/// 命中字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchField {
+    Name,
+    Display,
+    Alias,
+    Pinyin,
+    Keyword,
+    Context,
+}
+
+/// 匹配方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchKind {
+    Exact,
+    Prefix,
+    Contiguous,
+    Acronym,
+    Skip,
+    Fuzzy,
+}
+
+/// 排序用匹配证据：同分时完整词/词边界/连续紧凑优先。
+#[derive(Debug, Clone, Copy)]
+pub struct MatchEvidence {
+    pub field: MatchField,
+    pub kind: MatchKind,
+    /// 命中起点（字符）；拼音映射回原名称后的起点，未知为 usize::MAX。
+    pub start: usize,
+    /// 连续覆盖长度（字符）。
+    pub span: usize,
+    /// 非连续额外跳过数。
+    pub gaps: usize,
+    /// 编辑距离代价（fuzzy/symspell）。
+    pub edit_cost: usize,
+}
+
+impl MatchEvidence {
+    pub fn exact(field: MatchField) -> Self {
+        Self {
+            field,
+            kind: MatchKind::Exact,
+            start: 0,
+            span: usize::MAX,
+            gaps: 0,
+            edit_cost: 0,
+        }
+    }
+
+    pub fn contiguous(field: MatchField, start: usize, span: usize) -> Self {
+        Self {
+            field,
+            kind: MatchKind::Contiguous,
+            start,
+            span,
+            gaps: 0,
+            edit_cost: 0,
+        }
+    }
+
+    pub fn prefix(field: MatchField, span: usize) -> Self {
+        Self {
+            field,
+            kind: MatchKind::Prefix,
+            start: 0,
+            span,
+            gaps: 0,
+            edit_cost: 0,
+        }
+    }
+
+    /// 同分比较：更早起点、更少跳空、更低编辑代价、更长连续覆盖；再按字段与匹配方式稳定性。
+    pub fn outranks(&self, other: &Self) -> bool {
+        match (self.start, other.start) {
+            (a, b) if a != b => a < b,
+            _ => {
+                if self.gaps != other.gaps {
+                    return self.gaps < other.gaps;
+                }
+                if self.edit_cost != other.edit_cost {
+                    return self.edit_cost < other.edit_cost;
+                }
+                if self.span != other.span {
+                    return self.span > other.span;
+                }
+                let fr = field_rank(self.field).cmp(&field_rank(other.field));
+                if fr != std::cmp::Ordering::Equal {
+                    return fr == std::cmp::Ordering::Less;
+                }
+                kind_rank(self.kind) < kind_rank(other.kind)
+            }
+        }
+    }
+}
+
+fn field_rank(field: MatchField) -> u8 {
+    match field {
+        MatchField::Name => 0,
+        MatchField::Display => 1,
+        MatchField::Alias => 2,
+        MatchField::Pinyin => 3,
+        MatchField::Keyword => 4,
+        MatchField::Context => 5,
+    }
+}
+
+fn kind_rank(kind: MatchKind) -> u8 {
+    match kind {
+        MatchKind::Exact => 0,
+        MatchKind::Prefix => 1,
+        MatchKind::Contiguous => 2,
+        MatchKind::Acronym => 3,
+        MatchKind::Skip => 4,
+        MatchKind::Fuzzy => 5,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ScoredHit {
     pub doc_id: DocId,
     pub score: i32,
     pub matched_by: String,
+    pub evidence: MatchEvidence,
 }
 
 /// 每 Query 构建一次的匹配上下文：ib-pinyin 混合拼音 + nucleo 对齐缓冲。
@@ -52,7 +170,8 @@ pub struct QueryContext<'a> {
 
 impl<'a> QueryContext<'a> {
     pub fn build(q: &'a ParsedQuery, _index: &RetrievalIndex) -> Self {
-        let pinyin = if q.latin && q.chars.len() >= 2 {
+        // 含 ASCII 即可参与拼音解释（混输：汉字+拼音/英文）；1 字符走首字母倒排，不建 matcher
+        let pinyin = if q.has_ascii_alnum && q.chars.len() >= 2 {
             Some(
                 PinyinMatcher::builder(q.raw_norm.as_str())
                     .pinyin_notations(PinyinNotation::Ascii | PinyinNotation::AsciiFirstLetter)
@@ -131,25 +250,33 @@ pub fn verify_all(
     candidate_ids.sort_unstable();
     for id in candidate_ids {
         let Some(doc) = index.doc(id) else { continue };
-        if let Some((score, matched_by)) = verify_one(doc, ctx, user_targets) {
+        if let Some(hit) = verify_one(doc, ctx, user_targets) {
             hits.push(ScoredHit {
                 doc_id: id,
-                score,
-                matched_by,
+                score: hit.0,
+                matched_by: hit.1.to_string(),
+                evidence: hit.2,
             });
         }
     }
     hits
 }
 
-fn take_best(
-    best: Option<(i32, &'static str)>,
-    score: i32,
-    kind: &'static str,
-) -> Option<(i32, &'static str)> {
+/// (score, matched_by, evidence)
+type BestHit = (i32, &'static str, MatchEvidence);
+
+fn take_best(best: Option<BestHit>, score: i32, kind: &'static str, evidence: MatchEvidence) -> Option<BestHit> {
     Some(match best {
-        Some((bs, bk)) if bs >= score => (bs, bk),
-        _ => (score, kind),
+        Some((bs, bk, be)) if bs > score => (bs, bk, be),
+        // 同分用证据细排：连续/词边界/更早起点/更少跳空
+        Some((bs, bk, be)) if bs == score => {
+            if evidence.outranks(&be) {
+                (score, kind, evidence)
+            } else {
+                (bs, bk, be)
+            }
+        }
+        _ => (score, kind, evidence),
     })
 }
 
@@ -157,14 +284,15 @@ fn verify_one(
     doc: &IndexedDoc,
     ctx: &mut QueryContext,
     user_targets: &[UserTarget],
-) -> Option<(i32, String)> {
+) -> Option<BestHit> {
     let q = ctx.parsed;
     let name = doc.name.as_str();
     let display = doc.display.as_str();
     let q_raw = q.raw_norm.as_str();
     let q_compact = q.compact.as_str();
+    let q_len = q.chars.len();
 
-    let mut best: Option<(i32, &'static str)> = None;
+    let mut best: Option<BestHit> = None;
 
     // 0) 用户 Alias
     let hit_user = user_targets.iter().any(|t| match &t.id {
@@ -175,7 +303,12 @@ fn verify_one(
         }
     });
     if hit_user {
-        best = take_best(best, SCORE_USER_ALIAS_EXACT, "user-alias-exact");
+        best = take_best(
+            best,
+            SCORE_USER_ALIAS_EXACT,
+            "user-alias-exact",
+            MatchEvidence::exact(MatchField::Alias),
+        );
     }
 
     // 1) 内置 Alias
@@ -184,27 +317,66 @@ fn verify_one(
             .iter()
             .any(|t| name.contains(t) || display.contains(t))
         {
-            best = take_best(best, SCORE_BUILTIN_ALIAS_EXACT, "alias-exact");
+            best = take_best(
+                best,
+                SCORE_BUILTIN_ALIAS_EXACT,
+                "alias-exact",
+                MatchEvidence::exact(MatchField::Alias),
+            );
         }
     }
 
     // 2) Exact / Prefix / Substring
-    for candidate in [name, display] {
+    for (field, candidate) in [(MatchField::Name, name), (MatchField::Display, display)] {
         if candidate == q_raw {
-            best = take_best(best, SCORE_NAME_EXACT, "exact");
+            best = take_best(
+                best,
+                SCORE_NAME_EXACT,
+                "exact",
+                MatchEvidence::exact(field),
+            );
         } else if candidate.starts_with(q_raw) {
-            best = take_best(best, SCORE_PREFIX, "prefix");
-        } else if candidate.contains(q_raw) {
-            best = take_best(best, SCORE_SUBSTRING, "substring");
+            best = take_best(
+                best,
+                SCORE_PREFIX,
+                "prefix",
+                MatchEvidence::prefix(field, q_len),
+            );
+        } else if let Some(start) = candidate.find(q_raw) {
+            best = take_best(
+                best,
+                SCORE_SUBSTRING,
+                "substring",
+                MatchEvidence::contiguous(field, candidate[..start].chars().count(), q_len),
+            );
         }
     }
     for candidate in &doc.keywords {
         if candidate == q_raw {
-            best = take_best(best, SCORE_WORD_EXACT, "keyword-exact");
+            best = take_best(
+                best,
+                SCORE_WORD_EXACT,
+                "keyword-exact",
+                MatchEvidence::exact(MatchField::Keyword),
+            );
         } else if candidate.starts_with(q_raw) {
-            best = take_best(best, SCORE_WORD_PREFIX, "keyword-prefix");
-        } else if candidate.contains(q_raw) {
-            best = take_best(best, SCORE_SUBSTRING - 40, "keyword-substring");
+            best = take_best(
+                best,
+                SCORE_WORD_PREFIX,
+                "keyword-prefix",
+                MatchEvidence::prefix(MatchField::Keyword, q_len),
+            );
+        } else if let Some(start) = candidate.find(q_raw) {
+            best = take_best(
+                best,
+                SCORE_SUBSTRING - 40,
+                "keyword-substring",
+                MatchEvidence::contiguous(
+                    MatchField::Keyword,
+                    candidate[..start].chars().count(),
+                    q_len,
+                ),
+            );
         }
     }
 
@@ -212,20 +384,48 @@ fn verify_one(
     if q_compact.len() >= 2 {
         for candidate in [doc.compact_name.as_str(), doc.compact_display.as_str()] {
             if candidate == q_compact {
-                best = take_best(best, SCORE_COMPACT_EXACT, "compact-exact");
-            } else if q_compact.len() >= MIN_COMPACT_SUBSTR_LEN && candidate.contains(q_compact) {
-                best = take_best(best, SCORE_COMPACT_SUBSTRING, "compact-substring");
+                best = take_best(
+                    best,
+                    SCORE_COMPACT_EXACT,
+                    "compact-exact",
+                    MatchEvidence::exact(MatchField::Name),
+                );
+            } else if q_compact.len() >= MIN_COMPACT_SUBSTR_LEN {
+                if let Some(start) = candidate.find(q_compact) {
+                    best = take_best(
+                        best,
+                        SCORE_COMPACT_SUBSTRING,
+                        "compact-substring",
+                        MatchEvidence::contiguous(
+                            MatchField::Name,
+                            candidate[..start].chars().count(),
+                            q_compact.chars().count(),
+                        ),
+                    );
+                }
             }
         }
         for candidate in &doc.keyword_compacts {
             if candidate == q_compact {
-                best = take_best(best, SCORE_WORD_EXACT, "keyword-compact-exact");
-            } else if q_compact.len() >= MIN_COMPACT_SUBSTR_LEN && candidate.contains(q_compact) {
                 best = take_best(
                     best,
-                    SCORE_COMPACT_SUBSTRING - 60,
-                    "keyword-compact-substring",
+                    SCORE_WORD_EXACT,
+                    "keyword-compact-exact",
+                    MatchEvidence::exact(MatchField::Keyword),
                 );
+            } else if q_compact.len() >= MIN_COMPACT_SUBSTR_LEN {
+                if let Some(start) = candidate.find(q_compact) {
+                    best = take_best(
+                        best,
+                        SCORE_COMPACT_SUBSTRING - 60,
+                        "keyword-compact-substring",
+                        MatchEvidence::contiguous(
+                            MatchField::Keyword,
+                            candidate[..start].chars().count(),
+                            q_compact.chars().count(),
+                        ),
+                    );
+                }
             }
         }
     }
@@ -233,33 +433,147 @@ fn verify_one(
     // 2c) 词边界
     for tok in &doc.tokens {
         if tok == q_raw {
-            best = take_best(best, SCORE_WORD_EXACT, "word-exact");
+            best = take_best(
+                best,
+                SCORE_WORD_EXACT,
+                "word-exact",
+                MatchEvidence::exact(MatchField::Name),
+            );
         } else if q_raw.chars().count() >= MIN_WORD_PREFIX_LEN && tok.starts_with(q_raw) {
-            best = take_best(best, SCORE_WORD_PREFIX, "word-prefix");
+            best = take_best(
+                best,
+                SCORE_WORD_PREFIX,
+                "word-prefix",
+                MatchEvidence::prefix(MatchField::Name, q_len),
+            );
         }
     }
 
     // 2d) 有序多词
     if q.tokens.len() >= 2 && ordered_token_match(&q.tokens, &doc.tokens) {
-        best = take_best(best, SCORE_TOKEN_SEQ, "token-seq");
+        best = take_best(
+            best,
+            SCORE_TOKEN_SEQ,
+            "token-seq",
+            MatchEvidence {
+                field: MatchField::Name,
+                kind: MatchKind::Contiguous,
+                start: 0,
+                span: q_len,
+                gaps: 0,
+                edit_cost: 0,
+            },
+        );
     }
 
     // 2e) 英文缩写
     if q_raw.chars().count() >= MIN_ACRONYM_LEN && !doc.acronym.is_empty() && doc.acronym == q_raw {
-        best = take_best(best, SCORE_ACRONYM, "acronym");
+        best = take_best(
+            best,
+            SCORE_ACRONYM,
+            "acronym",
+            MatchEvidence {
+                field: MatchField::Name,
+                kind: MatchKind::Acronym,
+                start: 0,
+                span: q_len,
+                gaps: 0,
+                edit_cost: 0,
+            },
+        );
+    }
+
+    // 2f) 混输：CJK 段锚定名称，拉丁段走拼音/英文（微信xin / w微）
+    if q.mixed {
+        for src in [name, display] {
+            let cjk_hit = q
+                .cjk_parts
+                .iter()
+                .all(|part| src.contains(part.as_str()) || src.starts_with(part.as_str()));
+            if !cjk_hit || q.cjk_parts.is_empty() {
+                continue;
+            }
+            let latin_ok = q.latin_parts.is_empty()
+                || q.latin_parts.iter().all(|part| {
+                    !doc.pinyin.is_empty() && doc.pinyin.contains(part.as_str())
+                        || !doc.pinyin_initials.is_empty()
+                            && doc.pinyin_initials.contains(part.as_str())
+                        || src.contains(part.as_str())
+                        || doc
+                            .tokens
+                            .iter()
+                            .any(|t| t.starts_with(part.as_str()) || t.contains(part.as_str()))
+                });
+            if latin_ok {
+                let field = if src == name {
+                    MatchField::Name
+                } else {
+                    MatchField::Display
+                };
+                let start = q
+                    .cjk_parts
+                    .first()
+                    .and_then(|p| src.find(p.as_str()))
+                    .map(|b| src[..b].chars().count())
+                    .unwrap_or(0);
+                best = take_best(
+                    best,
+                    SCORE_WORD_EXACT,
+                    "mixed-cjk-latin",
+                    MatchEvidence::contiguous(field, start, q.cjk_parts.iter().map(|p| p.chars().count()).sum()),
+                );
+            }
+        }
     }
 
     // 3) 拼音（全拼 / 首字母 / ib-pinyin 混合+多音字）
+    // 位置映射回原名称：全拼/首字母与 display 字符序对齐时用音节起点，否则记 MAX。
     if !doc.pinyin.is_empty() {
         if doc.pinyin == q_raw {
-            best = take_best(best, SCORE_PINYIN_EXACT, "pinyin-exact");
+            best = take_best(
+                best,
+                SCORE_PINYIN_EXACT,
+                "pinyin-exact",
+                MatchEvidence {
+                    field: MatchField::Pinyin,
+                    kind: MatchKind::Exact,
+                    start: 0,
+                    span: doc.item.display_name.chars().count(),
+                    gaps: 0,
+                    edit_cost: 0,
+                },
+            );
         } else if doc.pinyin.starts_with(q_raw) {
-            best = take_best(best, SCORE_PINYIN_EXACT - 50, "pinyin-prefix");
+            best = take_best(
+                best,
+                SCORE_PINYIN_EXACT - 50,
+                "pinyin-prefix",
+                MatchEvidence {
+                    field: MatchField::Pinyin,
+                    kind: MatchKind::Prefix,
+                    start: 0,
+                    span: q_len,
+                    gaps: 0,
+                    edit_cost: 0,
+                },
+            );
         }
     }
     if !doc.pinyin_initials.is_empty() {
         if doc.pinyin_initials == q_raw {
-            best = take_best(best, SCORE_PINYIN_INITIAL, "pinyin-initial");
+            best = take_best(
+                best,
+                SCORE_PINYIN_INITIAL,
+                "pinyin-initial",
+                MatchEvidence {
+                    field: MatchField::Pinyin,
+                    kind: MatchKind::Exact,
+                    start: 0,
+                    span: doc.item.display_name.chars().count(),
+                    gaps: 0,
+                    edit_cost: 0,
+                },
+            );
         } else if doc.pinyin_initials.starts_with(q_raw) {
             // 单字母也允许前缀（k → 控制面板 kzmb）；分略低于多字母，避免压过名称前缀
             let score = if q_raw.chars().count() == 1 {
@@ -267,22 +581,77 @@ fn verify_one(
             } else {
                 SCORE_PINYIN_INITIAL - 40
             };
-            best = take_best(best, score, "pinyin-initial-prefix");
-        } else if q_raw.chars().count() >= 2 && doc.pinyin_initials.contains(q_raw) {
-            best = take_best(best, SCORE_PINYIN_INITIAL_INNER, "pinyin-initial-inner");
+            best = take_best(
+                best,
+                score,
+                "pinyin-initial-prefix",
+                MatchEvidence {
+                    field: MatchField::Pinyin,
+                    kind: MatchKind::Prefix,
+                    start: 0,
+                    span: q_len,
+                    gaps: 0,
+                    edit_cost: 0,
+                },
+            );
+        } else if let Some(byte_at) = doc.pinyin_initials.find(q_raw) {
+            // 映射回原名称：首字母串第 i 位对应 display 第 i 个非空白字符
+            let start = map_initial_index_to_display(doc, byte_at);
+            let score = if q_raw.chars().count() == 1 {
+                SCORE_PINYIN_INITIAL_INNER + 40
+            } else {
+                SCORE_PINYIN_INITIAL_INNER
+            };
+            best = take_best(
+                best,
+                score,
+                "pinyin-initial-inner",
+                MatchEvidence {
+                    field: MatchField::Pinyin,
+                    kind: MatchKind::Contiguous,
+                    start,
+                    span: q_len,
+                    gaps: 0,
+                    edit_cost: 0,
+                },
+            );
         }
     }
-    // ib-pinyin：混合全拼/简拼/多音字（对原文匹配，覆盖非默认读音）
-    if q.latin {
+    // ib-pinyin：混合全拼/简拼/多音字（对原文匹配，覆盖非默认读音）；允许混输
+    if q.has_ascii_alnum {
         if let Some(matcher) = ctx.pinyin.as_ref() {
             let haystack = &doc.item.display_name;
             if matcher.is_match(haystack.as_str()) {
                 // 前缀式匹配（is_pattern_partial）略低于完整全拼
-                best = take_best(best, SCORE_PINYIN_EXACT - 20, "pinyin-ib");
+                best = take_best(
+                    best,
+                    SCORE_PINYIN_EXACT - 20,
+                    "pinyin-ib",
+                    MatchEvidence {
+                        field: MatchField::Pinyin,
+                        kind: MatchKind::Contiguous,
+                        start: 0,
+                        span: q_len,
+                        gaps: 0,
+                        edit_cost: 0,
+                    },
+                );
             }
-        } else if !doc.pinyin_syllables.is_empty() {
+        } else if !doc.pinyin_syllables.is_empty() && q_raw.chars().count() >= 2 {
             if let Some((score, kind)) = match_mixed_pinyin(&doc.pinyin_syllables, q_raw) {
-                best = take_best(best, score, kind);
+                best = take_best(
+                    best,
+                    score,
+                    kind,
+                    MatchEvidence {
+                        field: MatchField::Pinyin,
+                        kind: MatchKind::Contiguous,
+                        start: 0,
+                        span: q_len,
+                        gaps: 0,
+                        edit_cost: 0,
+                    },
+                );
             }
         }
     }
@@ -291,18 +660,43 @@ fn verify_one(
     if q_raw.chars().count() >= 2 {
         for full in &doc.keyword_full_pinyin {
             if full == q_raw {
-                best = take_best(best, SCORE_KEYWORD_PINYIN_EXACT, "keyword-pinyin-exact");
+                best = take_best(
+                    best,
+                    SCORE_KEYWORD_PINYIN_EXACT,
+                    "keyword-pinyin-exact",
+                    MatchEvidence::exact(MatchField::Keyword),
+                );
             } else if full.starts_with(q_raw) {
-                best = take_best(best, SCORE_KEYWORD_PINYIN_PREFIX, "keyword-pinyin-prefix");
+                best = take_best(
+                    best,
+                    SCORE_KEYWORD_PINYIN_PREFIX,
+                    "keyword-pinyin-prefix",
+                    MatchEvidence::prefix(MatchField::Keyword, q_len),
+                );
             }
         }
         for initials in &doc.keyword_initials {
             if initials == q_raw {
-                best = take_best(best, SCORE_KEYWORD_PINYIN_EXACT, "keyword-initials-exact");
+                best = take_best(
+                    best,
+                    SCORE_KEYWORD_PINYIN_EXACT,
+                    "keyword-initials-exact",
+                    MatchEvidence::exact(MatchField::Keyword),
+                );
             } else if initials.starts_with(q_raw) {
-                best = take_best(best, SCORE_KEYWORD_PINYIN_PREFIX, "keyword-initials-prefix");
-            } else if initials.contains(q_raw) {
-                best = take_best(best, SCORE_KEYWORD_PINYIN_INNER, "keyword-initials-inner");
+                best = take_best(
+                    best,
+                    SCORE_KEYWORD_PINYIN_PREFIX,
+                    "keyword-initials-prefix",
+                    MatchEvidence::prefix(MatchField::Keyword, q_len),
+                );
+            } else if let Some(start) = initials.find(q_raw) {
+                best = take_best(
+                    best,
+                    SCORE_KEYWORD_PINYIN_INNER,
+                    "keyword-initials-inner",
+                    MatchEvidence::contiguous(MatchField::Keyword, start, q_len),
+                );
             }
         }
     }
@@ -311,14 +705,25 @@ fn verify_one(
     if q_raw.chars().count() >= 2 {
         for field in &doc.context_fields {
             if field == q_raw {
-                best = take_best(best, SCORE_WORD_EXACT - CONTEXT_DISCOUNT, "context-exact");
+                best = take_best(
+                    best,
+                    SCORE_WORD_EXACT - CONTEXT_DISCOUNT,
+                    "context-exact",
+                    MatchEvidence::exact(MatchField::Context),
+                );
             } else if field.starts_with(q_raw) {
-                best = take_best(best, SCORE_WORD_PREFIX - CONTEXT_DISCOUNT, "context-prefix");
-            } else if field.contains(q_raw) {
+                best = take_best(
+                    best,
+                    SCORE_WORD_PREFIX - CONTEXT_DISCOUNT,
+                    "context-prefix",
+                    MatchEvidence::prefix(MatchField::Context, q_len),
+                );
+            } else if let Some(start) = field.find(q_raw) {
                 best = take_best(
                     best,
                     SCORE_SUBSTRING - CONTEXT_DISCOUNT,
                     "context-substring",
+                    MatchEvidence::contiguous(MatchField::Context, start, q_len),
                 );
             }
         }
@@ -328,12 +733,14 @@ fn verify_one(
                     best,
                     SCORE_WORD_EXACT - CONTEXT_DISCOUNT,
                     "context-word-exact",
+                    MatchEvidence::exact(MatchField::Context),
                 );
             } else if term.starts_with(q_raw) {
                 best = take_best(
                     best,
                     SCORE_WORD_PREFIX - CONTEXT_DISCOUNT,
                     "context-word-prefix",
+                    MatchEvidence::prefix(MatchField::Context, q_len),
                 );
             }
         }
@@ -344,13 +751,17 @@ fn verify_one(
                         best,
                         SCORE_COMPACT_EXACT - CONTEXT_COMPACT_DISCOUNT,
                         "context-compact-exact",
+                        MatchEvidence::exact(MatchField::Context),
                     );
-                } else if q_compact.len() >= MIN_COMPACT_SUBSTR_LEN && compact.contains(q_compact) {
-                    best = take_best(
-                        best,
-                        SCORE_COMPACT_SUBSTRING - CONTEXT_COMPACT_DISCOUNT,
-                        "context-compact-substring",
-                    );
+                } else if q_compact.len() >= MIN_COMPACT_SUBSTR_LEN {
+                    if let Some(start) = compact.find(q_compact) {
+                        best = take_best(
+                            best,
+                            SCORE_COMPACT_SUBSTRING - CONTEXT_COMPACT_DISCOUNT,
+                            "context-compact-substring",
+                            MatchEvidence::contiguous(MatchField::Context, start, q_len),
+                        );
+                    }
                 }
             }
         }
@@ -360,12 +771,14 @@ fn verify_one(
                     best,
                     SCORE_PINYIN_EXACT - CONTEXT_PINYIN_DISCOUNT,
                     "context-pinyin-exact",
+                    MatchEvidence::exact(MatchField::Context),
                 );
             } else if full.starts_with(q_raw) {
                 best = take_best(
                     best,
                     SCORE_PINYIN_EXACT - CONTEXT_PINYIN_DISCOUNT - 40,
                     "context-pinyin-prefix",
+                    MatchEvidence::prefix(MatchField::Context, q_len),
                 );
             }
         }
@@ -375,34 +788,73 @@ fn verify_one(
                     best,
                     SCORE_PINYIN_INITIAL - CONTEXT_PINYIN_DISCOUNT,
                     "context-initials-exact",
+                    MatchEvidence::exact(MatchField::Context),
                 );
             } else if initials.starts_with(q_raw) {
                 best = take_best(
                     best,
                     SCORE_PINYIN_INITIAL - CONTEXT_PINYIN_DISCOUNT - 40,
                     "context-initials-prefix",
+                    MatchEvidence::prefix(MatchField::Context, q_len),
                 );
-            } else if initials.contains(q_raw) {
+            } else if let Some(start) = initials.find(q_raw) {
                 best = take_best(
                     best,
                     SCORE_PINYIN_INITIAL_INNER - CONTEXT_PINYIN_DISCOUNT,
                     "context-initials-inner",
+                    MatchEvidence::contiguous(MatchField::Context, start, q_len),
                 );
             }
         }
     }
 
     // 4) 有序跳字（省略中间字符）；短 Query 选择性差，不走
-    if best.map(|(s, _)| s < SCORE_SKIP).unwrap_or(true) && q_raw.chars().count() >= 4 {
-        if let Some(score) = ordered_skip_score(q_raw, name) {
-            best = take_best(best, score, "skip");
-        } else if let Some(score) = ordered_skip_score(q_raw, display) {
-            best = take_best(best, score, "skip");
+    if best.map(|(s, _, _)| s < SCORE_SKIP).unwrap_or(true) && q_raw.chars().count() >= 4 {
+        if let Some((score, gaps)) = ordered_skip_score(q_raw, name) {
+            best = take_best(
+                best,
+                score,
+                "skip",
+                MatchEvidence {
+                    field: MatchField::Name,
+                    kind: MatchKind::Skip,
+                    start: 0,
+                    span: q_len,
+                    gaps,
+                    edit_cost: 0,
+                },
+            );
+        } else if let Some((score, gaps)) = ordered_skip_score(q_raw, display) {
+            best = take_best(
+                best,
+                score,
+                "skip",
+                MatchEvidence {
+                    field: MatchField::Display,
+                    kind: MatchKind::Skip,
+                    start: 0,
+                    span: q_len,
+                    gaps,
+                    edit_cost: 0,
+                },
+            );
         } else {
             for (keyword, bits) in doc.keywords.iter().zip(&doc.keyword_bits) {
                 if bits.contains_all(&q.chars) {
-                    if let Some(score) = ordered_skip_score(q_raw, keyword) {
-                        best = take_best(best, score - 30, "keyword-skip");
+                    if let Some((score, gaps)) = ordered_skip_score(q_raw, keyword) {
+                        best = take_best(
+                            best,
+                            score - 30,
+                            "keyword-skip",
+                            MatchEvidence {
+                                field: MatchField::Keyword,
+                                kind: MatchKind::Skip,
+                                start: 0,
+                                span: q_len,
+                                gaps,
+                                edit_cost: 0,
+                            },
+                        );
                         break;
                     }
                 }
@@ -411,37 +863,86 @@ fn verify_one(
     }
 
     // 5) nucleo-matcher 非连续对齐：只补充证据，不否决已有命中
-    if best.map(|(s, _)| s < SCORE_NUCLEO_MAX).unwrap_or(true) {
+    if best.map(|(s, _, _)| s < SCORE_NUCLEO_MAX).unwrap_or(true) {
         if ctx.nucleo_atom.is_some() {
             let hay = Utf32Str::new(name, &mut ctx.hay_buf);
             let atom = ctx.nucleo_atom.as_ref().unwrap();
             if let Some(raw) = atom.score(hay, &mut ctx.nucleo) {
                 let mapped = map_nucleo_score(raw);
                 if mapped > 0 {
-                    best = take_best(best, mapped, "nucleo");
+                    best = take_best(
+                        best,
+                        mapped,
+                        "nucleo",
+                        MatchEvidence {
+                            field: MatchField::Name,
+                            kind: MatchKind::Skip,
+                            start: usize::MAX,
+                            span: q_len,
+                            gaps: 1,
+                            edit_cost: 0,
+                        },
+                    );
                 }
             }
         }
     }
 
-    // 6) Fuzzy / SymSpell 验证（编辑距离）
-    if best.is_none() {
-        if let Some((score, _)) =
+    // 6) Fuzzy / SymSpell 验证（编辑距离）；1 字符不纠错
+    if best.is_none() && q_raw.chars().count() >= 2 {
+        if let Some((score, dist)) =
             fuzzy_name_or_tokens(q_raw, name).or_else(|| fuzzy_name_or_tokens(q_raw, display))
         {
-            best = take_best(best, score, "fuzzy");
-        } else if let Some((score, _)) = doc
+            best = take_best(
+                best,
+                score,
+                "fuzzy",
+                MatchEvidence {
+                    field: MatchField::Name,
+                    kind: MatchKind::Fuzzy,
+                    start: usize::MAX,
+                    span: q_len.saturating_sub(dist),
+                    gaps: 0,
+                    edit_cost: dist,
+                },
+            );
+        } else if let Some((score, dist)) = doc
             .keywords
             .iter()
             .filter_map(|keyword| fuzzy_name_or_tokens(q_raw, keyword))
             .max_by_key(|(score, _)| *score)
         {
-            best = take_best(best, score - 30, "keyword-fuzzy");
+            best = take_best(
+                best,
+                score - 30,
+                "keyword-fuzzy",
+                MatchEvidence {
+                    field: MatchField::Keyword,
+                    kind: MatchKind::Fuzzy,
+                    start: usize::MAX,
+                    span: q_len.saturating_sub(dist),
+                    gaps: 0,
+                    edit_cost: dist,
+                },
+            );
         }
     }
 
-    let (score, matched_by) = best?;
-    Some((score, matched_by.to_string()))
+    best
+}
+
+/// 拼音首字母串中的字节偏移 → display 字符下标（每个非空白字符对应一位首字母）。
+fn map_initial_index_to_display(doc: &IndexedDoc, initial_byte_at: usize) -> usize {
+    let initials = doc.pinyin_initials.as_str();
+    let idx = initials[..initial_byte_at].chars().count();
+    doc.item
+        .display_name
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .enumerate()
+        .find(|(i, _)| *i == idx)
+        .map(|(i, _)| i)
+        .unwrap_or(usize::MAX)
 }
 
 /// nucleo u16 分映射到本内核分数域（低质量，不抢精确/前缀）。
@@ -500,7 +1001,8 @@ fn ordered_token_match(q_tokens: &[String], n_tokens: &[String]) -> bool {
 }
 
 /// 有序子序列命中：字符按序出现，跨度与词边界受控。
-fn ordered_skip_score(query: &str, text: &str) -> Option<i32> {
+/// 返回 (score, extra_gaps)。
+fn ordered_skip_score(query: &str, text: &str) -> Option<(i32, usize)> {
     let q: Vec<char> = query.chars().collect();
     let t: Vec<char> = text.chars().collect();
     if q.is_empty() || t.is_empty() || q.len() < 2 || q.len() > t.len() {
@@ -540,7 +1042,7 @@ fn ordered_skip_score(query: &str, text: &str) -> Option<i32> {
     // 跨度越小分越高
     let gap = best_span.saturating_sub(q.len());
     let score = SCORE_SKIP - (gap as i32) * 8;
-    Some(score.clamp(fuzzy_score(2), SCORE_SKIP))
+    Some((score.clamp(fuzzy_score(2), SCORE_SKIP), gap))
 }
 
 /// 混合全拼/简拼：音节序列上匹配 query。
@@ -594,13 +1096,13 @@ pub fn reference_search(
     let mut ctx = QueryContext::build(q, &empty);
     let mut hits: Vec<(i32, usize, String, DocId, String)> = Vec::new();
     for doc in docs {
-        if let Some((score, matched_by)) = verify_one(doc, &mut ctx, user_targets) {
+        if let Some((score, matched_by, _evidence)) = verify_one(doc, &mut ctx, user_targets) {
             hits.push((
                 score,
                 doc.item.name.chars().count(),
                 doc.item.name.to_lowercase(),
                 doc.id,
-                matched_by,
+                matched_by.to_string(),
             ));
         }
     }
@@ -614,11 +1116,7 @@ pub fn reference_search(
     hits.into_iter()
         .map(|(score, _, _, id, matched_by)| {
             let doc = docs.iter().find(|d| d.id == id).unwrap();
-            SearchResult {
-                item: doc.item.clone(),
-                score,
-                matched_by,
-            }
+            SearchResult::scored(doc.item.clone(), score, matched_by)
         })
         .collect()
 }
@@ -632,12 +1130,56 @@ mod tests {
         // googchrome 跳过 google 中的 l、e 与空格，按序命中
         let hit = ordered_skip_score("googchrome", "google chrome");
         assert!(hit.is_some(), "googchrome 应有序命中 google chrome");
-        assert!(hit.unwrap() <= SCORE_SKIP);
+        assert!(hit.unwrap().0 <= SCORE_SKIP);
     }
 
     #[test]
     fn skip_rejects_wrong_order() {
         assert!(ordered_skip_score("emorhclod", "google chrome").is_none());
+    }
+
+    #[test]
+    fn evidence_prefers_earlier_and_tighter_match() {
+        let early = MatchEvidence::contiguous(MatchField::Name, 0, 3);
+        let late = MatchEvidence::contiguous(MatchField::Name, 5, 3);
+        assert!(early.outranks(&late));
+        let tight = MatchEvidence::contiguous(MatchField::Name, 0, 4);
+        let loose = MatchEvidence::contiguous(MatchField::Name, 0, 2);
+        assert!(tight.outranks(&loose));
+        let skip_close = MatchEvidence {
+            field: MatchField::Name,
+            kind: MatchKind::Skip,
+            start: 0,
+            span: 4,
+            gaps: 1,
+            edit_cost: 0,
+        };
+        let skip_far = MatchEvidence {
+            field: MatchField::Name,
+            kind: MatchKind::Skip,
+            start: 0,
+            span: 4,
+            gaps: 3,
+            edit_cost: 0,
+        };
+        assert!(skip_close.outranks(&skip_far));
+        let cheap = MatchEvidence {
+            field: MatchField::Name,
+            kind: MatchKind::Fuzzy,
+            start: usize::MAX,
+            span: 3,
+            gaps: 0,
+            edit_cost: 1,
+        };
+        let dear = MatchEvidence {
+            field: MatchField::Name,
+            kind: MatchKind::Fuzzy,
+            start: usize::MAX,
+            span: 3,
+            gaps: 0,
+            edit_cost: 2,
+        };
+        assert!(cheap.outranks(&dear));
     }
 
     #[test]

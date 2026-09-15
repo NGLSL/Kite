@@ -9,8 +9,9 @@ use crate::search::matcher::UserTarget;
 use super::doc::{DocId, RetrievalIndex};
 use super::query::{ChannelStats, ParsedQuery};
 
-/// 最多从词典枚举的前缀词元数（控制爆炸）。
-const MAX_PREFIX_TERMS: usize = 16;
+/// 前缀词元枚举上限：足够覆盖同前缀词典，避免与相关性无关的硬截断漏召回。
+/// 更短前缀主要靠 char/first_char/gram 倒排收窄，不依赖本枚举扫全库。
+const MAX_PREFIX_TERMS: usize = 512;
 
 #[derive(Debug, Default)]
 pub struct Candidates {
@@ -68,7 +69,7 @@ pub fn collect(index: &RetrievalIndex, q: &ParsedQuery, user_targets: &[UserTarg
                 out.stats.exact += 1;
             }
         }
-        // 前缀枚举
+        // 前缀枚举：完整扩展（上限足够大），不依赖其他通道碰巧补回
         if term.chars().count() >= 2 {
             for t in index.prefix_terms(term, MAX_PREFIX_TERMS) {
                 if let Some(list) = index.postings(&t) {
@@ -155,12 +156,41 @@ pub fn collect(index: &RetrievalIndex, q: &ParsedQuery, user_targets: &[UserTarg
         }
     }
 
-    // 拼音 / 拼音首字母：词元已在 postings；再对 syllable 混合解释做种子
-    if q.latin {
+    // 拼音 / 拼音首字母：含 ASCII 字母数字即可（允许汉字+拼音/英文混输）
+    if q.has_ascii_alnum {
         add_pinyin_candidates(index, q, &mut out);
     }
 
-    // SymSpell 纠错：独立通道，不被其他必要条件删除
+    // 混输：CJK 段按名称精确/包含锚定，拉丁段按拼音词元锚定
+    if q.mixed {
+        for part in &q.cjk_parts {
+            if let Some(list) = index.postings(part) {
+                for &id in list {
+                    out.ids.insert(id);
+                    out.stats.exact += 1;
+                }
+            }
+            add_gram_candidates(index, part, &mut out);
+        }
+        for part in &q.latin_parts {
+            if let Some(list) = index.postings(part) {
+                for &id in list {
+                    out.ids.insert(id);
+                    out.stats.pinyin += 1;
+                }
+            }
+            for t in index.prefix_terms(part, MAX_PREFIX_TERMS) {
+                if let Some(list) = index.postings(&t) {
+                    for &id in list {
+                        out.ids.insert(id);
+                        out.stats.pinyin += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // SymSpell 纠错：独立通道，不被其他必要条件删除；1 字符不纠错
     if q.chars.len() >= 3 {
         let max_d = crate::search::fuzzy::max_distance(q.raw_norm.len());
         if max_d > 0 {
@@ -192,13 +222,15 @@ pub fn collect(index: &RetrievalIndex, q: &ParsedQuery, user_targets: &[UserTarg
         }
     }
 
-    // 成本模型：极短 Query 用首字符倒排兜底，而不是无条件全集扫描
+    // 成本模型：极短 Query 用字符倒排兜底（名称内部 / 词首）
     if q.chars.len() <= 2 {
         if let Some(&first) = q.chars.first() {
             let list = if q.chars.len() == 1 {
+                // 1 字符：名称内部任意位置
                 index.char_postings(first)
             } else {
-                index.first_char_postings(first)
+                // 2 字符：仍要内部片段，first_char 单独再补
+                index.char_postings(first)
             };
             if let Some(list) = list {
                 for &id in list {
@@ -206,11 +238,19 @@ pub fn collect(index: &RetrievalIndex, q: &ParsedQuery, user_targets: &[UserTarg
                     out.stats.scanned_fallback += 1;
                 }
             }
+            if q.chars.len() == 2 {
+                if let Some(list) = index.first_char_postings(first) {
+                    for &id in list {
+                        out.ids.insert(id);
+                        out.stats.scanned_fallback += 1;
+                    }
+                }
+            }
         }
-        // 拼音首字母前缀：k → 控制面板（kzmb）；名称首字符是汉字时 first_char 盖不到
-        if q.latin {
+        // 拼音首字母任意位置：k → 控制面板（kzmb）；名称首字符是汉字时 first_char 盖不到
+        if q.has_ascii_alnum {
             for doc in &index.docs {
-                if doc.pinyin_initials.starts_with(&q.raw_norm) {
+                if doc.pinyin_initials.contains(&q.raw_norm) {
                     out.ids.insert(doc.id);
                     out.stats.pinyin += 1;
                 }
@@ -279,14 +319,12 @@ fn add_pinyin_candidates(index: &RetrievalIndex, q: &ParsedQuery, out: &mut Cand
         }
     }
     // 混合全拼/简拼和多音字的所有读音在建索引时展开为字符倒排。
-    // 这里只取可能包含输入字符的中文文档，最终仍由 ib-pinyin 验证。
-    if q.chars.len() >= 2 {
-        for &ch in &q.chars {
-            if let Some(list) = index.pinyin_char_postings(ch) {
-                for &id in list {
-                    out.ids.insert(id);
-                    out.stats.pinyin += 1;
-                }
+    // 1 字符也走：拼音首字母任意位置需要中文文档进入候选。
+    for &ch in &q.chars {
+        if let Some(list) = index.pinyin_char_postings(ch) {
+            for &id in list {
+                out.ids.insert(id);
+                out.stats.pinyin += 1;
             }
         }
     }

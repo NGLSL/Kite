@@ -84,6 +84,27 @@ pub struct SearchResult {
     pub item: AppItem,
     pub score: i32,
     pub matched_by: String,
+    /// 基础相关性层级（数值越小质量越高）。加分前计算；0 表示未标注。
+    /// 最终排序以本字段为第一键，禁止用加分后的 score 反推层级。
+    #[serde(skip)]
+    pub quality_tier: i32,
+}
+
+impl SearchResult {
+    /// 用基础 MatchScore 构造，并写入显式质量层。
+    pub fn scored(item: AppItem, score: i32, matched_by: impl Into<String>) -> Self {
+        Self {
+            quality_tier: crate::history::quality_tier(score),
+            item,
+            score,
+            matched_by: matched_by.into(),
+        }
+    }
+
+    /// 未走 MatchScore 通道的结果（文件、网页等）；层按 score 回退。
+    pub fn with_score(item: AppItem, score: i32, matched_by: impl Into<String>) -> Self {
+        Self::scored(item, score, matched_by)
+    }
 }
 
 /// 内存中的应用索引；启动 / 重扫时整体重建。

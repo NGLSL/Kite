@@ -35,3 +35,6 @@ artifacts/
 
 # OS
 Thumbs.db
+
+# MiMo / mimocode local config and project skills
+.mimocode/

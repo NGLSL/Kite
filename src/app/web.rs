@@ -138,11 +138,7 @@ fn search_hit(
     );
     item.icon_src = Some(b.exe.to_string_lossy().to_string());
     item.icon = cached_browser_icon(b, icon_dir);
-    SearchResult {
-        item,
-        score,
-        matched_by: "websearch".into(),
-    }
+    SearchResult::scored(item, score, "websearch")
 }
 
 fn default_search_hit(query: &str, url_template: Option<&str>) -> SearchResult {
@@ -156,11 +152,7 @@ fn default_search_hit(query: &str, url_template: Option<&str>) -> SearchResult {
         None,
         "websearch",
     );
-    SearchResult {
-        item,
-        score: 880,
-        matched_by: "websearch".into(),
-    }
+    SearchResult::scored(item, 880, "websearch")
 }
 
 /// 生成搜索 URL：缓存模板 → 浏览器偏好探测 → 中文百度/英文 Bing。
@@ -256,11 +248,7 @@ fn browser_hit(b: &Browser, url: &str, score: i32, icon_dir: &std::path::Path) -
     );
     item.icon_src = Some(b.exe.to_string_lossy().to_string());
     item.icon = cached_browser_icon(b, icon_dir);
-    SearchResult {
-        item,
-        score,
-        matched_by: "url".into(),
-    }
+    SearchResult::scored(item, score, "url")
 }
 
 fn cached_browser_icon(b: &Browser, icon_dir: &std::path::Path) -> Option<String> {
@@ -279,11 +267,7 @@ fn default_hit(url: &str) -> SearchResult {
         None,
         "browser",
     );
-    SearchResult {
-        item,
-        score: 940,
-        matched_by: "url".into(),
-    }
+    SearchResult::scored(item, 940, "url")
 }
 
 #[cfg(test)]
@@ -377,14 +361,10 @@ mod tests {
                 None,
                 "start-menu",
             );
-            hits.push(SearchResult {
-                item,
-                score: 100 - i as i32,
-                matched_by: "name".into(),
-            });
+            hits.push(SearchResult::scored(item, 100 - i as i32, "name"));
         }
-        let web = SearchResult {
-            item: AppItem::scanned(
+        let web = SearchResult::scored(
+            AppItem::scanned(
                 "websearch:chrome:q".into(),
                 "用 Chrome 搜索「q」".into(),
                 "https://www.bing.com/search?q=q".into(),
@@ -392,9 +372,9 @@ mod tests {
                 None,
                 "websearch",
             ),
-            score: 0,
-            matched_by: "websearch".into(),
-        };
+            0,
+            "websearch",
+        );
         let out = insert_at_slot(hits, web, WEB_SEARCH_SLOT);
         assert_eq!(out.len(), 9);
         assert_eq!(out[4].item.source, "websearch");
@@ -405,8 +385,8 @@ mod tests {
 
     #[test]
     fn insert_slot_clamped_when_short() {
-        let hits = vec![SearchResult {
-            item: AppItem::scanned(
+        let hits = vec![SearchResult::scored(
+            AppItem::scanned(
                 "a".into(),
                 "A".into(),
                 "C:\\a.exe".into(),
@@ -414,11 +394,11 @@ mod tests {
                 None,
                 "start-menu",
             ),
-            score: 1,
-            matched_by: "name".into(),
-        }];
-        let web = SearchResult {
-            item: AppItem::scanned(
+            1,
+            "name",
+        )];
+        let web = SearchResult::scored(
+            AppItem::scanned(
                 "websearch:default:q".into(),
                 "搜索".into(),
                 "https://x".into(),
@@ -426,9 +406,9 @@ mod tests {
                 None,
                 "websearch",
             ),
-            score: 0,
-            matched_by: "websearch".into(),
-        };
+            0,
+            "websearch",
+        );
         let out = insert_at_slot(hits, web, WEB_SEARCH_SLOT);
         assert_eq!(out.len(), 2);
         assert_eq!(out[1].item.source, "websearch");

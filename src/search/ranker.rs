@@ -48,6 +48,8 @@ pub fn prefer_friendly_install_entries(hits: &mut [SearchResult]) {
     for hit in hits.iter_mut().filter(|h| h.item.source == "app-paths") {
         if hit_under_friendly_dir(&hit.item.target, &dirs) {
             hit.score -= RAW_APP_PATH_DISCOUNT;
+            // 折扣改变基础分后必须重算层，否则精确 app-paths 仍占高层压过友好前缀。
+            hit.quality_tier = crate::history::quality_tier(hit.score);
         }
     }
 }
@@ -74,24 +76,30 @@ fn hit_under_friendly_dir(target: &str, dirs: &HashSet<String>) -> bool {
 
 pub fn rank_and_truncate(hits: Vec<SearchResult>, top_n: usize) -> Vec<SearchResult> {
     // 先生成小写键再排序：比较器里不做 to_lowercase，避免 O(n log n) 次分配
-    let mut keyed: Vec<(i32, usize, String, String, SearchResult)> = hits
+    let mut keyed: Vec<(i32, i32, usize, String, String, SearchResult)> = hits
         .into_iter()
         .map(|h| {
+            let tier = if h.quality_tier != 0 {
+                h.quality_tier
+            } else {
+                crate::history::quality_tier(h.score)
+            };
             let lower = h.item.name.to_lowercase();
             let len = h.item.name.len();
             let id = h.item.id.clone();
-            (h.score, len, lower, id, h)
+            (tier, h.score, len, lower, id, h)
         })
         .collect();
     keyed.sort_by(|a, b| {
-        b.0.cmp(&a.0)
+        a.0.cmp(&b.0)
+            .then_with(|| b.1.cmp(&a.1))
             // 同分：短名优先（更精确）
-            .then_with(|| a.1.cmp(&b.1))
             .then_with(|| a.2.cmp(&b.2))
             .then_with(|| a.3.cmp(&b.3))
+            .then_with(|| a.4.cmp(&b.4))
     });
     keyed.truncate(top_n);
-    keyed.into_iter().map(|(_, _, _, _, h)| h).collect()
+    keyed.into_iter().map(|(_, _, _, _, _, h)| h).collect()
 }
 
 fn normalize_windows_path(path: &str) -> String {
@@ -114,8 +122,8 @@ mod tests {
     use crate::model::AppItem;
 
     fn tied_hit(id: &str) -> SearchResult {
-        SearchResult {
-            item: AppItem::scanned(
+        SearchResult::scored(
+            AppItem::scanned(
                 id.to_string(),
                 "Same name".to_string(),
                 format!(r"C:\{id}.exe"),
@@ -123,9 +131,9 @@ mod tests {
                 None,
                 "start-menu",
             ),
-            score: 500,
-            matched_by: "test".to_string(),
-        }
+            500,
+            "test",
+        )
     }
 
     #[test]

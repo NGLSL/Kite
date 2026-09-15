@@ -144,8 +144,8 @@ mod alt_digit_tests {
     use iced::keyboard::Modifiers;
 
     fn settings_result() -> SearchResult {
-        SearchResult {
-            item: AppItem::scanned(
+        SearchResult::scored(
+            AppItem::scanned(
                 "kite:settings".into(),
                 "Kite 设置".into(),
                 "kite:settings".into(),
@@ -153,9 +153,9 @@ mod alt_digit_tests {
                 None,
                 "builtin",
             ),
-            score: 930,
-            matched_by: "builtin".into(),
-        }
+            930,
+            "builtin",
+        )
     }
 
     fn state_with_settings_result(query: &str) -> State {
@@ -205,6 +205,8 @@ mod alt_digit_tests {
             update_asset: None,
             update_checking: false,
             epoch: 0,
+            hover_suppressed: false,
+            last_hover_pt: None,
         }
     }
 

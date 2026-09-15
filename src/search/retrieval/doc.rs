@@ -453,6 +453,18 @@ impl RetrievalIndex {
         user_targets: &[UserTarget],
         max_results: usize,
     ) -> Vec<crate::model::SearchResult> {
+        self.search_personalized(query, user_targets, None, max_results)
+    }
+
+    /// 统一最终排序入口：验证后在完整候选上应用个性化，再一次截断。
+    /// `personalization` 为 None 时行为与仅按 MatchScore 排序一致。
+    pub fn search_personalized(
+        &self,
+        query: &str,
+        user_targets: &[UserTarget],
+        personalization: Option<&crate::history::Personalization>,
+        max_results: usize,
+    ) -> Vec<crate::model::SearchResult> {
         let q = super::query::parse(query);
         if q.is_empty() {
             return Vec::new();
@@ -460,27 +472,59 @@ impl RetrievalIndex {
         let mut ctx = QueryContext::build(&q, self);
         let candidates = super::channels::collect(self, &q, user_targets);
         let mut scored = super::verify::verify_all(self, &candidates, &mut ctx, user_targets);
-        scored.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.doc_id.cmp(&b.doc_id)));
-        // 排序前不物化全部候选：只克隆可能进入 Top K 的窗口
+        // 分 → 证据细排 → 稳定 id
+        scored.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then_with(|| {
+                    if a.evidence.outranks(&b.evidence) {
+                        std::cmp::Ordering::Less
+                    } else if b.evidence.outranks(&a.evidence) {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
+                .then_with(|| a.doc_id.cmp(&b.doc_id))
+        });
+
+        // 个性化必须作用在截断前的完整候选集上；无个性化时仍保留折扣窗口。
+        let materialize_all = personalization.is_some();
         const FRIENDLY_DISCOUNT_SLACK: i32 = 220;
-        let threshold = scored
-            .get(max_results.saturating_sub(1))
-            .map(|s| s.score)
-            .unwrap_or(i32::MIN);
+        let threshold = if materialize_all {
+            i32::MIN
+        } else {
+            scored
+                .get(max_results.saturating_sub(1))
+                .map(|s| s.score)
+                .unwrap_or(i32::MIN)
+        };
+        let slack = if materialize_all {
+            0
+        } else {
+            FRIENDLY_DISCOUNT_SLACK
+        };
         let mut results: Vec<crate::model::SearchResult> = scored
             .into_iter()
-            .filter(|s| s.score >= threshold.saturating_sub(FRIENDLY_DISCOUNT_SLACK))
+            .filter(|s| s.score >= threshold.saturating_sub(slack))
             .filter_map(|s| {
                 let doc = self.doc(s.doc_id)?;
-                Some(crate::model::SearchResult {
-                    item: doc.item.clone(),
-                    score: s.score,
-                    matched_by: s.matched_by,
-                })
+                Some(crate::model::SearchResult::scored(
+                    doc.item.clone(),
+                    s.score,
+                    s.matched_by,
+                ))
             })
             .collect();
         crate::search::ranker::prefer_friendly_install_entries(&mut results);
-        crate::search::ranker::rank_and_truncate(results, max_results)
+        match personalization {
+            Some(prefs) => {
+                crate::history::apply_personalization(&mut results, prefs);
+                results.truncate(max_results);
+                results
+            }
+            None => crate::search::ranker::rank_and_truncate(results, max_results),
+        }
     }
 }
 

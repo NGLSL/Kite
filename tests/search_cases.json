@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "notes": "固定评估样本。fixture 身份稳定，期望指向 id 而非可能重名的显示名。known-gap 样本计入指标报告但不在 CI 硬失败，用于票 07/08 合入前记录基线缺口。",
+  "version": 2,
+  "notes": "固定评估样本。fixture 身份稳定。family 标注算法族：recall / verify / evidence / preference / protection。known-gap 计入报告但不在 CI 硬失败。",
   "fixtures": {
     "default": {
       "apps": [
@@ -31,13 +31,19 @@
         { "id": "fx-notepadpp", "name": "Notepad++", "target": "C:\\Program Files\\Notepad++\\notepad++.exe", "source": "start-menu" },
         { "id": "fx-taskmgr", "name": "任务管理器", "target": "C:\\Windows\\System32\\Taskmgr.exe", "source": "start-menu" },
         { "id": "fx-control", "name": "控制面板", "target": "shell:::{26EE0668-A00A-4530-B89D-247C3C76FC01}", "source": "builtin" },
-        { "id": "fx-recycle", "name": "回收站", "target": "shell:::{645FF040-5081-101B-9F08-00AA002F954E}", "source": "builtin" }
+        { "id": "fx-recycle", "name": "回收站", "target": "shell:::{645FF040-5081-101B-9F08-00AA002F954E}", "source": "builtin" },
+        { "id": "fx-alpine", "name": "Alpine Tool", "target": "C:\\Apps\\Alpine\\alpine.exe", "source": "start-menu" },
+        { "id": "fx-albatross", "name": "Albatross Tool", "target": "C:\\Apps\\Albatross\\albatross.exe", "source": "start-menu" },
+        { "id": "fx-zqx-early", "name": "Zqx One", "target": "C:\\Apps\\Zqx\\zqx.exe", "source": "start-menu" },
+        { "id": "fx-zqx-late", "name": "AAZqx One", "target": "C:\\Apps\\AAZqx\\aazqx.exe", "source": "start-menu" },
+        { "id": "fx-photoshop", "name": "Adobe Photoshop", "target": "C:\\Program Files\\Adobe\\Photoshop\\Photoshop.exe", "source": "start-menu" }
       ]
     }
   },
   "cases": [
     {
       "id": "exact-chrome",
+      "family": "recall",
       "query": "chrome",
       "fixture": "default",
       "expected_top": "fx-chrome",
@@ -48,6 +54,7 @@
     },
     {
       "id": "prefix-vis-short-name",
+      "family": "recall",
       "query": "vis",
       "fixture": "default",
       "expected_top": "fx-vs",
@@ -58,6 +65,7 @@
     },
     {
       "id": "exact-wechat-zh",
+      "family": "recall",
       "query": "微信",
       "fixture": "default",
       "expected_top": "fx-wechat",
@@ -67,7 +75,74 @@
       "status": "required"
     },
     {
+      "id": "inner-fragment-pad",
+      "family": "recall",
+      "query": "pad",
+      "fixture": "default",
+      "expected_top": "fx-notepad",
+      "expected_in_top5": ["fx-notepad", "fx-notepadpp"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "single-char-internal-name",
+      "family": "recall",
+      "query": "n",
+      "fixture": "default",
+      "expected_top": null,
+      "expected_in_top5": ["fx-notepad"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "single-char-pinyin-initial-inner",
+      "family": "recall",
+      "query": "z",
+      "fixture": "default",
+      "expected_top": null,
+      "expected_in_top5": ["fx-control"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "short-acronym-nd-prefix",
+      "family": "recall",
+      "query": "nd",
+      "fixture": "default",
+      "expected_top": null,
+      "expected_in_top5": ["fx-ndm"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "mixed-pinyin-wechat-xin",
+      "family": "recall",
+      "query": "微信xin",
+      "fixture": "default",
+      "expected_top": "fx-wechat",
+      "expected_in_top5": ["fx-wechat", "fx-wechat-dev"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "mixed-latin-hanzi-w",
+      "family": "recall",
+      "query": "w微",
+      "fixture": "default",
+      "expected_top": null,
+      "expected_in_top5": ["fx-wechat"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
       "id": "pinyin-weixin",
+      "family": "recall",
       "query": "weixin",
       "fixture": "default",
       "expected_top": "fx-wechat",
@@ -78,6 +153,7 @@
     },
     {
       "id": "pinyin-initial-wx",
+      "family": "recall",
       "query": "wx",
       "fixture": "default",
       "expected_top": "fx-wechat",
@@ -87,7 +163,74 @@
       "status": "required"
     },
     {
+      "id": "compact-todo",
+      "family": "recall",
+      "query": "todo",
+      "fixture": "default",
+      "expected_top": "fx-todo",
+      "expected_in_top5": ["fx-todo"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "compact-todo-space",
+      "family": "recall",
+      "query": "to do",
+      "fixture": "default",
+      "expected_top": "fx-todo",
+      "expected_in_top5": ["fx-todo"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "token-visual-code",
+      "family": "verify",
+      "query": "visual code",
+      "fixture": "default",
+      "expected_top": "fx-vscode",
+      "expected_in_top5": ["fx-vscode"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "token-vs-code",
+      "family": "verify",
+      "query": "vs code",
+      "fixture": "default",
+      "expected_top": "fx-vscode",
+      "expected_in_top5": ["fx-vscode"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "word-prefix-ter",
+      "family": "verify",
+      "query": "ter",
+      "fixture": "default",
+      "expected_top": "fx-xterminal",
+      "expected_in_top5": ["fx-xterminal", "fx-terminal"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "acronym-ndm",
+      "family": "verify",
+      "query": "ndm",
+      "fixture": "default",
+      "expected_top": "fx-ndm",
+      "expected_in_top5": ["fx-ndm"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
       "id": "alias-vsc",
+      "family": "protection",
       "query": "vsc",
       "fixture": "default",
       "expected_top": "fx-vscode",
@@ -98,6 +241,7 @@
     },
     {
       "id": "alias-wt-terminal",
+      "family": "protection",
       "query": "wt",
       "fixture": "default",
       "expected_top": "fx-terminal",
@@ -108,6 +252,7 @@
     },
     {
       "id": "alias-calc",
+      "family": "protection",
       "query": "calc",
       "fixture": "default",
       "expected_top": "fx-calc",
@@ -117,17 +262,63 @@
       "status": "required"
     },
     {
-      "id": "friendly-over-raw-wps",
-      "query": "wps",
+      "id": "alias-cmd",
+      "family": "protection",
+      "query": "cmd",
       "fixture": "default",
-      "expected_top": "fx-wps",
-      "expected_in_top5": ["fx-wps", "fx-wps-raw"],
-      "forbidden_top": ["fx-wps-raw"],
+      "expected_top": "fx-cmd",
+      "expected_in_top5": ["fx-cmd"],
+      "forbidden_top": [],
       "history": "none",
       "status": "required"
     },
     {
-      "id": "exact-system-notepad-not-todo-noise",
+      "id": "alias-idea",
+      "family": "protection",
+      "query": "idea",
+      "fixture": "default",
+      "expected_top": "fx-idea",
+      "expected_in_top5": ["fx-idea"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "alias-ps-photoshop",
+      "family": "protection",
+      "query": "ps",
+      "fixture": "default",
+      "expected_top": "fx-photoshop",
+      "expected_in_top5": ["fx-photoshop"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "alias-gc-chrome",
+      "family": "protection",
+      "query": "gc",
+      "fixture": "default",
+      "expected_top": "fx-chrome",
+      "expected_in_top5": ["fx-chrome"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "crosslang-leishe",
+      "family": "protection",
+      "query": "雷蛇",
+      "fixture": "default",
+      "expected_top": "fx-razer",
+      "expected_in_top5": ["fx-razer"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "exact-notepad-not-todo-noise",
+      "family": "protection",
       "query": "notepad",
       "fixture": "default",
       "expected_top": "fx-notepad",
@@ -138,6 +329,7 @@
     },
     {
       "id": "distinct-args-powershell-dev",
+      "family": "protection",
       "query": "developer powershell",
       "fixture": "default",
       "expected_top": "fx-pwsh-dev",
@@ -147,67 +339,30 @@
       "status": "required"
     },
     {
-      "id": "todo-compact-gap",
-      "query": "todo",
+      "id": "friendly-over-raw-wps",
+      "family": "protection",
+      "query": "wps",
       "fixture": "default",
-      "expected_top": "fx-todo",
-      "expected_in_top5": ["fx-todo"],
-      "forbidden_top": [],
+      "expected_top": "fx-wps",
+      "expected_in_top5": ["fx-wps", "fx-wps-raw"],
+      "forbidden_top": ["fx-wps-raw"],
       "history": "none",
       "status": "required"
     },
     {
-      "id": "todo-space",
-      "query": "to do",
+      "id": "short-query-not-crowded-by-system",
+      "family": "protection",
+      "query": "to",
       "fixture": "default",
-      "expected_top": "fx-todo",
-      "expected_in_top5": ["fx-todo"],
-      "forbidden_top": [],
+      "expected_top": null,
+      "expected_in_top5": [],
+      "forbidden_top": ["fx-control", "fx-recycle"],
       "history": "none",
       "status": "required"
     },
     {
-      "id": "visual-code-token-gap",
-      "query": "visual code",
-      "fixture": "default",
-      "expected_top": "fx-vscode",
-      "expected_in_top5": ["fx-vscode"],
-      "forbidden_top": [],
-      "history": "none",
-      "status": "required"
-    },
-    {
-      "id": "vs-code-token-gap",
-      "query": "vs code",
-      "fixture": "default",
-      "expected_top": "fx-vscode",
-      "expected_in_top5": ["fx-vscode"],
-      "forbidden_top": [],
-      "history": "none",
-      "status": "required"
-    },
-    {
-      "id": "ter-word-prefix-gap",
-      "query": "ter",
-      "fixture": "default",
-      "expected_top": "fx-xterminal",
-      "expected_in_top5": ["fx-xterminal", "fx-terminal"],
-      "forbidden_top": [],
-      "history": "none",
-      "status": "required"
-    },
-    {
-      "id": "ndm-acronym-gap",
-      "query": "ndm",
-      "fixture": "default",
-      "expected_top": "fx-ndm",
-      "expected_in_top5": ["fx-ndm"],
-      "forbidden_top": [],
-      "history": "none",
-      "status": "required"
-    },
-    {
-      "id": "ndm-download-still-works",
+      "id": "neat-word-prefix",
+      "family": "verify",
       "query": "neat",
       "fixture": "default",
       "expected_top": "fx-ndm",
@@ -217,17 +372,8 @@
       "status": "required"
     },
     {
-      "id": "leishe-crosslang-gap",
-      "query": "雷蛇",
-      "fixture": "default",
-      "expected_top": "fx-razer",
-      "expected_in_top5": ["fx-razer"],
-      "forbidden_top": [],
-      "history": "none",
-      "status": "required"
-    },
-    {
       "id": "razer-english",
+      "family": "recall",
       "query": "razer",
       "fixture": "default",
       "expected_top": "fx-razer",
@@ -237,30 +383,272 @@
       "status": "required"
     },
     {
-      "id": "short-query-not-crowded-by-todo",
-      "query": "to",
+      "id": "pinyin-wangyiyun",
+      "family": "recall",
+      "query": "wangyiyun",
+      "fixture": "default",
+      "expected_top": "fx-nemusic",
+      "expected_in_top5": ["fx-nemusic"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required",
+      "notes": "全拼：网易云音乐"
+    },
+    {
+      "id": "pinyin-initial-wyy",
+      "family": "recall",
+      "query": "wyy",
+      "fixture": "default",
+      "expected_top": null,
+      "expected_in_top5": ["fx-nemusic"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required",
+      "notes": "简拼：网易云"
+    },
+    {
+      "id": "pinyin-jisuanqi",
+      "family": "recall",
+      "query": "jisuanqi",
+      "fixture": "default",
+      "expected_top": "fx-calc",
+      "expected_in_top5": ["fx-calc"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "pinyin-cebian",
+      "family": "recall",
+      "query": "kzmb",
+      "fixture": "default",
+      "expected_top": "fx-control",
+      "expected_in_top5": ["fx-control"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required",
+      "notes": "控制面板简拼"
+    },
+    {
+      "id": "pinyin-huishouzhan",
+      "family": "recall",
+      "query": "hsz",
+      "fixture": "default",
+      "expected_top": null,
+      "expected_in_top5": ["fx-recycle"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "evidence-earlier-substring-wins",
+      "family": "evidence",
+      "query": "zqx",
+      "fixture": "default",
+      "expected_top": "fx-zqx-early",
+      "expected_in_top5": ["fx-zqx-early", "fx-zqx-late"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required",
+      "notes": "同为连续片段时，更早起点优先（Zqx vs AAZqx）"
+    },
+    {
+      "id": "evidence-early-fragment-beats-late",
+      "family": "evidence",
+      "query": "pad",
+      "fixture": "default",
+      "expected_top": "fx-notepad",
+      "expected_in_top5": ["fx-notepad"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required",
+      "notes": "连续片段 pad 在 Notepad 中位置靠后但仍是连续；对照更散的命中不进首位"
+    },
+    {
+      "id": "word-boundary-beats-midword-same-band",
+      "family": "evidence",
+      "query": "chrome",
+      "fixture": "default",
+      "expected_top": "fx-chrome",
+      "expected_in_top5": ["fx-chrome", "fx-chrome-remote"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required",
+      "notes": "完整词边界命中不得被词中碎片抢首位"
+    },
+    {
+      "id": "preference-lifts-same-quality",
+      "family": "preference",
+      "query": "al",
+      "fixture": "default",
+      "expected_top": "fx-albatross",
+      "expected_in_top5": ["fx-albatross", "fx-alpine"],
+      "forbidden_top": [],
+      "history": {
+        "pairs": { "al": ["fx-albatross", "fx-albatross", "fx-albatross", "fx-albatross", "fx-albatross", "fx-albatross", "fx-albatross", "fx-albatross"] },
+        "usage": { "fx-albatross": 5 }
+      },
+      "status": "required",
+      "notes": "同质量前缀候选：本 Query 多次选择 Albatross 后应靠前"
+    },
+    {
+      "id": "preference-one-click-limited",
+      "family": "preference",
+      "query": "al",
+      "fixture": "default",
+      "expected_top": null,
+      "expected_in_top5": ["fx-alpine", "fx-albatross"],
+      "forbidden_top": [],
+      "history": {
+        "pairs": { "al": ["fx-alpine"] }
+      },
+      "status": "required",
+      "notes": "一次选择有有限倾向：两者都应在前排，不锁死首位"
+    },
+    {
+      "id": "preference-cannot-steal-name-exact",
+      "family": "preference",
+      "query": "chrome",
+      "fixture": "default",
+      "expected_top": "fx-chrome",
+      "expected_in_top5": ["fx-chrome"],
+      "forbidden_top": ["fx-chrome-remote", "fx-gchrome"],
+      "history": {
+        "pairs": { "chrome": ["fx-chrome-remote", "fx-chrome-remote", "fx-chrome-remote", "fx-chrome-remote", "fx-chrome-remote", "fx-chrome-remote", "fx-chrome-remote", "fx-chrome-remote", "fx-chrome-remote", "fx-chrome-remote"] },
+        "usage": { "fx-chrome-remote": 80 }
+      },
+      "status": "required",
+      "notes": "完整名称精确匹配不受历史常用软件抢第一"
+    },
+    {
+      "id": "preference-empty-history-base-order",
+      "family": "preference",
+      "query": "al",
+      "fixture": "default",
+      "expected_top": null,
+      "expected_in_top5": ["fx-alpine", "fx-albatross"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required",
+      "notes": "无历史时两候选都应出现（顺序按基础分/短名等）"
+    },
+    {
+      "id": "pin-protection-with-history",
+      "family": "preference",
+      "query": "chrome",
+      "fixture": "default",
+      "expected_top": "fx-chrome",
+      "expected_in_top5": ["fx-chrome"],
+      "forbidden_top": ["fx-chrome-remote"],
+      "history": {
+        "pinned": ["fx-chrome-remote"],
+        "usage": { "fx-chrome-remote": 30 }
+      },
+      "status": "required",
+      "notes": "Pin+历史不得越过 Name Exact"
+    },
+    {
+      "id": "typo-chorme-fuzzy",
+      "family": "verify",
+      "query": "chorme",
+      "fixture": "default",
+      "expected_top": null,
+      "expected_in_top5": ["fx-chrome"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required",
+      "notes": "相邻交换错拼仍应召回 Chrome"
+    },
+    {
+      "id": "git-bash-alias-or-name",
+      "family": "recall",
+      "query": "git",
+      "fixture": "default",
+      "expected_top": null,
+      "expected_in_top5": ["fx-git-bash"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "regedit-pinyin-or-name",
+      "family": "recall",
+      "query": "regedit",
+      "fixture": "default",
+      "expected_top": "fx-regedit",
+      "expected_in_top5": ["fx-regedit"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "taskmgr-en",
+      "family": "recall",
+      "query": "taskmgr",
+      "fixture": "default",
+      "expected_top": null,
+      "expected_in_top5": ["fx-taskmgr"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "renwu-guanliqi",
+      "family": "recall",
+      "query": "renwuguanliqi",
+      "fixture": "default",
+      "expected_top": "fx-taskmgr",
+      "expected_in_top5": ["fx-taskmgr"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required",
+      "notes": "任务管理器全拼"
+    },
+    {
+      "id": "vs-alias-not-only-vscode",
+      "family": "protection",
+      "query": "vs",
+      "fixture": "default",
+      "expected_top": null,
+      "expected_in_top5": ["fx-vs", "fx-vscode"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required",
+      "notes": "vs 兼指 VS 与 VS Code，两者都应在前排"
+    },
+    {
+      "id": "code-alias-vscode",
+      "family": "protection",
+      "query": "code",
+      "fixture": "default",
+      "expected_top": "fx-vscode",
+      "expected_in_top5": ["fx-vscode"],
+      "forbidden_top": [],
+      "history": "none",
+      "status": "required"
+    },
+    {
+      "id": "edge-absent-no-crash",
+      "family": "protection",
+      "query": "edge",
       "fixture": "default",
       "expected_top": null,
       "expected_in_top5": [],
       "forbidden_top": ["fx-control", "fx-recycle"],
       "history": "none",
       "status": "required",
-      "notes": "短 Query 不禁止召回 todo，但禁止系统虚拟入口抢占首位。expected_top 为 null 表示不锁定第一位。"
+      "notes": "别名无对应应用时不把系统虚拟入口顶到第一"
     },
     {
-      "id": "history-ter-boosts-similar-tier",
-      "query": "ter",
+      "id": "empty-forbidden-system-noise-on-stem",
+      "family": "protection",
+      "query": "st",
       "fixture": "default",
-      "expected_top": "fx-xterminal",
-      "expected_in_top5": ["fx-xterminal"],
+      "expected_top": null,
+      "expected_in_top5": ["fx-steam"],
       "forbidden_top": ["fx-control", "fx-recycle"],
-      "history": {
-        "pairs": { "ter": ["fx-xterminal", "fx-xterminal", "fx-xterminal"] },
-        "usage": { "fx-xterminal": 5 }
-      },
-      "status": "known-gap",
-      "gap_ticket": "09",
-      "notes": "票 07 落地 word-prefix 后，票 09 用 History 把相近层内 XTerminal 稳到首位。eval harness 尚未注入 history；由 history 模块单测覆盖同层重排。"
+      "history": "none",
+      "status": "required"
     }
   ]
 }

@@ -118,6 +118,8 @@ pub(super) fn move_selection(state: &mut State, delta: i32) -> Task<Message> {
     let len = state.results.len() as i32;
     let next = (state.selected as i32 + delta).clamp(0, len - 1);
     state.selected = next as usize;
+    // scroll_to 会让鼠标底下换成另一行并触发 on_enter；先抑制悬停改选。
+    state.hover_suppressed = true;
     sync_scroll(state)
 }
 

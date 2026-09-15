@@ -1,13 +1,22 @@
 //! Search aliases from executable version resources.
+//!
+//! Full 扫描曾对每个 exe 串行调用 GetFileVersionInfoW，实测 ~12s/200 应用。
+//! 这里改为：路径戳缓存 + 线程池并行 miss，把热路径压到秒级。
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::UNIX_EPOCH;
 
+use serde::{Deserialize, Serialize};
 use windows::core::PCWSTR;
 use windows::Win32::Storage::FileSystem::{
     GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
 };
+
+use super::util::normalize_path_key;
 
 const MAX_VERSION_RESOURCE: u32 = 16 * 1024 * 1024;
 const FIELDS: [&str; 4] = [
@@ -16,8 +25,166 @@ const FIELDS: [&str; 4] = [
     "InternalName",
     "OriginalFilename",
 ];
+const CACHE_VERSION: u32 = 1;
+/// 并行读取版本资源的工作线程数（受 AV/磁盘限制，8 足够吃满）。
+const WORKERS: usize = 8;
+
+#[derive(Serialize, Deserialize)]
+struct CacheFile {
+    version: u32,
+    entries: HashMap<String, MetaEntry>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct MetaEntry {
+    mtime_nanos: u64,
+    size: u64,
+    keywords: Vec<String>,
+}
+
+/// exe 版本资源关键词缓存（按 path + mtime + size）。
+pub(super) struct MetaCache {
+    file: PathBuf,
+    entries: HashMap<String, MetaEntry>,
+    seen: std::collections::HashSet<String>,
+    pub hits: usize,
+    pub misses: usize,
+}
+
+impl MetaCache {
+    pub fn load(icon_dir: &Path) -> Self {
+        let file = icon_dir.join("meta-cache-v1.json");
+        let entries = std::fs::read(&file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<CacheFile>(&bytes).ok())
+            .filter(|f| f.version == CACHE_VERSION)
+            .map(|f| f.entries)
+            .unwrap_or_default();
+        Self {
+            file,
+            entries,
+            seen: std::collections::HashSet::new(),
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    fn lookup(&mut self, path: &Path) -> Option<Vec<String>> {
+        let key = normalize_path_key(&path.to_string_lossy());
+        let Some(entry) = self.entries.get(&key) else {
+            self.misses += 1;
+            return None;
+        };
+        let Some((mtime, size)) = stamp(path) else {
+            self.misses += 1;
+            return None;
+        };
+        if entry.mtime_nanos == mtime && entry.size == size {
+            self.hits += 1;
+            self.seen.insert(key);
+            Some(entry.keywords.clone())
+        } else {
+            self.misses += 1;
+            None
+        }
+    }
+
+    fn record(&mut self, path: &Path, keywords: Vec<String>) {
+        let key = normalize_path_key(&path.to_string_lossy());
+        let Some((mtime, size)) = stamp(path) else {
+            return;
+        };
+        self.seen.insert(key.clone());
+        self.entries.insert(
+            key,
+            MetaEntry {
+                mtime_nanos: mtime,
+                size,
+                keywords,
+            },
+        );
+    }
+
+    pub fn save(&self) {
+        let file = CacheFile {
+            version: CACHE_VERSION,
+            entries: self
+                .entries
+                .iter()
+                .filter(|(k, _)| self.seen.contains(*k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        };
+        let Ok(json) = serde_json::to_vec(&file) else {
+            return;
+        };
+        let tmp = self.file.with_extension("json.tmp");
+        if std::fs::write(&tmp, &json).is_ok() {
+            if self.file.exists() {
+                let _ = std::fs::remove_file(&self.file);
+            }
+            let _ = std::fs::rename(&tmp, &self.file);
+        }
+    }
+}
+
+fn stamp(path: &Path) -> Option<(u64, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    Some((mtime.as_nanos() as u64, meta.len()))
+}
+
+/// 批量取关键词：缓存命中直接用，miss 并行读版本资源。
+/// 返回与 `paths` 等长的列表。
+pub(super) fn executable_keywords_batch(
+    paths: &[PathBuf],
+    cache: &mut MetaCache,
+) -> Vec<Vec<String>> {
+    let mut out = vec![Vec::new(); paths.len()];
+    let mut pending: Vec<usize> = Vec::new();
+    for (i, path) in paths.iter().enumerate() {
+        if let Some(kw) = cache.lookup(path) {
+            out[i] = kw;
+        } else {
+            pending.push(i);
+        }
+    }
+    if pending.is_empty() {
+        return out;
+    }
+
+    let chunk = pending.len().div_ceil(WORKERS).max(1);
+    let extracted = Mutex::new(HashMap::<usize, Vec<String>>::new());
+    std::thread::scope(|s| {
+        for part in pending.chunks(chunk) {
+            let part = part.to_vec();
+            let paths = paths;
+            let extracted = &extracted;
+            s.spawn(move || {
+                for i in part {
+                    let kw = executable_keywords(&paths[i]);
+                    if let Ok(mut g) = extracted.lock() {
+                        g.insert(i, kw);
+                    }
+                }
+            });
+        }
+    });
+
+    let extracted = extracted.into_inner().unwrap_or_default();
+    for (i, kw) in extracted {
+        cache.record(&paths[i], kw.clone());
+        out[i] = kw;
+    }
+    out
+}
 
 pub(super) fn executable_keywords(path: &Path) -> Vec<String> {
+    // shell: / 虚拟路径不做文件探测
+    let path_str = path.to_string_lossy();
+    if path_str.starts_with("shell:") || path_str.starts_with("::{") {
+        return Vec::new();
+    }
     if !path.is_file()
         || !path
             .extension()
@@ -136,5 +303,29 @@ mod tests {
         std::fs::write(&file, b"fixture").unwrap();
         assert!(executable_keywords(&file).is_empty());
         let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    fn batch_hits_cache_after_first_extract() {
+        let dir = std::env::temp_dir().join(format!("kite-meta-cache-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut cache = MetaCache::load(&dir);
+        let windows = std::env::var_os("WINDIR").unwrap();
+        let path = PathBuf::from(&windows).join("System32/notepad.exe");
+        let first = executable_keywords_batch(&[path.clone()], &mut cache);
+        assert!(!first[0].is_empty());
+        assert_eq!(cache.misses, 1);
+        let second = executable_keywords_batch(&[path], &mut cache);
+        assert_eq!(first[0], second[0]);
+        assert_eq!(cache.hits, 1);
+        cache.save();
+        let reloaded = MetaCache::load(&dir);
+        assert!(reloaded.entries.len() >= 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shell_paths_are_skipped() {
+        assert!(executable_keywords(Path::new("shell:AppsFolder\\Foo")).is_empty());
     }
 }

@@ -1,8 +1,9 @@
 //! 历史加权：把 Usage / Recency / Query History 映射为排序加分。
-//! 原则（PRD §41–42）：
-//! - MatchScore 仍是主信号，先按基础相关性分层
-//! - 历史只在同层（或相近质量）候选间调整顺序，不得把无关弱匹配推到明确匹配之上
-//! - 历史总加分有上限；不做纯 LRU
+//! 原则（PRD §41–42 / 票 04）：
+//! - MatchScore 仍是主信号；明确匹配（用户 Alias / Name Exact）硬保护
+//! - 本 Query 配对优先于全局 Usage；一次选择有限倾向，重复选择对数趋稳
+//! - 相近质量候选可竞争，不把每种匹配方式锁成不可跨越的小层
+//! - 历史总加分有上限；Pin 与历史取较大者；不做纯 LRU
 
 use std::collections::{HashMap, HashSet};
 
@@ -16,10 +17,17 @@ pub const HISTORY_BOOST_MAX: i32 = 160;
 /// （明确匹配保护，见 PRD §41–42）。
 pub const PIN_BOOST: i32 = 180;
 
-const FREQUENCY_CAP: i32 = 50;
-const RECENCY_CAP: i32 = 40;
+/// 硬保护层：≤ 此层的候选始终排在其余候选之前，且层内仍按 (tier, FinalScore)。
+/// 用户 Alias / Name Exact / 内置 Alias / Compact Exact；
+/// 其余层允许相近质量用 FinalScore 竞争。
+const PROTECTED_TIER_MAX: i32 = 2;
 
-/// 基础相关性层级：数值越小质量越高。历史只在同层内调整顺序。
+const FREQUENCY_CAP: i32 = 45;
+const RECENCY_CAP: i32 = 40;
+/// Query 配对单独封顶：须明显高于单次 Usage，低于总上限，给 Recency 留空间。
+const PAIR_CAP: i32 = 110;
+
+/// 基础相关性层级：数值越小质量越高。
 pub fn quality_tier(base_score: i32) -> i32 {
     use crate::search::ranker::{
         SCORE_ACRONYM, SCORE_BUILTIN_ALIAS_EXACT, SCORE_COMPACT_EXACT, SCORE_COMPACT_SUBSTRING,
@@ -53,8 +61,17 @@ pub fn quality_tier(base_score: i32) -> i32 {
     }
 }
 
+/// 一次检索使用的个性化状态（内存快照，截断前参与最终排序）。
+#[derive(Debug, Default, Clone)]
+pub struct Personalization {
+    pub usage: HashMap<String, UsageStats>,
+    pub pairs: HashMap<String, QueryPairStats>,
+    pub pinned: HashSet<String>,
+    pub now: i64,
+    pub query_norm: String,
+}
+
 /// 个性化加分统一入口（Match 仍是主信号）：历史（Usage/Recency/Query 配对）+ 固定。
-/// 先按 base score 分层，再在层内用历史/Pin 调整顺序，最后按 (tier, score) 重排。
 pub fn apply_boosts(
     hits: &mut [SearchResult],
     usage: HashMap<String, UsageStats>,
@@ -63,35 +80,68 @@ pub fn apply_boosts(
     now: i64,
     pinned: &HashSet<String>,
 ) {
-    let mut keyed: Vec<(i32, i32, String, SearchResult)> = Vec::with_capacity(hits.len());
+    let prefs = Personalization {
+        usage,
+        pairs,
+        pinned: pinned.clone(),
+        now,
+        query_norm: query_norm.to_string(),
+    };
+    apply_personalization(hits, &prefs);
+}
+
+/// 在完整候选集上应用个性化并最终排序。调用方负责截断。
+///
+/// 排序：
+/// 1. 硬保护层（Alias / Name Exact）始终在前，层内 (tier, FinalScore)
+/// 2. 其余候选按 FinalScore 竞争（允许相近质量被本 Query 偏好调整）
+/// 3. 同分再按 tier、id 稳定
+pub fn apply_personalization(hits: &mut [SearchResult], prefs: &Personalization) {
+    let mut protected: Vec<(i32, i32, String, SearchResult)> = Vec::new();
+    let mut open: Vec<(i32, i32, String, SearchResult)> = Vec::new();
+
     for hit in hits.iter() {
         let base = hit.score;
-        let tier = quality_tier(base);
-        let is_pinned = pinned.contains(&hit.item.id);
-        let u = usage.get(&hit.item.id).cloned().unwrap_or_default();
-        let p = pairs.get(&hit.item.id).cloned().unwrap_or_default();
-        let history = history_boost(query_norm, &u, &p, now);
+        let tier = if hit.quality_tier != 0 {
+            hit.quality_tier
+        } else {
+            quality_tier(base)
+        };
+        let is_pinned = prefs.pinned.contains(&hit.item.id);
+        let u = prefs.usage.get(&hit.item.id).cloned().unwrap_or_default();
+        let p = prefs.pairs.get(&hit.item.id).cloned().unwrap_or_default();
+        let history = history_boost(&prefs.query_norm, &u, &p, prefs.now);
         let boost = if is_pinned {
             PIN_BOOST.max(history)
         } else {
             history
         };
         let mut hit = hit.clone();
+        hit.quality_tier = tier;
         hit.score = base + boost;
         if is_pinned {
             hit.matched_by = format!("{}+pin", hit.matched_by);
         } else if boost > 0 {
             hit.matched_by = format!("{}+history", hit.matched_by);
         }
-        keyed.push((tier, hit.score, hit.item.id.clone(), hit));
+        let keyed = (tier, hit.score, hit.item.id.clone(), hit);
+        if tier <= PROTECTED_TIER_MAX {
+            protected.push(keyed);
+        } else {
+            open.push(keyed);
+        }
     }
-    // 同层内按加分后分数降序；层号小 = 质量高，优先
-    keyed.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| b.1.cmp(&a.1))
+
+    protected.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)).then_with(|| a.2.cmp(&b.2)));
+    open.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| a.0.cmp(&b.0))
             .then_with(|| a.2.cmp(&b.2))
     });
-    for (slot, (_, _, _, hit)) in hits.iter_mut().zip(keyed.into_iter()) {
+
+    let mut ordered = protected;
+    ordered.extend(open);
+    for (slot, (_, _, _, hit)) in hits.iter_mut().zip(ordered.into_iter()) {
         *slot = hit;
     }
 }
@@ -104,14 +154,14 @@ pub fn history_boost(_query: &str, usage: &UsageStats, pair: &QueryPairStats, no
     (q + f + r).min(HISTORY_BOOST_MAX)
 }
 
-/// Query→App 配对越稳越高；对数增长，单独封顶 90。
+/// Query→App 配对：本查询的明确选择，优先于全局 Usage。
+/// 1→30, 3→45, 10→62, 30→~78；封顶 PAIR_CAP。
 fn query_pair_score(pair: &QueryPairStats) -> i32 {
     if pair.count <= 0 {
         return 0;
     }
-    // 1→20, 3→38, 10→60, 30→~85
-    let s = 20.0 + 15.0 * (pair.count as f64).ln();
-    (s.round() as i32).min(90)
+    let s = 30.0 + 14.0 * (pair.count as f64).ln();
+    (s.round() as i32).min(PAIR_CAP)
 }
 
 fn frequency_score(count: i64) -> i32 {
@@ -145,8 +195,8 @@ mod tests {
     use crate::model::AppItem;
 
     fn hit(id: &str) -> SearchResult {
-        SearchResult {
-            item: AppItem::scanned(
+        SearchResult::scored(
+            AppItem::scanned(
                 id.into(),
                 id.into(),
                 format!("C:\\{id}.exe"),
@@ -154,9 +204,9 @@ mod tests {
                 None,
                 "t",
             ),
-            score: 100,
-            matched_by: "test".into(),
-        }
+            100,
+            "test",
+        )
     }
 
     #[test]
@@ -335,6 +385,170 @@ mod tests {
             hits[0].item.id, "strong",
             "更高基础相关性的 word-prefix 不得被弱 substring+历史压过"
         );
+    }
+
+    #[test]
+    fn query_pair_beats_global_usage_within_open_band() {
+        use crate::search::ranker::SCORE_WORD_PREFIX;
+        // 同基础分、无 Recency：A 仅全局高频，B 有本 Query 配对
+        let mut popular = hit("popular");
+        popular.score = SCORE_WORD_PREFIX;
+        let mut chosen = hit("chosen");
+        chosen.score = SCORE_WORD_PREFIX;
+        let mut usage = HashMap::new();
+        usage.insert(
+            "popular".to_string(),
+            UsageStats {
+                launch_count: 80,
+                last_used_at: 0,
+            },
+        );
+        let mut pairs = HashMap::new();
+        pairs.insert(
+            "chosen".to_string(),
+            QueryPairStats {
+                count: 8,
+                last_used_at: 0,
+            },
+        );
+        let mut hits = vec![popular, chosen];
+        apply_boosts(
+            &mut hits,
+            usage,
+            pairs,
+            "ter",
+            1_700_086_400,
+            &HashSet::new(),
+        );
+        assert_eq!(
+            hits[0].item.id, "chosen",
+            "本 Query 配对应压过仅全局 Usage 的同层候选"
+        );
+    }
+
+    #[test]
+    fn one_pair_selection_is_limited_and_repeats_grow_log() {
+        let usage = UsageStats::default();
+        let one = QueryPairStats {
+            count: 1,
+            last_used_at: 0,
+        };
+        let many = QueryPairStats {
+            count: 30,
+            last_used_at: 0,
+        };
+        let b1 = history_boost("q", &usage, &one, 0);
+        let b30 = history_boost("q", &usage, &many, 0);
+        assert!(b1 > 0, "一次选择应有有限倾向");
+        assert!(b1 <= 40, "一次选择加分应有限，实际 {b1}");
+        assert!(b30 > b1, "重复选择应增强");
+        assert!(b30 <= HISTORY_BOOST_MAX);
+        // 对数趋稳：30 次相对 10 次增幅有限
+        let ten = QueryPairStats {
+            count: 10,
+            last_used_at: 0,
+        };
+        let b10 = history_boost("q", &usage, &ten, 0);
+        assert!(
+            b30 - b10 <= 25,
+            "重复选择增幅应递减：10→{b10} 30→{b30}"
+        );
+    }
+
+    #[test]
+    fn name_exact_not_stolen_by_popular_open_candidate() {
+        use crate::search::ranker::{SCORE_NAME_EXACT, SCORE_PREFIX};
+        let mut exact = hit("exact-app");
+        exact.score = SCORE_NAME_EXACT;
+        let mut popular = hit("popular");
+        popular.score = SCORE_PREFIX;
+        let mut usage = HashMap::new();
+        usage.insert(
+            "popular".to_string(),
+            UsageStats {
+                launch_count: 200,
+                last_used_at: 1_700_000_000,
+            },
+        );
+        let mut pairs = HashMap::new();
+        pairs.insert(
+            "popular".to_string(),
+            QueryPairStats {
+                count: 50,
+                last_used_at: 1_700_000_000,
+            },
+        );
+        let mut hits = vec![popular, exact];
+        apply_boosts(
+            &mut hits,
+            usage,
+            pairs,
+            "exact-app",
+            1_700_086_400,
+            &HashSet::new(),
+        );
+        assert_eq!(
+            hits[0].item.id, "exact-app",
+            "完整名称精确匹配不得被历史常用软件抢第一"
+        );
+    }
+
+    #[test]
+    fn empty_personalization_matches_base_order() {
+        use crate::search::ranker::{SCORE_PREFIX, SCORE_WORD_PREFIX};
+        let mut a = hit("a");
+        a.score = SCORE_WORD_PREFIX;
+        let mut b = hit("b");
+        b.score = SCORE_PREFIX;
+        let mut hits = vec![a, b];
+        apply_personalization(&mut hits, &Personalization::default());
+        assert_eq!(hits[0].item.id, "b", "无历史时按基础分");
+        assert_eq!(hits[1].item.id, "a");
+        assert!(!hits[0].matched_by.contains("history"));
+    }
+
+    #[test]
+    fn pin_and_history_take_max_not_sum() {
+        let mut hits = vec![hit("p")];
+        let mut usage = HashMap::new();
+        usage.insert(
+            "p".to_string(),
+            UsageStats {
+                launch_count: 30,
+                last_used_at: 1_700_000_000,
+            },
+        );
+        let mut pairs = HashMap::new();
+        pairs.insert(
+            "p".to_string(),
+            QueryPairStats {
+                count: 20,
+                last_used_at: 1_700_000_000,
+            },
+        );
+        let pinned: HashSet<String> = ["p".to_string()].into_iter().collect();
+        apply_boosts(
+            &mut hits,
+            usage,
+            pairs,
+            "p",
+            1_700_086_400,
+            &pinned,
+        );
+        let h = history_boost(
+            "p",
+            &UsageStats {
+                launch_count: 30,
+                last_used_at: 1_700_000_000,
+            },
+            &QueryPairStats {
+                count: 20,
+                last_used_at: 1_700_000_000,
+            },
+            1_700_086_400,
+        );
+        let expected = 100 + PIN_BOOST.max(h);
+        assert_eq!(hits[0].score, expected, "Pin 与历史取较大者，不叠加");
     }
 
     #[test]

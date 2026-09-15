@@ -146,6 +146,86 @@ fn cache_file(icon_dir: &Path) -> PathBuf {
     icon_dir.join("scan-cache-v1.json")
 }
 
+/// UWP/AppsFolder 枚举结果缓存：COM 枚举约数百毫秒，且无廉价文件 mtime。
+/// 自动重建在 TTL 内复用；设置/托盘「重新扫描」可强制刷新。
+const UWP_CACHE_VERSION: u32 = 1;
+const UWP_CACHE_TTL_SECS: u64 = 3600;
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct CachedUwpItem {
+    pub id: String,
+    pub name: String,
+    pub target: String,
+    pub source: String,
+    pub icon_src: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct UwpCacheFile {
+    version: u32,
+    saved_at_unix: u64,
+    items: Vec<CachedUwpItem>,
+}
+
+#[derive(Default)]
+pub struct UwpCache {
+    file: PathBuf,
+    saved_at_unix: u64,
+    items: Vec<CachedUwpItem>,
+    loaded: bool,
+}
+
+impl UwpCache {
+    pub fn load(icon_dir: &Path) -> UwpCache {
+        let file = icon_dir.join("uwp-cache-v1.json");
+        let parsed = std::fs::read(&file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<UwpCacheFile>(&bytes).ok())
+            .filter(|f| f.version == UWP_CACHE_VERSION);
+        match parsed {
+            Some(f) => UwpCache {
+                file,
+                saved_at_unix: f.saved_at_unix,
+                items: f.items,
+                loaded: true,
+            },
+            None => UwpCache {
+                file,
+                ..UwpCache::default()
+            },
+        }
+    }
+
+    /// TTL 内且未强制刷新时返回缓存条目。
+    pub fn fresh_items(&self, force: bool, now_unix: u64) -> Option<Vec<CachedUwpItem>> {
+        if force || !self.loaded || self.items.is_empty() {
+            return None;
+        }
+        if now_unix.saturating_sub(self.saved_at_unix) > UWP_CACHE_TTL_SECS {
+            return None;
+        }
+        Some(self.items.clone())
+    }
+
+    pub fn save(&self, items: Vec<CachedUwpItem>, now_unix: u64) {
+        let file = UwpCacheFile {
+            version: UWP_CACHE_VERSION,
+            saved_at_unix: now_unix,
+            items,
+        };
+        let Ok(json) = serde_json::to_vec(&file) else {
+            return;
+        };
+        let tmp = self.file.with_extension("json.tmp");
+        if std::fs::write(&tmp, &json).is_ok() {
+            if self.file.exists() {
+                let _ = std::fs::remove_file(&self.file);
+            }
+            let _ = std::fs::rename(&tmp, &self.file);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +243,33 @@ mod tests {
             Some(r"C:\apps".into()),
             Some(r"C:\apps\foo.exe".into()),
         )
+    }
+
+    #[test]
+    fn uwp_cache_ttl_and_force() {
+        let d = temp_dir("uwp");
+        let cache = UwpCache::load(&d);
+        assert!(cache.fresh_items(false, 1_000).is_none(), "空缓存不命中");
+        let items = vec![CachedUwpItem {
+            id: "a".into(),
+            name: "App".into(),
+            target: "shell:AppsFolder\\a".into(),
+            source: "uwp".into(),
+            icon_src: Some("logo.png".into()),
+        }];
+        cache.save(items.clone(), 1_000);
+        let reloaded = UwpCache::load(&d);
+        let hit = reloaded
+            .fresh_items(false, 1_000 + 60)
+            .expect("TTL 内应命中");
+        assert_eq!(hit.len(), 1);
+        assert_eq!(hit[0].source, "uwp");
+        assert!(reloaded.fresh_items(true, 1_000 + 60).is_none(), "force 忽略缓存");
+        assert!(
+            reloaded.fresh_items(false, 1_000 + 3_601).is_none(),
+            "过期不命中"
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

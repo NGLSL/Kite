@@ -560,11 +560,7 @@ fn kite_settings_hit(query_norm: &str) -> Option<SearchResult> {
         "builtin",
     );
     item.attach_search_fields();
-    Some(SearchResult {
-        item,
-        score: 930,
-        matched_by: "builtin".into(),
-    })
+    Some(SearchResult::scored(item, 930, "builtin"))
 }
 
 fn windows_settings_hits(query_norm: &str, icon_dir: &Path) -> Vec<SearchResult> {
@@ -590,11 +586,7 @@ fn windows_settings_hits(query_norm: &str, icon_dir: &Path) -> Vec<SearchResult>
         item.icon_src = Some(settings_exe.clone());
         item.attach_search_fields();
         item.icon = icons::cache_icon(icon_dir, &item.id, item.icon_src.as_deref(), None);
-        hits.push(SearchResult {
-            item,
-            score,
-            matched_by: "win-settings".into(),
-        });
+        hits.push(SearchResult::scored(item, score, "win-settings"));
     }
     hits.sort_by(|a, b| b.score.cmp(&a.score));
     hits.truncate(6);
@@ -638,11 +630,7 @@ fn system_tool_hits(query_norm: &str, icon_dir: &Path) -> Vec<SearchResult> {
         item.attach_search_fields();
         item.icon_src = Some(target);
         item.icon = icons::cache_icon(icon_dir, &item.id, item.icon_src.as_deref(), None);
-        hits.push(SearchResult {
-            item,
-            score,
-            matched_by: "builtin-system".into(),
-        });
+        hits.push(SearchResult::scored(item, score, "builtin-system"));
     }
     hits.sort_by(|a, b| b.score.cmp(&a.score));
     hits

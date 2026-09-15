@@ -49,11 +49,7 @@ pub fn search(
         return apps
             .iter()
             .take(max_results)
-            .map(|item| SearchResult {
-                item: item.clone(),
-                score: 0,
-                matched_by: "default".into(),
-            })
+            .map(|item| SearchResult::scored(item.clone(), 0, "default"))
             .collect();
     }
 
@@ -86,6 +82,31 @@ pub fn search_with_index(
     index.search(query, user_alias_targets, max_results)
 }
 
+/// 统一最终排序入口：多路召回 → 验证 → 个性化（截断前）→ 一次截断。
+/// UI 与系统入口主路径应走这里，不再「先截断再加分」或层排序后再纯分数重排。
+pub fn search_with_personalization(
+    index: &RetrievalIndex,
+    query: &str,
+    user_alias_targets: &[UserTarget],
+    personalization: Option<&crate::history::Personalization>,
+    max_results: usize,
+) -> Vec<SearchResult> {
+    index.search_personalized(query, user_alias_targets, personalization, max_results)
+}
+
+/// 无预构建索引时的快照路径（测试与冷启动）。
+pub fn search_system_personalized(
+    apps: &[AppItem],
+    system_entries: &[AppItem],
+    query: &str,
+    user_alias_targets: &[UserTarget],
+    personalization: Option<&crate::history::Personalization>,
+    max_results: usize,
+) -> Vec<SearchResult> {
+    let index = RetrievalIndex::build(apps, system_entries);
+    index.search_personalized(query, user_alias_targets, personalization, max_results)
+}
+
 /// 空 Query 默认列表：固定项优先，其次最近使用，不足再按索引顺序补满。
 pub fn order_by_recent(
     apps: &[AppItem],
@@ -100,11 +121,7 @@ pub fn order_by_recent(
                 return false;
             }
             if let Some(item) = apps.iter().find(|a| a.id == id) {
-                hits.push(SearchResult {
-                    item: item.clone(),
-                    score,
-                    matched_by: matched_by.into(),
-                });
+                hits.push(SearchResult::scored(item.clone(), score, matched_by));
                 return true;
             }
             false
@@ -128,11 +145,7 @@ pub fn order_by_recent(
         if hits.iter().any(|h| h.item.id == item.id) {
             continue;
         }
-        hits.push(SearchResult {
-            item: item.clone(),
-            score: 0,
-            matched_by: "default".into(),
-        });
+        hits.push(SearchResult::scored(item.clone(), 0, "default"));
     }
     hits
 }
@@ -169,11 +182,7 @@ pub fn name_candidates(apps: &[AppItem], query: &str, top_n: usize) -> Vec<Searc
             score = 1;
         }
         if score > 0 {
-            hits.push(SearchResult {
-                item: item.clone(),
-                score,
-                matched_by: "candidate".into(),
-            });
+            hits.push(SearchResult::scored(item.clone(), score, "candidate"));
         }
     }
     ranker::rank_and_truncate(hits, top_n)
@@ -948,6 +957,193 @@ mod tests {
                 .iter()
                 .any(|k| k == "display" || k == "xianshi"),
             "关键词应入条目"
+        );
+    }
+
+    fn named_item(id: &str, name: &str) -> AppItem {
+        let mut it = AppItem::scanned(
+            id.to_string(),
+            name.to_string(),
+            format!("C:\\apps\\{id}.exe"),
+            None,
+            None,
+            "start-menu",
+        );
+        it.attach_search_fields();
+        it
+    }
+
+    #[test]
+    fn personalized_search_keeps_explicit_quality_tier() {
+        let apps = vec![named_item("chrome", "Google Chrome")];
+        let index = RetrievalIndex::build(&apps, &[]);
+        let hits = search_with_personalization(&index, "chrome", &[], None, MAX_RESULTS);
+        assert!(!hits.is_empty());
+        assert!(
+            hits[0].quality_tier > 0,
+            "统一入口应写入显式质量层，score={}",
+            hits[0].score
+        );
+    }
+
+    #[test]
+    fn preference_lifts_similar_quality_before_truncate() {
+        // 两条同质量前缀命中；max_results=1 时旧流程会先截断再加分，
+        // 统一入口应在截断前应用 Query 偏好。
+        let apps = vec![
+            named_item("alpha", "Alpine Tool"),
+            named_item("beta", "Albatross Tool"),
+        ];
+        let index = RetrievalIndex::build(&apps, &[]);
+        let mut prefs = crate::history::Personalization::default();
+        prefs.query_norm = "al".into();
+        prefs.pairs.insert(
+            "beta".into(),
+            crate::storage::QueryPairStats {
+                count: 20,
+                last_used_at: 1,
+            },
+        );
+        prefs.usage.insert(
+            "beta".into(),
+            crate::storage::UsageStats {
+                launch_count: 50,
+                last_used_at: 1_700_000_000,
+            },
+        );
+        prefs.now = 1_700_086_400;
+
+        let hits = search_with_personalization(&index, "al", &[], Some(&prefs), 1);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].item.id, "beta",
+            "同层候选在截断前应被本 Query 偏好抬升"
+        );
+        assert!(hits[0].matched_by.contains("history"));
+    }
+
+    #[test]
+    fn unified_entry_protects_name_exact_from_history() {
+        let apps = vec![
+            named_item("exact", "al"),
+            named_item("prefix", "Alpha Tool"),
+        ];
+        // exact 名称 "al" 精确；prefix 有极强历史也不得抢第一
+        let index = RetrievalIndex::build(&apps, &[]);
+        let mut prefs = crate::history::Personalization::default();
+        prefs.query_norm = "al".into();
+        prefs.pairs.insert(
+            "prefix".into(),
+            crate::storage::QueryPairStats {
+                count: 100,
+                last_used_at: 1,
+            },
+        );
+        prefs.usage.insert(
+            "prefix".into(),
+            crate::storage::UsageStats {
+                launch_count: 10_000,
+                last_used_at: 1_700_000_000,
+            },
+        );
+        prefs.now = 1_700_086_400;
+
+        let hits = search_with_personalization(&index, "al", &[], Some(&prefs), MAX_RESULTS);
+        assert_eq!(hits[0].item.id, "exact", "Name Exact 不得被历史抬升的弱匹配压过");
+        assert!(
+            hits[0].quality_tier < hits[1].quality_tier,
+            "质量层应显式区分 exact 与 prefix"
+        );
+    }
+
+    #[test]
+    fn pin_does_not_stack_over_exact_in_unified_entry() {
+        let apps = vec![
+            named_item("exact", "chrome"),
+            named_item("pinned", "chromium"),
+        ];
+        let index = RetrievalIndex::build(&apps, &[]);
+        let mut prefs = crate::history::Personalization::default();
+        prefs.query_norm = "chrome".into();
+        prefs.pinned.insert("pinned".into());
+
+        let hits = search_with_personalization(&index, "chrome", &[], Some(&prefs), MAX_RESULTS);
+        assert_eq!(hits[0].item.id, "exact");
+    }
+
+    #[test]
+    fn single_char_hits_inner_name_and_pinyin_initial() {
+        let apps = vec![
+            named_item("notepad", "Notepad"),
+            named_item("control", "控制面板"),
+            named_item("other", "Steam"),
+        ];
+        // 名称内部 n
+        let hits = search(&apps, "n", &[], TOP_N);
+        assert!(
+            hits.iter().any(|h| h.item.id == "notepad"),
+            "1 字符 n 应命中 Notepad: {:?}",
+            hits.iter().map(|h| &h.item.name).collect::<Vec<_>>()
+        );
+        // 拼音首字母任意位置 z ← 控制面板 kzmb
+        let hits = search(&apps, "z", &[], TOP_N);
+        assert!(
+            hits.iter().any(|h| h.item.id == "control"),
+            "1 字符 z 应命中控制面板: {:?}",
+            hits.iter().map(|h| &h.item.name).collect::<Vec<_>>()
+        );
+        // 1 字符不启用纠错：不应因编辑距离召回无关项
+        let hits = search(&apps, "x", &[], TOP_N);
+        assert!(
+            hits.iter().all(|h| h.matched_by != "fuzzy" && h.matched_by != "keyword-fuzzy"),
+            "1 字符不应走 fuzzy"
+        );
+    }
+
+    #[test]
+    fn short_fragment_and_acronym_recall() {
+        let apps = vec![
+            named_item("notepad", "Notepad"),
+            named_item("ndm", "Neat Download Manager"),
+            named_item("chrome", "Google Chrome"),
+        ];
+        let hits = search(&apps, "pad", &[], TOP_N);
+        assert!(
+            hits.iter().any(|h| h.item.id == "notepad"),
+            "pad 应召回 Notepad"
+        );
+        let hits = search(&apps, "ndm", &[], TOP_N);
+        assert_eq!(hits[0].item.id, "ndm", "ndm 缩写应命中");
+    }
+
+    #[test]
+    fn mixed_hanzi_pinyin_query_recalls() {
+        let apps = vec![named_item("wechat", "微信"), named_item("dev", "微信开发者工具")];
+        let hits = search(&apps, "微信xin", &[], TOP_N);
+        assert!(
+            hits.iter().any(|h| h.item.id == "wechat"),
+            "微信xin 混输应召回微信: {:?}",
+            hits.iter().map(|h| &h.item.name).collect::<Vec<_>>()
+        );
+        let hits = search(&apps, "w微", &[], TOP_N);
+        assert!(
+            hits.iter().any(|h| h.item.id == "wechat"),
+            "w微 混输应召回微信: {:?}",
+            hits.iter().map(|h| &h.item.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn contiguous_fragment_beats_scattered_same_chars_at_equal_score_band() {
+        // googchrome 有序跳字 vs 更晚的同等 substring：证据应偏好更早/更紧
+        let apps = vec![
+            named_item("gchrome", "gxxchrome"),
+            named_item("gchrome2", "xxgchrome"),
+        ];
+        let hits = search(&apps, "gchrome", &[], TOP_N);
+        assert!(
+            !hits.is_empty(),
+            "gchrome 应至少召回一条有序跳字/片段"
         );
     }
 }

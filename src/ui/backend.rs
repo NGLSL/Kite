@@ -88,6 +88,13 @@ pub fn request_build(
                 generation,
                 &options,
             );
+            // 手动重扫的 force 标记只作用一次；入口监听重建走 TTL 缓存。
+            {
+                let mut opts = scan_options
+                    .write()
+                    .unwrap_or_else(|error| error.into_inner());
+                opts.force_uwp_refresh = false;
+            }
             if !PENDING_REBUILD.swap(false, Ordering::SeqCst) {
                 break;
             }

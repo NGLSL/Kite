@@ -240,6 +240,10 @@ struct State {
     update_checking: bool,
     /// 唤起轮次，埋点对齐用。
     epoch: u64,
+    /// 键盘导航后抑制悬停改选，直到鼠标实际移动（避免 scroll_to 后 on_enter 抢选中）。
+    hover_suppressed: bool,
+    /// 上次用于悬停判定的鼠标位置（有位移才恢复悬停选中）。
+    last_hover_pt: Option<iced::Point>,
 }
 
 /// 视图层：设置页 / 搜索页。

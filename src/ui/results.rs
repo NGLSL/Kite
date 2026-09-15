@@ -73,20 +73,34 @@ impl State {
                 let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
                 index.retrieval.clone()
             };
-            // 应用 + 系统入口统一多路召回（快照同代索引，不按来源截断前排）
-            // 系统入口图标已在快照准备阶段写入，按键路径不再提取/校验
+            // 个性化在截断前进入统一排序：全量 Usage + 本 Query 配对 + Pin。
+            let prefs = self.history.as_ref().map(|db| history::Personalization {
+                usage: db.usage_all(),
+                pairs: db.query_pairs_for(&q_norm),
+                pinned: db.pinned_ids().into_iter().collect(),
+                now: storage::now_ts(),
+                query_norm: q_norm.clone(),
+            });
+            // 应用 + 系统入口：多路召回 → 验证 → 个性化 → 一次截断
             let mut hits = if let Some(ret) = retrieval {
-                search::search_with_index(&ret, &self.query, &user_targets, search::MAX_RESULTS)
+                search::search_with_personalization(
+                    &ret,
+                    &self.query,
+                    &user_targets,
+                    prefs.as_ref(),
+                    search::MAX_RESULTS,
+                )
             } else {
                 let (apps, system_entries) = {
                     let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
                     (index.apps.clone(), index.system_entries.clone())
                 };
-                search::search_with_system(
+                search::search_system_personalized(
                     &apps,
                     &system_entries,
                     &self.query,
                     &user_targets,
+                    prefs.as_ref(),
                     search::MAX_RESULTS,
                 )
             };
@@ -111,15 +125,8 @@ impl State {
                 );
             }
 
-            // 个性化加权（历史 + 固定，Match 仍是主信号）
-            if let Some(db) = &self.history {
-                let ids: Vec<String> = hits.iter().map(|h| h.item.id.clone()).collect();
-                let usage = db.usage_snapshot(&ids);
-                let pairs = db.query_pair_snapshot(&q_norm, &ids);
-                let pinned = db.pinned_ids().into_iter().collect();
-                history::apply_boosts(&mut hits, usage, pairs, &q_norm, storage::now_ts(), &pinned);
-            }
-            hits = search::rerank(hits, search::MAX_RESULTS);
+            // 应用主结果已在统一入口完成个性化与层排序；此处不再二次加分/纯分数重排。
+            hits.truncate(search::MAX_RESULTS);
 
             // 网页搜索：非网址；有应用类结果时第 5 位固定「用浏览器搜索」，否则列浏览器
             if !is_url && !self.query.trim().is_empty() {
@@ -163,6 +170,8 @@ impl State {
             prepend_dependency_status(&mut self.results, &self.file_results);
         }
         self.selected = 0;
+        // 列表刷新后回到顶部，避免选中行与滚动位置错位。
+        self.hover_suppressed = false;
         let top = self
             .results
             .first()
@@ -193,11 +202,7 @@ fn build_file_results(query: &str, icon_dir: &std::path::Path) -> Vec<SearchResu
                 AppItem::scanned(id, hit.name.clone(), hit.path, None, None, "everything");
             item.attach_search_fields();
             item.icon = system::icons::cache_type_icon(icon_dir, &hit.name, hit.is_folder);
-            SearchResult {
-                item,
-                score: 400,
-                matched_by: "file".into(),
-            }
+            SearchResult::scored(item, 400, "file")
         })
         .collect()
 }
@@ -231,11 +236,7 @@ fn everything_status_result(
         "everything-status",
     );
     item.attach_search_fields();
-    Some(SearchResult {
-        item,
-        score: 0,
-        matched_by: "everything-status".to_string(),
-    })
+    Some(SearchResult::scored(item, 0, "everything-status"))
 }
 
 fn prepend_dependency_status(results: &mut Vec<SearchResult>, file_results: &[SearchResult]) {
@@ -315,11 +316,7 @@ mod tests {
                     None,
                     "start-menu",
                 );
-                crate::model::SearchResult {
-                    item,
-                    score: 1000,
-                    matched_by: "exact".to_string(),
-                }
+                crate::model::SearchResult::scored(item, 1000, "exact")
             })
             .collect::<Vec<_>>();
         let status = everything_status_result(Availability::NotInstalled).unwrap();
