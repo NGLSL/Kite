@@ -33,6 +33,10 @@
             None,
             source,
         );
+        // 开始菜单/桌面条目在测试中默认按 .lnk 处理，贴近扫描结果
+        if matches!(source, "start-menu" | "desktop") {
+            it.is_lnk = true;
+        }
         it.attach_search_fields();
         it
     }
@@ -613,6 +617,168 @@
         assert_eq!(
             hits[0].item.name, "aurora",
             "无同安装目录的友好入口时保留精确匹配"
+        );
+    }
+
+    #[test]
+    fn hit_exe_name_still_shows_start_menu_lnk_main_entry() {
+        // 同一 target：只命中 app-paths 的英文名，开始菜单中文 .lnk 仍是主入口
+        let target = r"C:\Program Files\Tencent\WeChat\WeChat.exe";
+        let mut menu = AppItem::scanned(
+            "menu".into(),
+            "微信".into(),
+            target.into(),
+            None,
+            Some(r"C:\Program Files\Tencent\WeChat".into()),
+            "start-menu",
+        );
+        menu.is_lnk = true;
+        menu.attach_search_fields();
+        let exe = sourced_item("wechat", target, "app-paths");
+        let hits = search(&[menu, exe], "wechat", &[], TOP_N);
+        assert_eq!(
+            hits.len(),
+            1,
+            "同启动身份应归并: {:?}",
+            hits.iter()
+                .map(|h| (&h.item.name, &h.item.source))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(hits[0].item.source, "start-menu");
+        assert_eq!(hits[0].item.name, "微信", "展示名来自主入口");
+        assert_eq!(hits[0].item.target, target);
+        assert!(
+            hits[0].item.working_dir.is_some(),
+            "主入口 working_dir 应保留"
+        );
+    }
+
+    #[test]
+    fn same_target_different_action_args_are_not_merged() {
+        // 同一 exe、不同动作：打开应用 vs 设置面板，不得合并
+        let target = r"C:\Program Files\Example\tool.exe";
+        let open = sourced_item("Example Tool", target, "start-menu");
+        let settings = sourced_item_with_args(
+            "Example Tool Settings",
+            target,
+            "desktop",
+            Some("--settings".into()),
+        );
+        let hits = search(&[open, settings], "example tool", &[], TOP_N);
+        assert_eq!(
+            hits.len(),
+            2,
+            "不同启动动作必须分行: {:?}",
+            hits.iter()
+                .map(|h| (&h.item.name, h.item.args.as_deref()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn apps_without_lnk_still_search_and_keep_launch_target() {
+        let app = sourced_item("Solo App", r"C:\Tools\solo\solo.exe", "app-paths");
+        let hits = search(&[app.clone()], "solo", &[], TOP_N);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].item.target, app.target);
+        assert_eq!(hits[0].item.source, "app-paths");
+    }
+
+    #[test]
+    fn icon_borrow_is_stable_regardless_of_member_order() {
+        let target = r"C:\Program Files\uTools\uTools.exe";
+        let mut lnk = AppItem::scanned(
+            "lnk".into(),
+            "uTools".into(),
+            target.into(),
+            None,
+            None,
+            "start-menu",
+        );
+        lnk.is_lnk = true;
+        lnk.attach_search_fields();
+        lnk.icon = None;
+        lnk.icon_src = None;
+        let mut exe = AppItem::scanned(
+            "exe".into(),
+            "uTools".into(),
+            target.into(),
+            None,
+            None,
+            "app-paths",
+        );
+        exe.attach_search_fields();
+        exe.icon = Some(r"C:\cache\utools.png".into());
+        exe.icon_src = Some(target.into());
+
+        let a = search(&[lnk.clone(), exe.clone()], "utools", &[], TOP_N);
+        let b = search(&[exe, lnk], "utools", &[], TOP_N);
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+        assert_eq!(a[0].item.source, "start-menu");
+        assert_eq!(b[0].item.source, "start-menu");
+        assert_eq!(a[0].item.icon, b[0].item.icon);
+        assert!(a[0].item.icon.is_some(), "应借用 exe 缓存图标");
+        assert_eq!(a[0].score, b[0].score, "证据与分数不随处理顺序变化");
+    }
+
+    #[test]
+    fn pinned_member_wins_as_launch_representative() {
+        let menu = sourced_item(
+            "Example",
+            r"C:\Program Files\Example\launcher.exe",
+            "start-menu",
+        );
+        let mut exe = sourced_item(
+            "Example",
+            r"C:\Program Files\Example\bin\example.exe",
+            "app-paths",
+        );
+        // 不同 target、同安装根 → 族合并；钉选 exe 时应成为启动代表
+        exe.icon = Some(r"C:\cache\example.png".into());
+        let index = RetrievalIndex::build(&[menu, exe.clone()], &[]);
+        let mut prefs = crate::history::Personalization::default();
+        prefs.pinned.insert(exe.id.clone());
+        let hits = search_with_personalization(&index, "example", &[], Some(&prefs), TOP_N);
+        assert_eq!(hits.len(), 1, "同安装应归并");
+        assert_eq!(
+            hits[0].item.source, "app-paths",
+            "用户钉选的入口优先于默认主入口"
+        );
+        assert_eq!(hits[0].item.id, exe.id);
+    }
+
+    #[test]
+    fn pinned_group_member_wins_even_when_not_recalled() {
+        let target = r"C:\Program Files\Example\app.exe";
+        let menu = sourced_item("Example App", target, "start-menu");
+        let exe = sourced_item("examplehelper", target, "app-paths");
+        let index = RetrievalIndex::build(&[menu, exe.clone()], &[]);
+        let mut prefs = crate::history::Personalization::default();
+        prefs.pinned.insert(exe.id.clone());
+        // 查询只命中开始菜单名，钉选的 app-paths 未被召回，仍应作启动代表
+        let hits = search_with_personalization(&index, "example app", &[], Some(&prefs), TOP_N);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].item.source, "app-paths");
+        assert_eq!(hits[0].item.id, exe.id);
+    }
+
+    #[test]
+    fn pinned_rep_borrows_icon_from_static_group_members() {
+        let target = r"C:\Program Files\Example\app.exe";
+        let mut menu = sourced_item("Example App", target, "start-menu");
+        menu.icon = Some(r"C:\cache\example.png".into());
+        let exe = sourced_item("examplehelper", target, "app-paths");
+        let index = RetrievalIndex::build(&[menu, exe.clone()], &[]);
+        let mut prefs = crate::history::Personalization::default();
+        prefs.pinned.insert(exe.id.clone());
+        let hits = search_with_personalization(&index, "example app", &[], Some(&prefs), TOP_N);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].item.source, "app-paths");
+        assert!(
+            hits[0].item.icon.is_some(),
+            "钉选覆盖主入口后仍应从组内借缓存图标: {:?}",
+            (hits[0].item.source.as_str(), &hits[0].item.icon)
         );
     }
 

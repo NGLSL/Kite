@@ -18,6 +18,9 @@ pub struct AppItem {
     #[serde(skip)]
     pub icon_src: Option<String>,
     pub source: String,
+    /// 扫描时记录：是否为已解析的 .lnk（主入口优先于同源裸 exe）。
+    #[serde(default)]
+    pub is_lnk: bool,
     /// 索引时预计算：规范化名称（小写、去首尾空白）。
     #[serde(skip)]
     pub normalized_name: String,
@@ -58,6 +61,7 @@ impl AppItem {
             icon: None,
             icon_src: None,
             source: source.into(),
+            is_lnk: false,
             normalized_name: String::new(),
             normalized_display: String::new(),
             pinyin: String::new(),

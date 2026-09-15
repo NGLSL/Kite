@@ -25,12 +25,18 @@ pub fn watch_roots() -> Vec<PathBuf> {
 
 pub fn watch_roots_with_options(options: &crate::app::scanner::ScanOptions) -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    if let Some(d) = dirs::data_dir() {
+    if let Some(start) = crate::app::scanner::util::user_start_menu_dir() {
+        roots.push(start);
+    } else if let Some(d) = dirs::data_dir() {
         roots.push(d.join("Microsoft/Windows/Start Menu"));
     }
-    roots.push(PathBuf::from(
-        r"C:\ProgramData\Microsoft\Windows\Start Menu",
-    ));
+    if let Some(start) = crate::app::scanner::util::common_start_menu_dir() {
+        roots.push(start);
+    } else {
+        roots.push(PathBuf::from(
+            r"C:\ProgramData\Microsoft\Windows\Start Menu",
+        ));
+    }
     if let Some(d) = dirs::desktop_dir() {
         roots.push(d);
     }

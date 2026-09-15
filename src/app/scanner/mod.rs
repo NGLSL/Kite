@@ -112,10 +112,11 @@ fn scan_apps_with_options(icon_dir: &Path, pass: ScanPass, options: &ScanOptions
     let mut raw: Vec<RawItem> = Vec::new();
     let mut cache = ScanCache::load(icon_dir);
 
-    let user_start = dirs::data_dir()
-        .map(|d| d.join("Microsoft/Windows/Start Menu"))
+    let user_start = util::user_start_menu_dir()
+        .or_else(|| dirs::data_dir().map(|d| d.join("Microsoft/Windows/Start Menu")))
         .unwrap_or_default();
-    let common_start = PathBuf::from(r"C:\ProgramData\Microsoft\Windows\Start Menu");
+    let common_start = util::common_start_menu_dir()
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData\Microsoft\Windows\Start Menu"));
     let user_desktop = dirs::desktop_dir().unwrap_or_default();
     let public_desktop = PathBuf::from(r"C:\Users\Public\Desktop");
     let user_home = dirs::home_dir();
@@ -564,7 +565,8 @@ fn collect_from_dir(
             if let Some((target, args, working_dir, icon_src)) = resolved {
                 let name = app_display_name(&file_name);
                 let id = util::stable_item_id(&target, args.as_deref());
-                let item = AppItem::scanned(id, name, target, args, working_dir, source);
+                let mut item = AppItem::scanned(id, name, target, args, working_dir, source);
+                item.is_lnk = true;
                 out.push((item, icon_src));
                 n += 1;
             }

@@ -222,6 +222,10 @@ pub struct RetrievalIndex {
     char_postings: HashMap<char, Vec<DocId>>,
     /// All readings of CJK characters (and literal ASCII) in mixed names.
     pinyin_char_postings: HashMap<char, Vec<DocId>>,
+    /// 成员 → 主入口 DocId（索引快照预计算；未分组成员映射到自身）。
+    launch_rep: HashMap<DocId, DocId>,
+    /// 主入口 → 组内全部成员 DocId（含主入口）。
+    launch_members: HashMap<DocId, Vec<DocId>>,
 }
 
 impl RetrievalIndex {
@@ -361,6 +365,8 @@ impl RetrievalIndex {
         }
         let term_fst = builder.into_map();
 
+        let (launch_rep, launch_members) = build_launch_groups(&docs);
+
         Self {
             docs,
             term_postings,
@@ -373,6 +379,8 @@ impl RetrievalIndex {
             first_char,
             char_postings,
             pinyin_char_postings,
+            launch_rep,
+            launch_members,
         }
     }
 
@@ -477,7 +485,7 @@ impl RetrievalIndex {
         if let Some(prefs) = personalization {
             self.apply_personalization_boosts(&mut ranked, prefs);
         }
-        let mut ranked = self.group_same_install_family(self.group_by_launch_identity(ranked));
+        let mut ranked = self.collapse_launch_groups(ranked, personalization);
         ranked.sort_by(cmp_ranked_hit);
         ranked.truncate(max_results);
         ranked
@@ -485,10 +493,10 @@ impl RetrievalIndex {
             .filter_map(|r| {
                 let doc = self.doc(r.doc_id)?;
                 let mut item = doc.item.clone();
-                // 启动身份保持友好入口；图标可从同组另一入口借用
+                // 启动配置保持主入口；图标只借用已有缓存，不改启动目标
                 if item.icon.is_none() {
                     if let Some(icon_doc) = self.doc(r.icon_doc_id) {
-                        if icon_doc.item.icon.is_some() || icon_doc.item.icon_src.is_some() {
+                        if icon_doc.item.icon.is_some() {
                             item.icon.clone_from(&icon_doc.item.icon);
                             item.icon_src.clone_from(&icon_doc.item.icon_src);
                         }
@@ -519,7 +527,8 @@ impl RetrievalIndex {
                     name_lower: doc.item.name.to_lowercase(),
                     stable_id: doc.item.id.clone(),
                     source: doc.item.source.clone(),
-                    has_icon: doc.item.icon.is_some() || doc.item.icon_src.is_some(),
+                    // 仅“已有缓存图标”计入；icon_src 只是提取源，不算展示图标
+                    has_icon: doc.item.icon.is_some(),
                     icon_doc_id: s.doc_id,
                     has_working_dir: doc.item.working_dir.is_some(),
                 })
@@ -554,176 +563,108 @@ impl RetrievalIndex {
         }
     }
 
-    /// 同一启动身份（规范 exe/AUMID + args）只展示一条：
-    /// 保留分最高的匹配证据与最终分，代表入口优先友好来源。
-    fn group_by_launch_identity(&self, ranked: Vec<RankedHit>) -> Vec<RankedHit> {
-        use crate::app::scanner::util::launch_identity;
+    /// 按预计算等价组折叠：组内相关性用统一比较器，启动配置固定主入口。
+    /// 命中任意成员（含 exe 名）即可展示同组 .lnk 主入口，不要求主入口本身被召回。
+    fn collapse_launch_groups(
+        &self,
+        ranked: Vec<RankedHit>,
+        personalization: Option<&crate::history::Personalization>,
+    ) -> Vec<RankedHit> {
         use std::collections::HashMap;
 
-        let mut groups: HashMap<String, RankedHit> = HashMap::new();
+        let mut by_rep: HashMap<DocId, Vec<RankedHit>> = HashMap::new();
         for hit in ranked {
-            let Some(doc) = self.doc(hit.doc_id) else {
-                continue;
-            };
-            let key = launch_identity(&doc.item.target, doc.item.args.as_deref());
-            match groups.entry(key) {
-                std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert(hit);
-                }
-                std::collections::hash_map::Entry::Occupied(mut slot) => {
-                    let current = slot.get().clone();
-                    let (strong, weak) = if hit.score >= current.score {
-                        (hit, current)
-                    } else {
-                        (current, hit)
-                    };
-                    let rep = merge_display_rep(strong, weak);
-                    crate::log::info(&format!(
-                        "launch-group: keep={}({}) icon={} score={}",
-                        rep.stable_id, rep.source, rep.has_icon, rep.score
-                    ));
-                    slot.insert(rep);
-                }
-            }
-        }
-        groups.into_values().collect()
-    }
-
-    /// 同产品多入口只展示一条：同安装根（可不同 args）或 AppsFolder 包 + 桌面/开始菜单同名。
-    fn group_same_install_family(&self, ranked: Vec<RankedHit>) -> Vec<RankedHit> {
-        use crate::app::scanner::util::{install_root_dir, names_share_install_family};
-
-        fn is_shell_package(target: &str) -> bool {
-            let t = target.trim();
-            t.len() >= 16
-                && t.is_char_boundary(16)
-                && t[..16].eq_ignore_ascii_case("shell:appsfolder")
+            let rep = self
+                .launch_rep
+                .get(&hit.doc_id)
+                .copied()
+                .unwrap_or(hit.doc_id);
+            by_rep.entry(rep).or_default().push(hit);
         }
 
-        fn is_friendly(source: &str) -> bool {
-            matches!(source, "start-menu" | "desktop" | "portable")
-        }
+        let mut out = Vec::with_capacity(by_rep.len());
+        for (static_rep, mut members) in by_rep {
+            members.sort_by(cmp_ranked_hit);
+            let best = members[0].clone();
 
-        fn should_merge(a: &AppItem, b: &AppItem) -> bool {
-            use crate::app::scanner::util::normalize_path_key;
-            let same_name = names_share_install_family(&a.name, &b.name);
-            let stem_link = exe_stem_matches_name(a, b) || exe_stem_matches_name(b, a);
-            if !same_name && !stem_link {
-                return false;
-            }
-            // 同一 exe 路径：args 可不同（WPS /from=startmenu vs /from=desktop_shortcut）
-            let ta = normalize_path_key(a.target.trim());
-            let tb = normalize_path_key(b.target.trim());
-            if ta == tb && !ta.is_empty() {
-                return true;
-            }
-            let root_a = install_root_dir(&a.target);
-            let root_b = install_root_dir(&b.target);
-            match (root_a, root_b) {
-                (Some(x), Some(y)) => x == y,
-                (None, Some(_)) | (Some(_), None) => {
-                    // AppsFolder/AUMID 无路径安装根：与友好入口同名则视为同一产品
-                    let shell = is_shell_package(&a.target) || is_shell_package(&b.target);
-                    let pair_ok = (is_friendly(&a.source) || is_friendly(&b.source))
-                        || a.source == "app-paths"
-                        || b.source == "app-paths";
-                    same_name && shell && pair_ok
-                }
-                (None, None) => same_name && is_shell_package(&a.target) && is_shell_package(&b.target),
-            }
-        }
-
-        let mut kept: Vec<RankedHit> = Vec::with_capacity(ranked.len());
-        for hit in ranked {
-            let Some(doc) = self.doc(hit.doc_id) else {
-                continue;
-            };
-            if doc.item.source == "uninstall" {
-                // 与同族主程序归并；启动代表由 merge_display_rep 优先友好来源，不会落到 uninst.exe
-                let mut merged = false;
-                for slot in kept.iter_mut() {
-                    let Some(sdoc) = self.doc(slot.doc_id) else {
-                        continue;
-                    };
-                    if sdoc.item.source == "uninstall" {
-                        continue;
-                    }
-                    if !should_merge(&sdoc.item, &doc.item) {
-                        continue;
-                    }
-                    let (strong, weak) = if hit.score >= slot.score {
-                        (hit.clone(), slot.clone())
-                    } else {
-                        (slot.clone(), hit.clone())
-                    };
-                    let rep = merge_display_rep(strong, weak);
-                    *slot = rep;
-                    merged = true;
-                    break;
-                }
-                if !merged {
-                    kept.push(hit);
-                }
-                continue;
-            }
-            let mut merged = false;
-            for slot in kept.iter_mut() {
-                let Some(sdoc) = self.doc(slot.doc_id) else {
-                    continue;
-                };
-                if sdoc.item.source == "uninstall" {
-                    // 主应用后到：挤掉同族卸载项
-                    continue;
-                }
-                if !should_merge(&sdoc.item, &doc.item) {
-                    continue;
-                }
-                let (strong, weak) = if hit.score >= slot.score {
-                    (hit.clone(), slot.clone())
-                } else {
-                    (slot.clone(), hit.clone())
-                };
-                let rep = merge_display_rep(strong, weak);
-                // 卸载项不得成为启动代表
-                let rep = if rep.source == "uninstall" && slot.source != "uninstall" {
-                    let mut r = slot.clone();
-                    r.score = rep.score;
-                    r.quality_tier = rep.quality_tier;
-                    r.matched_by = rep.matched_by;
-                    r.evidence = rep.evidence;
-                    if !r.has_icon && rep.has_icon {
-                        r.icon_doc_id = rep.icon_doc_id;
-                        r.has_icon = true;
-                    }
-                    r
-                } else {
-                    rep
-                };
-                crate::log::info(&format!(
-                    "install-family: keep={}({}) icon={} score={} from={}+{}",
-                    rep.stable_id,
-                    rep.source,
-                    rep.has_icon,
-                    rep.score,
-                    sdoc.item.source,
-                    doc.item.source
-                ));
-                *slot = rep;
-                merged = true;
-                break;
-            }
-            if !merged {
-                // 新可启动应用进入时，清掉同名族的卸载占位
-                kept.retain(|s| {
-                    self.doc(s.doc_id).is_none_or(|d| {
-                        !(d.item.source == "uninstall"
-                            && names_share_install_family(&d.item.name, &doc.item.name))
-                    })
+            // 用户绑定：组内钉选成员优先，且不要求本条查询恰好召回它
+            let mut launch_doc_id = static_rep;
+            if let Some(prefs) = personalization {
+                let group = self
+                    .launch_members
+                    .get(&static_rep)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let group_pinned = group.iter().copied().find(|id| {
+                    self.doc(*id)
+                        .is_some_and(|d| prefs.pinned.contains(&d.item.id))
                 });
-                kept.push(hit);
+                let hit_pinned = members
+                    .iter()
+                    .find(|h| h.matched_by.contains("+pin"))
+                    .map(|h| h.doc_id);
+                if let Some(id) = group_pinned.or(hit_pinned) {
+                    launch_doc_id = id;
+                }
             }
+
+            // 钉选落到 uninstall 时回退静态主入口
+            let launch_doc_id = match self.doc(launch_doc_id) {
+                Some(d) if d.item.source == "uninstall" => static_rep,
+                _ => launch_doc_id,
+            };
+
+            let Some(launch_doc) = self.doc(launch_doc_id) else {
+                out.push(best);
+                continue;
+            };
+
+            let mut rep = RankedHit {
+                doc_id: launch_doc_id,
+                score: best.score,
+                quality_tier: best.quality_tier,
+                matched_by: best.matched_by,
+                evidence: best.evidence,
+                name_len: launch_doc.item.name.len(),
+                name_lower: launch_doc.item.name.to_lowercase(),
+                stable_id: launch_doc.item.id.clone(),
+                source: launch_doc.item.source.clone(),
+                has_icon: launch_doc.item.icon.is_some(),
+                icon_doc_id: launch_doc_id,
+                has_working_dir: launch_doc.item.working_dir.is_some(),
+            };
+
+            // 图标：启动代表缓存 → 组内其他成员缓存；无缓存则保留主入口提取源
+            if !rep.has_icon {
+                let group = self
+                    .launch_members
+                    .get(&static_rep)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let icon_hit = group
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(launch_doc_id))
+                    .find(|id| {
+                        self.doc(*id).is_some_and(|d| d.item.icon.is_some())
+                    });
+                if let Some(icon_id) = icon_hit {
+                    rep.icon_doc_id = icon_id;
+                    rep.has_icon = true;
+                }
+            }
+
+            crate::log::info(&format!(
+                "launch-group: keep={}({}) icon={} score={} from={}",
+                rep.stable_id,
+                rep.source,
+                rep.has_icon,
+                rep.score,
+                best.stable_id
+            ));
+            out.push(rep);
         }
-        kept
+        out
     }
 }
 
@@ -739,50 +680,223 @@ fn push_unique_nonempty(values: &mut Vec<String>, value: String) {
     }
 }
 
-fn launch_source_priority(source: &str) -> u8 {
-    match source {
-        "start-menu" => 0,
-        "desktop" => 1,
-        "portable" => 2,
-        "uninstall" => 3,
-        "app-paths" => 4,
-        "uwp" | "apps-folder" => 5,
-        "commands" => 6,
-        _ => 7,
+/// 主入口选择：用户绑定 > 开始菜单 .lnk > 桌面 .lnk > 其他（沿用来源优先级）。
+/// 公共/用户开始菜单同级；同级优先带 working_dir 的快捷方式，再用稳定 id 兜底。
+fn launch_rep_key(item: &AppItem) -> (u8, u8, &str) {
+    let rank = if item.source == "start-menu" && item.is_lnk {
+        0
+    } else if item.source == "desktop" && item.is_lnk {
+        1
+    } else {
+        match item.source.as_str() {
+            "start-menu" => 2,
+            "desktop" => 3,
+            "portable" => 4,
+            "app-paths" => 5,
+            "uwp" | "apps-folder" => 6,
+            "commands" => 7,
+            "uninstall" => 100,
+            _ => 8,
+        }
+    };
+    let no_wd = if item.working_dir.is_some() { 0 } else { 1 };
+    (rank, no_wd, item.id.as_str())
+}
+
+fn is_shell_package(target: &str) -> bool {
+    let t = target.trim();
+    t.len() >= 16
+        && t.is_char_boundary(16)
+        && t[..16].eq_ignore_ascii_case("shell:appsfolder")
+}
+
+fn is_friendly_source(source: &str) -> bool {
+    matches!(source, "start-menu" | "desktop" | "portable")
+}
+
+/// 已确认同一安装、同一启动动作的入口才合并；不单靠同名，不无条件忽略参数。
+fn should_merge_family(a: &AppItem, b: &AppItem) -> bool {
+    use crate::app::scanner::util::{
+        args_equivalent_for_merge, install_root_dir, names_share_install_family, normalize_path_key,
+    };
+
+    let same_name = names_share_install_family(&a.name, &b.name);
+    let stem_link = exe_stem_matches_name(a, b) || exe_stem_matches_name(b, a);
+    if !same_name && !stem_link {
+        return false;
+    }
+
+    let body_a = strip_shell_target(&a.target);
+    let body_b = strip_shell_target(&b.target);
+    let ta = normalize_path_key(body_a.trim());
+    let tb = normalize_path_key(body_b.trim());
+    if !ta.is_empty() && ta == tb {
+        // 同一 exe：仅当参数等价（或只差 /from=*）才合并
+        return args_equivalent_for_merge(a.args.as_deref(), b.args.as_deref());
+    }
+
+    // 同安装根：不同 exe 的产品族（ksolaunch vs wps.exe）
+    let root_a = install_root_dir(&a.target);
+    let root_b = install_root_dir(&b.target);
+    match (root_a, root_b) {
+        (Some(x), Some(y)) => x == y,
+        (None, Some(_)) | (Some(_), None) => {
+            let shell = is_shell_package(&a.target) || is_shell_package(&b.target);
+            let pair_ok = (is_friendly_source(&a.source) || is_friendly_source(&b.source))
+                || a.source == "app-paths"
+                || b.source == "app-paths";
+            same_name && shell && pair_ok
+        }
+        (None, None) => {
+            same_name && is_shell_package(&a.target) && is_shell_package(&b.target)
+        }
     }
 }
 
-/// 相关性取 strong；启动代表优先友好来源（保留 lnk 的 target/args/working_dir）；
-/// 展示图标可从组内带图标的入口借用。
-fn merge_display_rep(strong: RankedHit, weak: RankedHit) -> RankedHit {
-    // 启动代表：来源友好 → 带 working_dir 的 lnk → 带图标
-    let launch_key = |h: &RankedHit| {
-        (
-            launch_source_priority(&h.source),
-            if h.has_working_dir { 0u8 } else { 1u8 },
-            if h.has_icon { 0u8 } else { 1u8 },
-        )
-    };
-    let launch = if launch_key(&weak) < launch_key(&strong) {
-        weak.clone()
-    } else {
-        strong.clone()
-    };
-    let other = if launch.doc_id == strong.doc_id {
-        weak.clone()
-    } else {
-        strong.clone()
-    };
-    let mut rep = launch.clone();
-    rep.score = strong.score;
-    rep.quality_tier = strong.quality_tier;
-    rep.matched_by = strong.matched_by;
-    rep.evidence = strong.evidence;
-    if !rep.has_icon && other.has_icon {
-        rep.icon_doc_id = other.doc_id;
-        rep.has_icon = true;
+fn strip_shell_target(target: &str) -> &str {
+    let t = target.trim();
+    t.strip_prefix("shell:AppsFolder\\")
+        .or_else(|| t.strip_prefix("shell:appsfolder\\"))
+        .unwrap_or(t)
+}
+
+/// 索引快照预计算：成员 → 主入口，以及主入口 → 成员列表。
+fn build_launch_groups(docs: &[IndexedDoc]) -> (HashMap<DocId, DocId>, HashMap<DocId, Vec<DocId>>) {
+    use crate::app::scanner::util::{install_root_dir, launch_identity, normalize_path_key};
+    use std::collections::hash_map::Entry;
+
+    let n = docs.len();
+    let mut parent: Vec<DocId> = (0..n as DocId).collect();
+
+    fn find(parent: &mut [DocId], x: DocId) -> DocId {
+        let mut root = x;
+        while parent[root as usize] != root {
+            root = parent[root as usize];
+        }
+        let mut cur = x;
+        while parent[cur as usize] != root {
+            let next = parent[cur as usize];
+            parent[cur as usize] = root;
+            cur = next;
+        }
+        root
     }
-    rep
+
+    fn union(parent: &mut [DocId], a: DocId, b: DocId) {
+        let (ra, rb) = (find(parent, a), find(parent, b));
+        if ra != rb {
+            // 稳定：小 id 作根，便于调试
+            if ra < rb {
+                parent[rb as usize] = ra;
+            } else {
+                parent[ra as usize] = rb;
+            }
+        }
+    }
+
+    // 第一层：同一启动身份（规范 exe/AUMID + args）
+    let mut by_launch: HashMap<String, DocId> = HashMap::new();
+    for doc in docs {
+        let key = launch_identity(&doc.item.target, doc.item.args.as_deref());
+        match by_launch.entry(key) {
+            Entry::Vacant(e) => {
+                e.insert(doc.id);
+            }
+            Entry::Occupied(e) => union(&mut parent, doc.id, *e.get()),
+        }
+    }
+
+    // 第二层 a：同一规范 exe 路径且参数等价
+    let mut by_exe: HashMap<String, Vec<DocId>> = HashMap::new();
+    for doc in docs {
+        let body = strip_shell_target(&doc.item.target);
+        let key = normalize_path_key(body.trim());
+        if key.is_empty() || !key.contains('\\') {
+            continue;
+        }
+        by_exe.entry(key).or_default().push(doc.id);
+    }
+    for group in by_exe.values() {
+        for i in 0..group.len() {
+            for j in (i + 1)..group.len() {
+                let (a, b) = (&docs[group[i] as usize], &docs[group[j] as usize]);
+                if crate::app::scanner::util::args_equivalent_for_merge(
+                    a.item.args.as_deref(),
+                    b.item.args.as_deref(),
+                ) {
+                    union(&mut parent, a.id, b.id);
+                }
+            }
+        }
+    }
+
+    // 第二层 b：同安装根 + 名称族（或 exe 词干链接）
+    let mut by_root: HashMap<String, Vec<DocId>> = HashMap::new();
+    let mut shell_docs: Vec<DocId> = Vec::new();
+    for doc in docs {
+        if is_shell_package(&doc.item.target) {
+            shell_docs.push(doc.id);
+        }
+        if let Some(root) = install_root_dir(&doc.item.target) {
+            by_root.entry(root).or_default().push(doc.id);
+        }
+    }
+    for group in by_root.values() {
+        for i in 0..group.len() {
+            for j in (i + 1)..group.len() {
+                let (a, b) = (&docs[group[i] as usize], &docs[group[j] as usize]);
+                if should_merge_family(&a.item, &b.item) {
+                    union(&mut parent, a.id, b.id);
+                }
+            }
+        }
+    }
+    // AppsFolder 包与友好入口/同名族
+    for i in 0..shell_docs.len() {
+        for j in (i + 1)..shell_docs.len() {
+            let (a, b) = (
+                &docs[shell_docs[i] as usize],
+                &docs[shell_docs[j] as usize],
+            );
+            if should_merge_family(&a.item, &b.item) {
+                union(&mut parent, a.id, b.id);
+            }
+        }
+    }
+    // shell 包与非 shell 文档：按名称族 + 友好来源配对（限制扫描规模）
+    if !shell_docs.is_empty() {
+        for &sid in &shell_docs {
+            let shell = &docs[sid as usize];
+            for other in docs {
+                if is_shell_package(&other.item.target) {
+                    continue;
+                }
+                if should_merge_family(&shell.item, &other.item) {
+                    union(&mut parent, sid, other.id);
+                }
+            }
+        }
+    }
+
+    let mut components: HashMap<DocId, Vec<DocId>> = HashMap::new();
+    for doc in docs {
+        let root = find(&mut parent, doc.id);
+        components.entry(root).or_default().push(doc.id);
+    }
+
+    let mut launch_rep: HashMap<DocId, DocId> = HashMap::with_capacity(n);
+    let mut launch_members: HashMap<DocId, Vec<DocId>> = HashMap::new();
+    for (_root, mut members) in components {
+        members.sort_by(|a, b| {
+            launch_rep_key(&docs[*a as usize].item).cmp(&launch_rep_key(&docs[*b as usize].item))
+        });
+        let main = members[0];
+        for &m in &members {
+            launch_rep.insert(m, main);
+        }
+        launch_members.insert(main, members);
+    }
+    (launch_rep, launch_members)
 }
 
 /// exe 文件名（去扩展）与另一条展示名一致：app-paths 的 `wps` ↔ 快捷方式 `WPS Office` 用。

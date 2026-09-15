@@ -180,6 +180,73 @@ pub fn is_skippable_shortcut(name: &str) -> bool {
     SKIP.iter().any(|s| lower.contains(s))
 }
 
+/// `/from=startmenu` 等启动来源标记：已验证不改变“打开应用”动作。
+fn is_from_source_token(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    lower.starts_with("/from=") || lower.starts_with("-from=") || lower.starts_with("--from=")
+}
+
+/// 去掉来源标记后的参数串；卸载/修复/配置等动作 token 会保留。
+pub fn strip_launch_source_args(args: &str) -> String {
+    args.split_whitespace()
+        .filter(|t| !is_from_source_token(t))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// 归并用参数等价：完全相同，或仅差已验证的 `/from=*` 来源标记。
+/// 不忽略卸载、修复、调试等会改变启动动作的参数。
+pub fn args_equivalent_for_merge(a: Option<&str>, b: Option<&str>) -> bool {
+    let a = a.unwrap_or("").trim();
+    let b = b.unwrap_or("").trim();
+    if a == b {
+        return true;
+    }
+    strip_launch_source_args(a) == strip_launch_source_args(b)
+}
+
+/// 用户开始菜单 Programs（FOLDERID_Programs）。
+pub fn user_programs_dir() -> Option<std::path::PathBuf> {
+    known_folder(windows::Win32::UI::Shell::FOLDERID_Programs)
+}
+
+/// 公共开始菜单 Programs（FOLDERID_CommonPrograms）。
+pub fn common_programs_dir() -> Option<std::path::PathBuf> {
+    known_folder(windows::Win32::UI::Shell::FOLDERID_CommonPrograms)
+}
+
+fn programs_to_start_menu(programs: std::path::PathBuf) -> std::path::PathBuf {
+    programs
+        .parent()
+        .map(|start| start.to_path_buf())
+        .unwrap_or(programs)
+}
+
+/// 用户 Start Menu 根（Programs 的父目录）。
+pub fn user_start_menu_dir() -> Option<std::path::PathBuf> {
+    user_programs_dir().map(programs_to_start_menu)
+}
+
+/// 公共 Start Menu 根。
+pub fn common_start_menu_dir() -> Option<std::path::PathBuf> {
+    common_programs_dir().map(programs_to_start_menu)
+}
+
+fn known_folder(id: windows::core::GUID) -> Option<std::path::PathBuf> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+
+    unsafe {
+        let pwstr = SHGetKnownFolderPath(&id, KF_FLAG_DEFAULT, None).ok()?;
+        if pwstr.is_null() {
+            return None;
+        }
+        let path = pwstr.to_string().ok().map(std::path::PathBuf::from);
+        CoTaskMemFree(Some(pwstr.0.cast()));
+        path
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +303,21 @@ mod tests {
             "Visual Studio",
             "Visual Studio Code"
         ));
+    }
+
+    #[test]
+    fn args_equivalent_only_ignores_from_source_tokens() {
+        assert!(args_equivalent_for_merge(
+            Some("/prometheus /fromksolaunch /from=startmenu"),
+            Some("/prometheus /fromksolaunch /from=desktop_shortcut")
+        ));
+        assert!(args_equivalent_for_merge(None, Some("")));
+        assert!(args_equivalent_for_merge(Some("--open"), Some("--open")));
+        assert!(!args_equivalent_for_merge(
+            Some("--open"),
+            Some("--open --settings")
+        ));
+        assert!(!args_equivalent_for_merge(Some("/uninstall"), Some("")));
+        assert!(!args_equivalent_for_merge(Some("/repair"), Some("/from=startmenu")));
     }
 }
