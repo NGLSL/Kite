@@ -133,6 +133,20 @@ pub(super) fn launch_selected(state: &mut State) -> Task<Message> {
         return open_settings(state);
     }
 
+    if let Some(url) = everything_download_url(&item.id) {
+        let result = app::uwp::launch_shell_path(url);
+        plog(&format!("open Everything download err={result:?}"));
+        return if result.is_ok() {
+            hide(state);
+            hide_task(state)
+        } else {
+            flash(state, "无法打开 Everything 官方下载页")
+        };
+    }
+    if item.id == system::everything::NOT_RUNNING_RESULT_ID {
+        return flash(state, "请先启动 Everything，再使用文件搜索");
+    }
+
     // 浏览器打开网址 / 网页搜索（id 由 app::web 生成，对齐 commands::launch_app）
     if let Some((kind, browser_id, payload)) = app::web::parse_id(&item.id) {
         let t0 = Instant::now();
@@ -196,6 +210,27 @@ pub(super) fn launch_selected(state: &mut State) -> Task<Message> {
     }
 }
 
+fn everything_download_url(item_id: &str) -> Option<&'static str> {
+    (item_id == system::everything::DOWNLOAD_RESULT_ID).then_some(system::everything::DOWNLOAD_URL)
+}
+
+#[cfg(test)]
+mod everything_action_tests {
+    use super::*;
+
+    #[test]
+    fn missing_dependency_result_targets_official_download_page() {
+        assert_eq!(
+            everything_download_url(system::everything::DOWNLOAD_RESULT_ID),
+            Some("https://www.voidtools.com/downloads/")
+        );
+        assert_eq!(
+            everything_download_url(system::everything::NOT_RUNNING_RESULT_ID),
+            None
+        );
+    }
+}
+
 pub(super) fn hide(state: &mut State) {
     state.hidden = true;
     state.ime_composing = false;
@@ -204,7 +239,7 @@ pub(super) fn hide(state: &mut State) {
     state.alt_digit_consumed = false;
     state.menu = None;
     state.query.clear();
-    state.request_file_search();
+    state.invalidate_file_search();
     state.refresh_results();
 }
 

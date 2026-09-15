@@ -33,6 +33,9 @@ pub struct AppItem {
     /// 系统入口等附加搜索关键词（小写），随快照入索引。
     #[serde(skip)]
     pub search_keywords: Vec<String>,
+    /// 系统提供的扩展搜索词；召回时参与索引，但评分低于明确名称和可信别名。
+    #[serde(skip)]
+    pub search_context: Vec<String>,
 }
 
 impl AppItem {
@@ -60,6 +63,7 @@ impl AppItem {
             pinyin: String::new(),
             pinyin_initials: String::new(),
             search_keywords: Vec::new(),
+            search_context: Vec::new(),
         }
     }
 

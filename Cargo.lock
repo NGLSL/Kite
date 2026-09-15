@@ -1616,7 +1616,7 @@ dependencies = [
 
 [[package]]
 name = "kite"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "base64",
  "dirs",
@@ -1630,6 +1630,7 @@ dependencies = [
  "notify",
  "nucleo-matcher",
  "pinyin",
+ "roxmltree",
  "rusqlite",
  "serde",
  "serde_json",

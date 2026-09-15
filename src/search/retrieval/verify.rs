@@ -12,10 +12,12 @@ use crate::search::alias;
 use crate::search::fuzzy::fuzzy_match;
 use crate::search::matcher::UserTarget;
 use crate::search::ranker::{
-    fuzzy_score, SCORE_ACRONYM, SCORE_BUILTIN_ALIAS_EXACT, SCORE_COMPACT_EXACT,
-    SCORE_COMPACT_SUBSTRING, SCORE_NAME_EXACT, SCORE_PINYIN_EXACT, SCORE_PINYIN_INITIAL,
-    SCORE_PINYIN_INITIAL_INNER, SCORE_PREFIX, SCORE_SUBSTRING, SCORE_TOKEN_SEQ,
-    SCORE_USER_ALIAS_EXACT, SCORE_WORD_EXACT, SCORE_WORD_PREFIX,
+    fuzzy_score, CONTEXT_COMPACT_DISCOUNT, CONTEXT_DISCOUNT, CONTEXT_PINYIN_DISCOUNT,
+    SCORE_ACRONYM, SCORE_BUILTIN_ALIAS_EXACT, SCORE_COMPACT_EXACT, SCORE_COMPACT_SUBSTRING,
+    SCORE_KEYWORD_PINYIN_EXACT, SCORE_KEYWORD_PINYIN_INNER, SCORE_KEYWORD_PINYIN_PREFIX,
+    SCORE_NAME_EXACT, SCORE_PINYIN_EXACT, SCORE_PINYIN_INITIAL, SCORE_PINYIN_INITIAL_INNER,
+    SCORE_PREFIX, SCORE_SUBSTRING, SCORE_TOKEN_SEQ, SCORE_USER_ALIAS_EXACT, SCORE_WORD_EXACT,
+    SCORE_WORD_PREFIX,
 };
 use crate::search::retrieval::channels::Candidates;
 use crate::search::retrieval::doc::{DocId, IndexedDoc, RetrievalIndex};
@@ -281,6 +283,111 @@ fn verify_one(
         } else if !doc.pinyin_syllables.is_empty() {
             if let Some((score, kind)) = match_mixed_pinyin(&doc.pinyin_syllables, q_raw) {
                 best = take_best(best, score, kind);
+            }
+        }
+    }
+
+    // 可信搜索词的全拼/简拼保留独立证据，避免被当作普通 token 前缀低估。
+    if q_raw.chars().count() >= 2 {
+        for full in &doc.keyword_full_pinyin {
+            if full == q_raw {
+                best = take_best(best, SCORE_KEYWORD_PINYIN_EXACT, "keyword-pinyin-exact");
+            } else if full.starts_with(q_raw) {
+                best = take_best(best, SCORE_KEYWORD_PINYIN_PREFIX, "keyword-pinyin-prefix");
+            }
+        }
+        for initials in &doc.keyword_initials {
+            if initials == q_raw {
+                best = take_best(best, SCORE_KEYWORD_PINYIN_EXACT, "keyword-initials-exact");
+            } else if initials.starts_with(q_raw) {
+                best = take_best(best, SCORE_KEYWORD_PINYIN_PREFIX, "keyword-initials-prefix");
+            } else if initials.contains(q_raw) {
+                best = take_best(best, SCORE_KEYWORD_PINYIN_INNER, "keyword-initials-inner");
+            }
+        }
+    }
+
+    // 3b) Windows 页面级标准搜索资源：只提供候选证据，不压过真实名称或可信别名。
+    if q_raw.chars().count() >= 2 {
+        for field in &doc.context_fields {
+            if field == q_raw {
+                best = take_best(best, SCORE_WORD_EXACT - CONTEXT_DISCOUNT, "context-exact");
+            } else if field.starts_with(q_raw) {
+                best = take_best(best, SCORE_WORD_PREFIX - CONTEXT_DISCOUNT, "context-prefix");
+            } else if field.contains(q_raw) {
+                best = take_best(
+                    best,
+                    SCORE_SUBSTRING - CONTEXT_DISCOUNT,
+                    "context-substring",
+                );
+            }
+        }
+        for term in &doc.context_terms {
+            if term == q_raw {
+                best = take_best(
+                    best,
+                    SCORE_WORD_EXACT - CONTEXT_DISCOUNT,
+                    "context-word-exact",
+                );
+            } else if term.starts_with(q_raw) {
+                best = take_best(
+                    best,
+                    SCORE_WORD_PREFIX - CONTEXT_DISCOUNT,
+                    "context-word-prefix",
+                );
+            }
+        }
+        if q_compact.len() >= 2 {
+            for compact in &doc.context_compacts {
+                if compact == q_compact {
+                    best = take_best(
+                        best,
+                        SCORE_COMPACT_EXACT - CONTEXT_COMPACT_DISCOUNT,
+                        "context-compact-exact",
+                    );
+                } else if q_compact.len() >= MIN_COMPACT_SUBSTR_LEN && compact.contains(q_compact) {
+                    best = take_best(
+                        best,
+                        SCORE_COMPACT_SUBSTRING - CONTEXT_COMPACT_DISCOUNT,
+                        "context-compact-substring",
+                    );
+                }
+            }
+        }
+        for full in &doc.context_full_pinyin {
+            if full == q_raw {
+                best = take_best(
+                    best,
+                    SCORE_PINYIN_EXACT - CONTEXT_PINYIN_DISCOUNT,
+                    "context-pinyin-exact",
+                );
+            } else if full.starts_with(q_raw) {
+                best = take_best(
+                    best,
+                    SCORE_PINYIN_EXACT - CONTEXT_PINYIN_DISCOUNT - 40,
+                    "context-pinyin-prefix",
+                );
+            }
+        }
+        for initials in &doc.context_initials {
+            if initials == q_raw {
+                best = take_best(
+                    best,
+                    SCORE_PINYIN_INITIAL - CONTEXT_PINYIN_DISCOUNT,
+                    "context-initials-exact",
+                );
+            } else if initials.starts_with(q_raw) {
+                best = take_best(
+                    best,
+                    SCORE_PINYIN_INITIAL - CONTEXT_PINYIN_DISCOUNT - 40,
+                    "context-initials-prefix",
+                );
+            } else if initials.contains(q_raw) {
+                best = take_best(
+                    best,
+                    SCORE_PINYIN_INITIAL_INNER - CONTEXT_PINYIN_DISCOUNT,
+                    "context-initials-inner",
+                );
             }
         }
     }

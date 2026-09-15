@@ -13,6 +13,9 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 Some(id) if state.hidden => {
                     state.hidden = false;
                     state.epoch += 1;
+                    if state.files_mode {
+                        state.request_file_search();
+                    }
                     state.refresh_results();
                     // 对齐 Kite：唤起即响（SND_ASYNC，不阻塞显示）
                     system::sound::play_open();

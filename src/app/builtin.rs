@@ -1,15 +1,24 @@
 //! 内置可搜索动作：Kite 设置、Windows 系统设置页。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::OnceLock;
 
 use crate::app::control_panel;
+use crate::app::windows_settings;
 use crate::model::{AppItem, SearchResult};
 use crate::search::pinyin_of;
 use crate::system::icons;
 
 /// Kite 自带图标（裁边满幅），避免内置项落到字母兜底。
 const KITE_ICON_PNG: &[u8] = include_bytes!("../../icons/32x32.png");
+
+/// 从当前 Windows 的页面级 SearchResources 读取标准词，只对已有入口补充搜索字段。
+/// 启动期只加载一次；单个系统资源失败不影响静态入口。
+fn windows_settings_search_terms() -> &'static HashMap<String, Vec<String>> {
+    static TERMS: OnceLock<HashMap<String, Vec<String>>> = OnceLock::new();
+    TERMS.get_or_init(|| windows_settings::load_search_terms(WIN_PAGES.iter().map(|page| page.uri)))
+}
 
 /// Windows 设置页：显示名、ms-settings URI、匹配关键词。
 struct WinPage {
@@ -196,7 +205,7 @@ const WIN_PAGES: &[WinPage] = &[
     WinPage {
         name: "启动",
         uri: "ms-settings:startupapps",
-        keywords: &["startup", "qidong", "自启"],
+        keywords: &["startup", "qidong", "自启", "开机启动"],
     },
     WinPage {
         name: "账户",
@@ -430,6 +439,10 @@ pub fn materialize_system_entries(icon_dir: Option<&Path>) -> Vec<AppItem> {
         );
         item.icon_src = Some(settings_exe.clone());
         item.search_keywords = page.keywords.iter().map(|k| k.to_lowercase()).collect();
+        item.search_context = windows_settings_search_terms()
+            .get(page.uri)
+            .cloned()
+            .unwrap_or_default();
         item.attach_search_fields();
         out.push(item);
     }

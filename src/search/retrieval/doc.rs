@@ -32,6 +32,13 @@ pub struct IndexedDoc {
     pub keywords: Vec<String>,
     pub keyword_compacts: Vec<String>,
     pub keyword_bits: Vec<CharBits>,
+    pub keyword_full_pinyin: Vec<String>,
+    pub keyword_initials: Vec<String>,
+    pub context_fields: Vec<String>,
+    pub context_terms: Vec<String>,
+    pub context_compacts: Vec<String>,
+    pub context_full_pinyin: Vec<String>,
+    pub context_initials: Vec<String>,
     pub name_bits: CharBits,
     pub display_bits: CharBits,
 }
@@ -57,6 +64,8 @@ impl IndexedDoc {
             }
         }
         let mut keywords = Vec::new();
+        let mut keyword_full_pinyin = Vec::new();
+        let mut keyword_initials = Vec::new();
         for raw in &extra_keywords {
             let keyword = crate::search::normalizer::normalize_name(raw);
             if keyword.is_empty() {
@@ -72,8 +81,33 @@ impl IndexedDoc {
                 push_unique(&mut token_set, part);
             }
             let (full, initials) = pinyin_of(raw);
+            push_unique_nonempty(&mut keyword_full_pinyin, full.clone());
+            push_unique_nonempty(&mut keyword_initials, initials.clone());
             push_unique_nonempty(&mut token_set, full);
             push_unique_nonempty(&mut token_set, initials);
+        }
+        let mut context_fields = Vec::new();
+        let mut context_terms = Vec::new();
+        let mut context_compacts = Vec::new();
+        let mut context_full_pinyin = Vec::new();
+        let mut context_initials = Vec::new();
+        for raw in &item.search_context {
+            let field = crate::search::normalizer::normalize_name(raw);
+            if field.is_empty() {
+                continue;
+            }
+            push_unique(&mut context_fields, field.clone());
+            push_unique(&mut context_terms, field.clone());
+            push_unique_nonempty(&mut context_compacts, compact(&field));
+            for token in tokens(&field) {
+                push_unique(&mut context_terms, token.to_string());
+            }
+            for part in split_camel(raw) {
+                push_unique(&mut context_terms, part);
+            }
+            let (full, initials) = pinyin_of(raw);
+            push_unique_nonempty(&mut context_full_pinyin, full);
+            push_unique_nonempty(&mut context_initials, initials);
         }
         let acronym = word_acronym(&name);
         let pinyin = if item.pinyin.is_empty() {
@@ -103,7 +137,14 @@ impl IndexedDoc {
             pinyin_syllables,
             keyword_compacts: keywords.iter().map(|k| compact(k)).collect(),
             keyword_bits: keywords.iter().map(|k| CharBits::from_str(k)).collect(),
+            keyword_full_pinyin,
+            keyword_initials,
             keywords,
+            context_fields,
+            context_terms,
+            context_compacts,
+            context_full_pinyin,
+            context_initials,
         }
     }
 
@@ -127,6 +168,22 @@ impl IndexedDoc {
                 .iter()
                 .filter(|k| !k.is_empty())
                 .map(|s| s.as_str()),
+        );
+        out.extend(
+            self.keyword_full_pinyin
+                .iter()
+                .chain(self.keyword_initials.iter())
+                .filter(|term| !term.is_empty())
+                .map(String::as_str),
+        );
+        out.extend(
+            self.context_terms
+                .iter()
+                .chain(self.context_compacts.iter())
+                .chain(self.context_full_pinyin.iter())
+                .chain(self.context_initials.iter())
+                .filter(|term| !term.is_empty())
+                .map(String::as_str),
         );
         if !self.pinyin.is_empty() {
             out.push(&self.pinyin);
@@ -214,6 +271,7 @@ impl RetrievalIndex {
             for c in std::iter::once(&doc.compact_name)
                 .chain(std::iter::once(&doc.compact_display))
                 .chain(doc.keyword_compacts.iter())
+                .chain(doc.context_compacts.iter())
             {
                 if !c.is_empty() {
                     compact_postings.entry(c.clone()).or_default().push(doc.id);
@@ -224,6 +282,11 @@ impl RetrievalIndex {
             for field in std::iter::once(&doc.name)
                 .chain(std::iter::once(&doc.display))
                 .chain(doc.keywords.iter())
+                .chain(doc.keyword_full_pinyin.iter())
+                .chain(doc.keyword_initials.iter())
+                .chain(doc.context_terms.iter())
+                .chain(doc.context_full_pinyin.iter())
+                .chain(doc.context_initials.iter())
             {
                 index_grams(field, doc.id, &mut gram2, &mut gram3);
                 let mut seen_chars: HashSet<char> = HashSet::new();

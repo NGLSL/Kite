@@ -3,12 +3,17 @@
 use super::*;
 
 impl State {
-    /// 使当前文件结果失效，并在需要时把 Everything 查询放到后台线程。
-    pub(super) fn request_file_search(&mut self) {
+    /// 使正在运行的文件查询失效，并清除其结果。
+    pub(super) fn invalidate_file_search(&mut self) {
         self.file_query_generation = self.file_query_generation.wrapping_add(1);
         self.file_results.clear();
+    }
+
+    /// 探测依赖状态，并在可用时把 Everything 查询放到后台线程。
+    pub(super) fn request_file_search(&mut self) {
+        self.invalidate_file_search();
         let query = self.query.trim().to_string();
-        if !self.files_mode || search::normalize_for_index(&query).chars().count() < 2 {
+        if !self.files_mode {
             return;
         }
 
@@ -96,9 +101,14 @@ impl State {
                 hits = merged;
             }
 
-            // Everything 在后台查询；这里只合并当前 query 已完成的不可变结果。
-            if self.files_mode && q_norm.chars().count() >= 2 {
-                hits.extend(self.file_results.iter().cloned());
+            // Everything 在后台查询；这里只合并已完成的真实文件结果。
+            if self.files_mode {
+                hits.extend(
+                    self.file_results
+                        .iter()
+                        .filter(|result| result.item.source != "everything-status")
+                        .cloned(),
+                );
             }
 
             // 个性化加权（历史 + 固定，Match 仍是主信号）
@@ -149,6 +159,9 @@ impl State {
 
             hits
         };
+        if self.files_mode {
+            prepend_dependency_status(&mut self.results, &self.file_results);
+        }
         self.selected = 0;
         let top = self
             .results
@@ -166,6 +179,12 @@ impl State {
 }
 
 fn build_file_results(query: &str, icon_dir: &std::path::Path) -> Vec<SearchResult> {
+    if let Some(status) = everything_status_result(system::everything::availability()) {
+        return vec![status];
+    }
+    if search::normalize_for_index(query).chars().count() < 2 {
+        return Vec::new();
+    }
     system::everything::search_files(query, 20)
         .into_iter()
         .map(|hit| {
@@ -183,6 +202,52 @@ fn build_file_results(query: &str, icon_dir: &std::path::Path) -> Vec<SearchResu
         .collect()
 }
 
+fn everything_status_result(
+    availability: system::everything::Availability,
+) -> Option<SearchResult> {
+    use system::everything::{
+        Availability, DOWNLOAD_RESULT_ID, DOWNLOAD_URL, NOT_RUNNING_RESULT_ID,
+    };
+
+    let (id, name, target) = match availability {
+        Availability::Ready => return None,
+        Availability::InstalledButNotRunning => (
+            NOT_RUNNING_RESULT_ID,
+            "Everything 未运行，文件搜索不可用",
+            NOT_RUNNING_RESULT_ID,
+        ),
+        Availability::NotInstalled => (
+            DOWNLOAD_RESULT_ID,
+            "未安装 Everything，点击前往官方下载",
+            DOWNLOAD_URL,
+        ),
+    };
+    let mut item = AppItem::scanned(
+        id.to_string(),
+        name.to_string(),
+        target.to_string(),
+        None,
+        None,
+        "everything-status",
+    );
+    item.attach_search_fields();
+    Some(SearchResult {
+        item,
+        score: 0,
+        matched_by: "everything-status".to_string(),
+    })
+}
+
+fn prepend_dependency_status(results: &mut Vec<SearchResult>, file_results: &[SearchResult]) {
+    if let Some(status) = file_results
+        .iter()
+        .find(|result| result.item.source == "everything-status")
+    {
+        results.insert(0, status.clone());
+        results.truncate(search::MAX_RESULTS);
+    }
+}
+
 pub(super) fn is_current_file_response(
     files_mode: bool,
     current_generation: u64,
@@ -197,7 +262,11 @@ pub(super) fn is_current_file_response(
 
 #[cfg(test)]
 mod tests {
-    use super::is_current_file_response;
+    use super::{
+        build_file_results, everything_status_result, is_current_file_response,
+        prepend_dependency_status,
+    };
+    use crate::system::everything::{self, Availability};
 
     #[test]
     fn stale_or_disabled_file_results_are_rejected() {
@@ -205,5 +274,59 @@ mod tests {
         assert!(!is_current_file_response(true, 5, "report", 4, "report"));
         assert!(!is_current_file_response(true, 4, "reports", 4, "report"));
         assert!(!is_current_file_response(false, 4, "report", 4, "report"));
+    }
+
+    #[test]
+    fn missing_everything_is_visible_as_a_search_result() {
+        if everything::availability() != Availability::NotInstalled {
+            return;
+        }
+
+        let results = build_file_results("logo", &std::env::temp_dir());
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].item.id, "kite:everything-download");
+        assert!(results[0].item.display_name.contains("未安装 Everything"));
+    }
+
+    #[test]
+    fn dependency_status_distinguishes_missing_and_not_running() {
+        let missing = everything_status_result(Availability::NotInstalled).expect("missing status");
+        assert_eq!(missing.item.id, everything::DOWNLOAD_RESULT_ID);
+        assert_eq!(missing.item.target, everything::DOWNLOAD_URL);
+        assert!(missing.item.display_name.contains("官方下载"));
+
+        let stopped = everything_status_result(Availability::InstalledButNotRunning)
+            .expect("not-running status");
+        assert_eq!(stopped.item.id, everything::NOT_RUNNING_RESULT_ID);
+        assert!(stopped.item.display_name.contains("未运行"));
+        assert!(everything_status_result(Availability::Ready).is_none());
+    }
+
+    #[test]
+    fn missing_dependency_is_always_visible_ahead_of_application_results() {
+        let mut results = (0..crate::search::MAX_RESULTS)
+            .map(|index| {
+                let item = crate::model::AppItem::scanned(
+                    format!("app:{index}"),
+                    format!("Application {index}"),
+                    format!(r"C:\Apps\app-{index}.exe"),
+                    None,
+                    None,
+                    "start-menu",
+                );
+                crate::model::SearchResult {
+                    item,
+                    score: 1000,
+                    matched_by: "exact".to_string(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let status = everything_status_result(Availability::NotInstalled).unwrap();
+
+        prepend_dependency_status(&mut results, &[status]);
+
+        assert_eq!(results[0].item.id, everything::DOWNLOAD_RESULT_ID);
+        assert_eq!(results.len(), crate::search::MAX_RESULTS);
     }
 }

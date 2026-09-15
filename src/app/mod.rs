@@ -8,6 +8,7 @@ pub mod scanner;
 pub mod uwp;
 pub mod watch;
 pub mod web;
+mod windows_settings;
 
 pub use launcher::launch;
 pub use scanner::scan_apps;

@@ -1,11 +1,12 @@
 //! Everything 文件搜索：加载官方 SDK DLL（Everything64.dll）与运行中的 Everything 实例 IPC。
-//! 不自建索引，也绝不拉起 Everything 主窗口；DLL 缺失或 Everything 未运行时静默返回空。
+//! 不自建索引，也绝不拉起 Everything 主窗口；依赖不可用时由 UI 显示状态入口。
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
@@ -19,6 +20,18 @@ pub struct EverythingHit {
     pub name: String,
 }
 
+/// Everything 文件索引服务对 Kite 是否可用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Availability {
+    Ready,
+    InstalledButNotRunning,
+    NotInstalled,
+}
+
+pub const DOWNLOAD_RESULT_ID: &str = "kite:everything-download";
+pub const NOT_RUNNING_RESULT_ID: &str = "kite:everything-not-running";
+pub const DOWNLOAD_URL: &str = "https://www.voidtools.com/downloads/";
+
 const REQUEST_FILE_NAME: u32 = 0x0000_0001;
 const REQUEST_PATH: u32 = 0x0000_0002;
 /// Everything.h：ERROR_IPC = Everything search client is not running。
@@ -26,6 +39,7 @@ const ERROR_IPC: u32 = 2;
 const DLL_NAME: &str = "Everything64.dll";
 const IPC_WINDOW_CLASS: windows::core::PCWSTR =
     windows::core::w!("EVERYTHING_TASKBAR_NOTIFICATION");
+const INSTALL_CACHE_TTL: Duration = Duration::from_secs(5);
 
 type SetSearchW = unsafe extern "system" fn(*const u16);
 type SetRequestFlags = unsafe extern "system" fn(u32);
@@ -40,6 +54,7 @@ type IsFolderResult = unsafe extern "system" fn(u32) -> i32;
 /// SDK DLL 的进程级全局状态非线程安全，查询串行化。
 static QUERY_LOCK: Mutex<()> = Mutex::new(());
 static SDK: OnceLock<Option<Sdk>> = OnceLock::new();
+static INSTALL_CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
 static IPC_MISS_LOGGED: AtomicBool = AtomicBool::new(false);
 
 struct Sdk {
@@ -60,6 +75,50 @@ fn sdk() -> Option<&'static Sdk> {
 
 fn everything_ipc_window_available() -> bool {
     unsafe { FindWindowW(IPC_WINDOW_CLASS, windows::core::PCWSTR::null()).is_ok() }
+}
+
+pub fn availability() -> Availability {
+    let ipc_available = everything_ipc_window_available();
+    if ipc_available {
+        return Availability::Ready;
+    }
+    classify_availability(false, everything_installed_cached())
+}
+
+fn classify_availability(ipc_available: bool, installed: bool) -> Availability {
+    if ipc_available {
+        Availability::Ready
+    } else if installed {
+        Availability::InstalledButNotRunning
+    } else {
+        Availability::NotInstalled
+    }
+}
+
+fn everything_installed_cached() -> bool {
+    let now = Instant::now();
+    let mut cache = INSTALL_CACHE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    cached_install_check(&mut cache, now, INSTALL_CACHE_TTL, || {
+        !install_dirs().is_empty()
+    })
+}
+
+fn cached_install_check(
+    cache: &mut Option<(Instant, bool)>,
+    now: Instant,
+    ttl: Duration,
+    probe: impl FnOnce() -> bool,
+) -> bool {
+    if let Some((checked_at, installed)) = *cache {
+        if now.duration_since(checked_at) < ttl {
+            return installed;
+        }
+    }
+    let installed = probe();
+    *cache = Some((now, installed));
+    installed
 }
 
 unsafe fn load_sdk() -> Option<Sdk> {
@@ -123,17 +182,14 @@ fn install_dirs() -> Vec<PathBuf> {
         .map(PathBuf::from)
         .filter(|p| p.join("Everything.exe").exists())
         .collect();
-    if let Ok(out) = std::process::Command::new("where")
-        .arg("Everything.exe")
-        .output()
-    {
-        if let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next() {
-            let exe = PathBuf::from(line.trim());
-            if let Some(dir) = exe.parent() {
-                v.push(dir.to_path_buf());
-            }
-        }
+    if let Some(path) = std::env::var_os("PATH") {
+        v.extend(std::env::split_paths(&path).filter(|dir| dir.join("Everything.exe").is_file()));
     }
+    v.sort_by_key(|path| path.to_string_lossy().to_lowercase());
+    v.dedup_by(|left, right| {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    });
     v
 }
 
@@ -228,6 +284,53 @@ mod tests {
         // 探测逻辑在任何机器上都应安全返回
         let dirs = install_dirs();
         let _ = dirs.len();
+    }
+
+    #[test]
+    fn availability_distinguishes_missing_stopped_and_ready() {
+        assert_eq!(classify_availability(true, false), Availability::Ready);
+        assert_eq!(
+            classify_availability(false, true),
+            Availability::InstalledButNotRunning
+        );
+        assert_eq!(
+            classify_availability(false, false),
+            Availability::NotInstalled
+        );
+    }
+
+    #[test]
+    fn cached_install_probe_expires_and_rechecks() {
+        use std::cell::Cell;
+
+        let mut cache = None;
+        let now = Instant::now();
+        let checks = Cell::new(0);
+        let mut probe = || {
+            checks.set(checks.get() + 1);
+            checks.get() > 1
+        };
+
+        assert!(!cached_install_check(
+            &mut cache,
+            now,
+            INSTALL_CACHE_TTL,
+            &mut probe
+        ));
+        assert!(!cached_install_check(
+            &mut cache,
+            now + Duration::from_secs(1),
+            INSTALL_CACHE_TTL,
+            &mut probe
+        ));
+        assert_eq!(checks.get(), 1);
+        assert!(cached_install_check(
+            &mut cache,
+            now + INSTALL_CACHE_TTL,
+            INSTALL_CACHE_TTL,
+            &mut probe
+        ));
+        assert_eq!(checks.get(), 2);
     }
 
     #[test]

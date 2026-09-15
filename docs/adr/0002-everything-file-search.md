@@ -15,11 +15,13 @@ PRD §53：不要自行实现 NTFS 全盘索引；优先 Everything IPC/SDK。
 
 - **捆绑官方 SDK DLL**（`resources/Everything64.dll`，随安装包发布），
   通过 `LoadLibraryW` + IPC 查询运行中的 Everything 实例；结果在列表中直接显示
-- Everything **未运行 → 查询失败返回空**，绝不启动 Everything 窗口
+- Everything 已安装但未运行时，在结果中提示用户先启动 Everything
+- 未检测到 Everything 安装时，在结果中显示可点击的官方下载安装入口
+- Kite 绝不自动启动 Everything 窗口
 - DLL 查找顺序：exe 目录 → 资源目录 → Everything 安装目录 → 系统 PATH
 - 文件结果 score 固定低于应用精确匹配，追加在应用列表后；
   图标按扩展名走系统关联类型图标（`cache_type_icon`）
-- Everything 未安装/未运行：静默跳过，不影响应用搜索
+- Everything 未安装/未运行：显示一条依赖状态结果，不影响应用搜索
 
 ## 备选
 

@@ -389,10 +389,12 @@ fn menu_overlay<'a>(
         entries.push(("复制路径", MenuAction::CopyPath));
     }
     entries.push(("复制名称", MenuAction::CopyName));
-    entries.push((
-        if pinned { "取消固定" } else { "固定" },
-        MenuAction::TogglePin,
-    ));
+    if item.source != "everything-status" {
+        entries.push((
+            if pinned { "取消固定" } else { "固定" },
+            MenuAction::TogglePin,
+        ));
+    }
 
     let mut col = column![].width(Length::Fill);
     for (label, action) in entries {

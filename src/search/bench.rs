@@ -143,3 +143,45 @@ fn report_search_latency() {
         );
     }
 }
+
+/// Windows 页面级标准词的查询成本。与相同入口、但不含标准词的索引比较。
+#[test]
+#[ignore = "基准测试，手动运行：cargo test --release system_vocabulary_latency -- --ignored --nocapture"]
+fn report_system_vocabulary_latency() {
+    let mut entries = crate::app::builtin::materialize_system_entries(None);
+    entries.retain(|entry| entry.id.starts_with("winsettings:"));
+    let enriched_entries = entries.clone();
+    let enriched = super::RetrievalIndex::build(&[], &entries);
+    for entry in &mut entries {
+        entry.search_context.clear();
+    }
+    let baseline = super::RetrievalIndex::build(&[], &entries);
+    for (label, corpus) in [("baseline", &entries), ("enriched", &enriched_entries)] {
+        let mut builds = Vec::new();
+        for _ in 0..12 {
+            let started = Instant::now();
+            std::hint::black_box(super::RetrievalIndex::build(&[], corpus));
+            builds.push(started.elapsed());
+        }
+        builds.sort();
+        println!(
+            "index-build {label}: p50={}ms p95={}ms",
+            percentile(&builds, 0.5).as_millis(),
+            percentile(&builds, 0.95).as_millis()
+        );
+    }
+    println!(
+        "\nWindows 设置页查询延迟（µs），同一批 {} 个入口\n",
+        entries.len()
+    );
+    println!("| 入口数 | 词汇 | query | p50 | p95 | max | QPS |");
+    println!("|---|---|---|---|---|---|---|");
+    for (label, index) in [("baseline", &baseline), ("enriched", &enriched)] {
+        for query in ["kj", "启动任务", "文件", "activation", "zzzzqq"] {
+            bench_one(label, query, entries.len(), || {
+                let hits = super::search_with_index(index, query, &[], MAX_RESULTS);
+                std::hint::black_box(hits);
+            });
+        }
+    }
+}

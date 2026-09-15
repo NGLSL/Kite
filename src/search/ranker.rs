@@ -16,6 +16,10 @@ pub const SCORE_PINYIN_EXACT: i32 = 750;
 pub const SCORE_PINYIN_INITIAL: i32 = 700;
 /// 拼音首字母中间命中（kz ← 键盘控制 / 向日葵远程控制）；低于前缀式首字母。
 pub const SCORE_PINYIN_INITIAL_INNER: i32 = 620;
+/// 可信别名的拼音前缀比名称的宽松音节匹配更明确。
+pub const SCORE_KEYWORD_PINYIN_EXACT: i32 = 780;
+pub const SCORE_KEYWORD_PINYIN_PREFIX: i32 = 760;
+pub const SCORE_KEYWORD_PINYIN_INNER: i32 = 600;
 /// 单词前缀（含 Camel 拆词后的 terminal ← ter）。
 pub const SCORE_WORD_PREFIX: i32 = 720;
 /// 英文多词首字母缩写（ndm → Neat Download Manager）；低于真实词匹配。
@@ -23,6 +27,10 @@ pub const SCORE_ACRONYM: i32 = 680;
 pub const SCORE_SUBSTRING: i32 = 550;
 /// Fuzzy 上限；具体分由编辑距离映射。
 pub const SCORE_FUZZY_MAX: i32 = 450;
+/// Windows 标准搜索资源可扩大召回，但不能与真实名称和明确别名同权。
+pub const CONTEXT_DISCOUNT: i32 = 160;
+pub const CONTEXT_COMPACT_DISCOUNT: i32 = 220;
+pub const CONTEXT_PINYIN_DISCOUNT: i32 = 130;
 
 use crate::model::SearchResult;
 use std::collections::HashSet;

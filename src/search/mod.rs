@@ -495,6 +495,211 @@ mod tests {
     }
 
     #[test]
+    fn kj_recalls_indexed_names_with_inner_pinyin_initials() {
+        let apps = vec![item("开机启动设置"), item("存储空间"), item("记事本")];
+        let hits = search(&apps, "kj", &[], TOP_N);
+        let names: Vec<_> = hits.iter().map(|hit| hit.item.name.as_str()).collect();
+
+        for expected in ["开机启动设置", "存储空间"] {
+            assert!(
+                names.contains(&expected),
+                "已索引名称应被 kj 召回: {names:?}"
+            );
+        }
+        assert!(!names.contains(&"记事本"), "无关项不应命中: {names:?}");
+    }
+
+    #[test]
+    fn kj_recalls_existing_windows_startup_page() {
+        let entries = crate::app::builtin::materialize_system_entries(None);
+        let hits = search_with_system(&[], &entries, "kj", &[], TOP_N);
+        assert!(
+            hits.iter()
+                .any(|hit| hit.item.target == "ms-settings:startupapps"),
+            "Windows 启动设置入口应能用 kj 找到: {:?}",
+            hits.iter().map(|hit| &hit.item.name).collect::<Vec<_>>()
+        );
+        let startup_pos = hits
+            .iter()
+            .position(|hit| hit.item.target == "ms-settings:startupapps")
+            .unwrap();
+        if let Some(storage_pos) = hits.iter().position(|hit| hit.item.name == "存储空间") {
+            assert!(
+                startup_pos < storage_pos,
+                "开机启动入口应排在仅含内部拼音片段的存储空间之前: {:?}",
+                hits.iter()
+                    .map(|hit| (&hit.item.name, hit.score, &hit.matched_by))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_keyword_initials_beat_loose_name_pinyin() {
+        let mut intended = item("启动");
+        intended.search_keywords = vec!["开机启动".into()];
+        let loose = item("存储空间");
+        let hits = search(&[loose, intended], "kj", &[], TOP_N);
+        assert_eq!(
+            hits.first().map(|hit| hit.item.name.as_str()),
+            Some("启动"),
+            "可信词简拼前缀应排在宽松的名称拼音命中之前: {:?}",
+            hits.iter()
+                .map(|hit| (&hit.item.name, hit.score, &hit.matched_by))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(hits[0].matched_by, "keyword-initials-prefix");
+    }
+
+    #[test]
+    #[ignore = "Requires current Windows Settings search resources and zh-CN terms"]
+    fn windows_settings_standard_terms_are_indexed_without_new_entries() {
+        let entries = crate::app::builtin::materialize_system_entries(None);
+        let enriched_pages = entries
+            .iter()
+            .filter(|entry| {
+                entry.id.starts_with("winsettings:") && !entry.search_context.is_empty()
+            })
+            .count();
+        assert!(enriched_pages >= 30, "Windows 标准词应批量补充现有设置页");
+        let startup = entries
+            .iter()
+            .find(|entry| entry.target == "ms-settings:startupapps")
+            .expect("existing startup settings page");
+        assert!(
+            startup.search_context.iter().any(|term| term == "启动任务"),
+            "Windows search resources should enrich the existing page"
+        );
+        let hits = search_with_system(&[], &entries, "启动任务", &[], TOP_N);
+        assert!(
+            hits.iter()
+                .any(|hit| hit.item.target == startup.target
+                    && hit.matched_by.starts_with("context-")),
+            "standard Windows term should recall the existing startup page: {:?}",
+            hits.iter()
+                .map(|hit| (&hit.item.name, &hit.matched_by))
+                .collect::<Vec<_>>()
+        );
+        let initial_hits = search_with_system(&[], &entries, "qdrw", &[], TOP_N);
+        assert!(
+            initial_hits
+                .iter()
+                .any(|hit| hit.item.target == startup.target
+                    && hit.matched_by.starts_with("context-")),
+            "Windows 标准词应自动提供短简拼检索"
+        );
+    }
+
+    #[test]
+    fn system_context_recalls_pinyin_but_does_not_beat_exact_name() {
+        let mut weak = item("某设置");
+        weak.search_context = vec!["启动任务".into()];
+        let exact = item("启动任务");
+        let hits = search(&[weak, exact], "启动任务", &[], TOP_N);
+        assert_eq!(hits[0].item.name, "启动任务");
+        assert!(
+            hits.iter()
+                .any(|hit| hit.item.name == "某设置" && hit.matched_by.starts_with("context-")),
+            "Windows 标准词应扩大召回，而不压过真实名称"
+        );
+
+        let mut context_only = item("某设置");
+        context_only.search_context = vec!["启动任务".into()];
+        let hits = search(&[context_only], "qdrw", &[], TOP_N);
+        assert!(
+            hits.iter()
+                .any(|hit| hit.item.name == "某设置" && hit.matched_by.starts_with("context-")),
+            "标准中文词应自动支持拼音简拼"
+        );
+    }
+
+    #[test]
+    fn clear_system_queries_keep_the_intended_entry_first() {
+        let entries = crate::app::builtin::materialize_system_entries(None);
+        for (query, expected_id) in [
+            ("kj", "winsettings:ms-settings:startupapps"),
+            ("蓝牙", "winsettings:ms-settings:bluetooth"),
+            ("文件资源管理器", "system-tool:file-explorer"),
+        ] {
+            let hits = search_with_system(&[], &entries, query, &[], TOP_N);
+            assert_eq!(
+                hits.first().map(|hit| hit.item.id.as_str()),
+                Some(expected_id),
+                "明确系统查询 {query:?} 的前排错误: {:?}",
+                hits.iter()
+                    .map(|hit| (&hit.item.name, hit.score, &hit.matched_by))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn short_system_entry_strong_hits_match_unpruned_reference() {
+        use std::collections::BTreeSet;
+
+        let mut entries = crate::app::builtin::materialize_system_entries(None);
+        entries.retain(|entry| {
+            entry.id.starts_with("winsettings:") || entry.id.starts_with("system-tool:")
+        });
+        let index = RetrievalIndex::build(&[], &entries);
+        let mut probes = BTreeSet::new();
+        for doc in &index.docs {
+            for field in [&doc.pinyin_initials, &doc.name] {
+                let chars: Vec<char> = field.chars().collect();
+                for pair in chars.windows(2) {
+                    if !pair.iter().all(|ch| ch.is_alphanumeric()) {
+                        continue;
+                    }
+                    let query = normalizer::normalize_query(&pair.iter().collect::<String>());
+                    if query.chars().count() == 2 {
+                        probes.insert(query);
+                    }
+                }
+            }
+            for keyword in &doc.keywords {
+                let (_, initials) = pinyin_of(keyword);
+                if initials.chars().count() >= 2 {
+                    probes.insert(initials.chars().take(2).collect::<String>());
+                }
+            }
+            for field in &doc.context_fields {
+                let prefix = field.chars().take(2).collect::<String>();
+                if prefix.chars().count() == 2 && prefix.chars().all(char::is_alphanumeric) {
+                    probes.insert(prefix);
+                }
+                let (_, initials) = pinyin_of(field);
+                if initials.chars().count() >= 2 {
+                    probes.insert(initials.chars().take(2).collect::<String>());
+                }
+            }
+        }
+
+        for query in probes {
+            let reference = retrieval::reference_search(
+                &index.docs,
+                &retrieval::query::parse(&query),
+                &[],
+                MAX_RESULTS,
+            );
+            let indexed = search_with_index(&index, &query, &[], MAX_RESULTS);
+            for hit in reference {
+                if matches!(
+                    hit.matched_by.as_str(),
+                    "nucleo" | "fuzzy" | "keyword-fuzzy"
+                ) {
+                    continue;
+                }
+                assert!(
+                    indexed.iter().any(|found| found.item.id == hit.item.id),
+                    "query={query:?} lost {} ({}) from system entries before verification",
+                    hit.item.name,
+                    hit.matched_by
+                );
+            }
+        }
+    }
+
+    #[test]
     fn single_letter_pinyin_initial_finds_control_panel() {
         // k → 控制面板（kzmb）应可召回；名称前缀（Kite）仍可排更前
         let apps = vec![
