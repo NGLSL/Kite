@@ -25,13 +25,6 @@ RequestExecutionLevel admin
 
 Var OldInstallDir
 
-Function .onInit
-  ; 兼容新旧安装器保存的安装位置。
-  ReadRegStr $OldInstallDir HKLM "Software\Kite" "InstallLocation"
-  StrCmp $OldInstallDir "" 0 +2
-    ReadRegStr $OldInstallDir HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Kite" "InstallLocation"
-FunctionEnd
-
 Function LaunchKiteUnelevated
   ; 安装器以管理员权限运行，但 Kite 本身不需要提权。
   ; ShellExecute 让 Explorer 使用当前用户上下文启动，避免 UIPI 阻断外部快捷键。
@@ -51,9 +44,25 @@ Section "卸载旧版本（推荐）" SEC_REMOVE_OLD
   ; 勾选后始终先卸载旧版本，再由后续主程序 section 重新安装。
   StrCmp $OldInstallDir "" done
   IfFileExists "$OldInstallDir\uninstall.exe" 0 done
-    ExecWait '"$OldInstallDir\uninstall.exe" /S'
+    ; _?= 阻止 NSIS 卸载器复制到临时目录后提前返回，确保旧版完全卸载后再写入新版。
+    ExecWait '"$OldInstallDir\uninstall.exe" /S _?=$OldInstallDir'
 done:
 SectionEnd
+
+Function .onInit
+  ; 兼容新旧安装器保存的安装位置。
+  ReadRegStr $OldInstallDir HKLM "Software\Kite" "InstallLocation"
+  StrCmp $OldInstallDir "" 0 +2
+    ReadRegStr $OldInstallDir HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Kite" "InstallLocation"
+
+  ; 首次安装或卸载后的残留路径没有可执行的旧卸载器，不向用户展示升级选项。
+  StrCmp $OldInstallDir "" no_old_install
+  IfFileExists "$OldInstallDir\uninstall.exe" old_install_found
+no_old_install:
+  StrCpy $OldInstallDir ""
+  SectionSetText ${SEC_REMOVE_OLD} ""
+old_install_found:
+FunctionEnd
 
 Section "Kite 主程序" SEC_MAIN
   SectionIn RO
