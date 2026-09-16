@@ -12,6 +12,20 @@ use std::time::{Duration, Instant};
 
 static LOG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
+// 测试钩子：本线程收到的日志行。`LOG_PATH` 是进程级全局量，并行测试不能靠
+// 重定向文件来观察写入，所以改在这里按线程记账（见 `test_records`）。
+#[cfg(test)]
+thread_local! {
+    static TEST_RECORDS: std::cell::RefCell<Vec<String>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
+/// 取出（并清空）本线程自上次调用以来记录的日志行。测试专用。
+#[cfg(test)]
+pub(crate) fn test_records() -> Vec<String> {
+    TEST_RECORDS.with(|records| std::mem::take(&mut *records.borrow_mut()))
+}
+
 /// 单个日志文件的硬上限（5,000,000 bytes）。达到上限后只保留最新记录。
 pub const MAX_LOG_BYTES: u64 = 5_000_000;
 const LOCK_WAIT: Duration = Duration::from_millis(500);
@@ -29,6 +43,8 @@ pub fn init(path: PathBuf) {
 pub fn info(msg: &str) {
     let line = format!("[kite] {msg}\n");
     eprint!("{line}");
+    #[cfg(test)]
+    TEST_RECORDS.with(|records| records.borrow_mut().push(msg.to_string()));
     if let Ok(g) = LOG_PATH.lock() {
         if let Some(p) = g.as_ref() {
             let _ = append_line(p, line.as_bytes());

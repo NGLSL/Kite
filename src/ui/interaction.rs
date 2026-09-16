@@ -99,7 +99,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                     if state.alt_digit_consumed {
                         return Task::none();
                     }
-                    plog(&format!("alt-digit text fallback idx={i}"));
+                    state.qlog(|| format!("alt-digit text fallback idx={i}"));
                     return launch_alt_digit(state, i);
                 }
             }
@@ -137,7 +137,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::ToggleFiles => {
             state.files_mode = !state.files_mode;
-            plog(&format!("files toggle -> {}", state.files_mode));
+            state.qlog(|| format!("files toggle -> {}", state.files_mode));
             state.request_file_search();
             state.refresh_results();
             Task::none()
@@ -150,15 +150,19 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 generation,
                 &query,
             ) {
-                plog(&format!(
-                    "file search stale generation={generation} query={query:?} elapsed={elapsed_us}us"
-                ));
+                state.qlog(|| {
+                    format!(
+                        "file search stale generation={generation} query={query:?} elapsed={elapsed_us}us"
+                    )
+                });
                 return Task::none();
             }
-            plog(&format!(
-                "file search ready generation={generation} query={query:?} hits={} elapsed={elapsed_us}us",
-                hits.len()
-            ));
+            state.qlog(|| {
+                format!(
+                    "file search ready generation={generation} query={query:?} hits={} elapsed={elapsed_us}us",
+                    hits.len()
+                )
+            });
             state.file_results = hits;
             state.refresh_results();
             Task::none()

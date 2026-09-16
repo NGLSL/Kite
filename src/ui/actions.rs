@@ -8,7 +8,7 @@ pub(super) fn menu_action(state: &mut State, item: AppItem, action: MenuAction) 
     match action {
         MenuAction::OpenFolder => {
             let r = app::actions::open_containing_folder(&item.target);
-            plog(&format!("ctx open_folder err={r:?}"));
+            state.qlog(|| format!("ctx open_folder err={r:?}"));
         }
         MenuAction::CopyPath => return iced::clipboard::write(item.target),
         MenuAction::CopyName => return iced::clipboard::write(item.display_name),
@@ -19,7 +19,7 @@ pub(super) fn menu_action(state: &mut State, item: AppItem, action: MenuAction) 
                 } else {
                     db.pin_item(&item.id, storage::now_ts())
                 };
-                plog(&format!("ctx pin toggle ok={}", r.is_ok()));
+                state.qlog(|| format!("ctx pin toggle ok={}", r.is_ok()));
             }
             // 与 Demote 共用同一入口：非空 Query 同样交给常驻 worker 重排。
             state.refresh_results();
@@ -31,7 +31,13 @@ pub(super) fn menu_action(state: &mut State, item: AppItem, action: MenuAction) 
                 } else {
                     db.undemote_item(&item.id)
                 };
-                plog(&format!("ctx demote action={action:?} ok={} id={}", r.is_ok(), item.id));
+                state.qlog(|| {
+                    format!(
+                        "ctx demote action={action:?} ok={} id={}",
+                        r.is_ok(),
+                        item.id
+                    )
+                });
             }
             state.refresh_results();
         }
@@ -57,11 +63,11 @@ pub(super) fn on_key(
     // Alt+1..9：兼容 modifiers.alt() / 本地 alt_down / 逻辑字符 / 物理 Digit|Numpad
     let alt_idx = alt_digit_index(&key, physical, mods, state.alt_down);
     if let Some(i) = alt_idx {
-        plog(&format!(
-            "alt-n idx={i} alt_down={} mods_alt={} key={key:?} phys={physical:?}",
-            state.alt_down,
-            mods.alt()
-        ));
+        let alt_down = state.alt_down;
+        let mods_alt = mods.alt();
+        state.qlog(|| {
+            format!("alt-n idx={i} alt_down={alt_down} mods_alt={mods_alt} key={key:?} phys={physical:?}")
+        });
         return launch_alt_digit(state, i);
     }
 
@@ -69,13 +75,13 @@ pub(super) fn on_key(
         Key::Named(Named::Escape) if !state.ime_composing => {
             // 前端行为：菜单开着时 Esc 只关菜单；设置页开着时 Esc 回搜索
             if state.menu.take().is_some() {
-                plog("ctx menu closed (esc)");
+                state.qlog(|| "ctx menu closed (esc)".to_owned());
                 return Task::none();
             }
             if state.settings_open {
                 return close_settings(state);
             }
-            plog("hide issued (esc)");
+            state.qlog(|| "hide issued (esc)".to_owned());
             hide(state);
             hide_task(state)
         }
@@ -84,7 +90,7 @@ pub(super) fn on_key(
         Key::Named(Named::Enter) if !state.ime_composing => launch_selected(state),
         Key::Named(Named::Alt) => Task::none(),
         Key::Named(name) => {
-            plog(&format!("key named {name:?} ignored"));
+            state.qlog(|| format!("key named {name:?} ignored"));
             Task::none()
         }
         Key::Character(c) => {
@@ -143,11 +149,11 @@ pub(super) fn launch_selected(state: &mut State) -> Task<Message> {
     // （避免闪空），但此时启动它就会打开上一次搜索的应用。Enter / Alt+数字 /
     // 鼠标点击都汇到这里，有效性判定因此只有一处。
     if !state.results_are_launchable() {
-        plog("launch ignored: results belong to a previous query");
+        state.qlog(|| "launch ignored: results belong to a previous query".to_owned());
         return Task::none();
     }
     let Some(item) = state.results.get(state.selected).map(|r| r.item.clone()) else {
-        plog("enter with empty results; ignored");
+        state.qlog(|| "enter with empty results; ignored".to_owned());
         return Task::none();
     };
     state.menu = None;
@@ -159,7 +165,7 @@ pub(super) fn launch_selected(state: &mut State) -> Task<Message> {
 
     if let Some(url) = everything_download_url(&item.id) {
         let result = app::uwp::launch_shell_path(url);
-        plog(&format!("open Everything download err={result:?}"));
+        state.qlog(|| format!("open Everything download err={result:?}"));
         return if result.is_ok() {
             hide(state);
             hide_task(state)
@@ -183,10 +189,8 @@ pub(super) fn launch_selected(state: &mut State) -> Task<Message> {
         };
         return match result {
             Ok(preferred) => {
-                plog(&format!(
-                    "launch web {kind} via {browser_id} in {}us",
-                    t0.elapsed().as_micros()
-                ));
+                let elapsed_us = t0.elapsed().as_micros();
+                state.qlog(|| format!("launch web {kind} via {browser_id} in {elapsed_us}us"));
                 if let Some(db) = &mut state.history {
                     let q = search::normalize_for_index(&state.query);
                     let _ = db.record_launch(&item.id, &q, storage::now_ts());
@@ -194,12 +198,12 @@ pub(super) fn launch_selected(state: &mut State) -> Task<Message> {
                         let _ = db.set_preferred_browser(&pid);
                     }
                 }
-                plog("hide issued (launch)");
+                state.qlog(|| "hide issued (launch)".to_owned());
                 hide(state);
                 hide_task(state)
             }
             Err(e) => {
-                plog(&format!("launch web {kind} failed: {e}"));
+                state.qlog(|| format!("launch web {kind} failed: {e}"));
                 Task::none()
             }
         };
@@ -210,25 +214,24 @@ pub(super) fn launch_selected(state: &mut State) -> Task<Message> {
     system::env::refresh_process_env();
     match app::launch(&item) {
         Ok(()) => {
-            plog(&format!(
-                "launch '{}' target={} in {}us ok",
-                item.display_name,
-                item.target,
-                t0.elapsed().as_micros()
-            ));
+            let elapsed_us = t0.elapsed().as_micros();
+            let (name, target) = (item.display_name.clone(), item.target.clone());
+            state.qlog(|| format!("launch '{name}' target={target} in {elapsed_us}us ok"));
             if let Some(db) = &mut state.history {
                 let q = search::normalize_for_index(&state.query);
                 let _ = db.record_launch(&item.id, &q, storage::now_ts());
             }
-            plog("hide issued (launch)");
+            state.qlog(|| "hide issued (launch)".to_owned());
             hide(state);
             hide_task(state)
         }
         Err(e) => {
-            plog(&format!(
-                "launch '{}' target={} failed: {e}",
-                item.display_name, item.target
-            ));
+            state.qlog(|| {
+                format!(
+                    "launch '{}' target={} failed: {e}",
+                    item.display_name, item.target
+                )
+            });
             Task::none()
         }
     }
@@ -251,6 +254,92 @@ mod everything_action_tests {
         assert_eq!(
             everything_download_url(system::everything::NOT_RUNNING_RESULT_ID),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod interactive_log_gate_tests {
+    use super::super::test_support::test_state;
+    use super::*;
+    use crate::log;
+    use crate::ui::interaction::update;
+    use iced::keyboard::key::Code;
+
+    fn press(state: &mut State, key: Key) -> Task<Message> {
+        on_key(state, key, Physical::Code(Code::KeyA), Modifiers::empty())
+    }
+
+    /// 关掉查询日志后，交互路径（Esc、未识别具名键、Alt+数字、启动、右键菜单入口、
+    /// 文件模式切换、设置页开合）不得产生任何日志行 —— 不调用 `plog`，
+    /// 也就没有同步文件写入。
+    #[test]
+    fn interactive_path_writes_no_log_when_query_log_off() {
+        let mut state = test_state("k");
+        state.query_log = false;
+
+        log::test_records();
+        // Esc：隐藏启动器
+        let _ = press(&mut state, Key::Named(Named::Escape));
+        // 未识别的具名键
+        let _ = press(&mut state, Key::Named(Named::Tab));
+        // 启动：结果过期时被拒
+        state.hidden = false;
+        state.results_stale = true;
+        let _ = launch_selected(&mut state);
+        // 启动：内置「Kite 设置」→ 设置页打开，再关掉
+        state.results_stale = false;
+        let _ = launch_selected(&mut state);
+        let _ = close_settings(&mut state);
+        // Alt+数字
+        state.hidden = false;
+        state.alt_digit_consumed = false;
+        let _ = on_key(
+            &mut state,
+            Key::Character("1".into()),
+            Physical::Code(Code::Digit1),
+            Modifiers::ALT,
+        );
+        // 文件模式切换与文件搜索落地／过期
+        let _ = update(&mut state, Message::ToggleFiles);
+        let _ = update(
+            &mut state,
+            Message::FileSearchReady(0, String::new(), Vec::new(), 0),
+        );
+
+        assert_eq!(
+            log::test_records(),
+            Vec::<String>::new(),
+            "关闭查询日志后，交互路径不得产生任何同步日志写入"
+        );
+    }
+
+    /// 开关开启（默认）时，同样的交互路径照常写日志 —— 证明上面的断言确实覆盖了这些点。
+    #[test]
+    fn interactive_path_still_logs_when_query_log_on() {
+        let mut state = test_state("k");
+        assert!(state.query_log, "查询日志默认开启");
+
+        log::test_records();
+        let _ = press(&mut state, Key::Named(Named::Escape));
+        let _ = update(&mut state, Message::ToggleFiles);
+        let _ = update(
+            &mut state,
+            Message::FileSearchReady(0, String::new(), Vec::new(), 0),
+        );
+
+        let records = log::test_records();
+        assert!(
+            records.iter().any(|r| r.contains("hide issued (esc)")),
+            "开启时 Esc 必须仍写日志，实际：{records:?}"
+        );
+        assert!(
+            records.iter().any(|r| r.contains("files toggle ->")),
+            "开启时文件模式切换必须仍写日志，实际：{records:?}"
+        );
+        assert!(
+            records.iter().any(|r| r.contains("file search ")),
+            "开启时文件搜索落地必须仍写日志，实际：{records:?}"
         );
     }
 }
@@ -336,7 +425,7 @@ pub(super) fn open_settings(state: &mut State) -> Task<Message> {
             .collect();
     }
     load_aliases(state);
-    plog("settings open");
+    state.qlog(|| "settings open".to_owned());
     state
         .window_id
         .map(settings_window_task)
@@ -356,7 +445,7 @@ pub(super) fn settings_window_task(id: window::Id) -> Task<Message> {
 pub(super) fn close_settings(state: &mut State) -> Task<Message> {
     state.settings_open = false;
     state.flash = None;
-    plog("settings close");
+    state.qlog(|| "settings close".to_owned());
     Task::batch([
         state
             .window_id
