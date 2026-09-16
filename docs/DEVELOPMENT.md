@@ -45,7 +45,7 @@ artifacts/kite.exe
 artifacts/kite-setup.exe
 ```
 
-需要 NSIS 时执行 `winget install NSIS.NSIS`。不要提交 `target/`、`artifacts/`、`.scratch/` 或本机日志。
+需要 NSIS 时执行 `winget install NSIS.NSIS`。不要提交 `target/`、`artifacts/` 或本机日志。
 
 ## 正式发布
 
