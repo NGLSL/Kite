@@ -12,6 +12,9 @@ use crate::model::{AppIndex, AppItem};
 
 pub const SNAPSHOT_VERSION: u32 = 1;
 pub const SEARCH_SCHEMA_VERSION: u32 = 1;
+/// Warm Start 资格：超过该年龄的 last-good 不恢复，走冷 Bootstrap。
+/// Full 连续失败时避免「越用越旧」；成功 Full 会覆盖并刷新时间戳。
+const MAX_WARM_AGE_SECS: u64 = 24 * 3600;
 
 const FILE_NAME: &str = "index-snapshot.json";
 
@@ -69,6 +72,9 @@ pub struct CachedAppItem {
 pub struct CachedAppSnapshot {
     pub snapshot_version: u32,
     pub search_schema_version: u32,
+    /// Full 写入时刻（unix 秒）；旧快照缺字段为 0，视为过期。
+    #[serde(default)]
+    pub saved_at_unix: u64,
     pub apps: Vec<CachedAppItem>,
     pub system_entries: Vec<CachedAppItem>,
 }
@@ -122,9 +128,14 @@ pub fn snapshot_path(data_dir: &Path) -> PathBuf {
 }
 
 pub fn from_index(index: &AppIndex) -> CachedAppSnapshot {
+    from_index_at(index, crate::storage::now_ts().max(0) as u64)
+}
+
+fn from_index_at(index: &AppIndex, saved_at_unix: u64) -> CachedAppSnapshot {
     CachedAppSnapshot {
         snapshot_version: SNAPSHOT_VERSION,
         search_schema_version: SEARCH_SCHEMA_VERSION,
+        saved_at_unix,
         apps: index.apps.iter().map(CachedAppItem::from_item).collect(),
         system_entries: index
             .system_entries
@@ -154,6 +165,12 @@ fn is_compatible(snapshot: &CachedAppSnapshot) -> bool {
         && !snapshot.apps.is_empty()
 }
 
+/// 版本兼容且未超过 Warm 最大年龄。
+fn is_warm_eligible(snapshot: &CachedAppSnapshot, now_unix: u64) -> bool {
+    is_compatible(snapshot)
+        && now_unix.saturating_sub(snapshot.saved_at_unix) <= MAX_WARM_AGE_SECS
+}
+
 /// Full 成功后写 last-good。Bootstrap/不完整结果不要调用。
 pub fn save(index: &AppIndex) -> std::io::Result<()> {
     save_to(&runtime_data_dir(), index)
@@ -165,11 +182,15 @@ pub fn save_to(data_dir: &Path, index: &AppIndex) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_vec(&snapshot)?;
     std::fs::write(&tmp, json)?;
+    // Windows 的 rename 不会覆盖已存在目标；与 ScanCache 一致：先删再改名。
+    if path.exists() {
+        let _ = std::fs::remove_file(&path);
+    }
     std::fs::rename(&tmp, &path)?;
     Ok(())
 }
 
-/// Warm Start：兼容则返回可搜索 AppIndex；否则 None。
+/// Warm Start：版本兼容且未超过 24h 则返回可搜索 AppIndex；否则 None（冷启动）。
 pub fn load() -> Option<AppIndex> {
     load_from(&runtime_data_dir())
 }
@@ -178,10 +199,13 @@ pub fn load_from(data_dir: &Path) -> Option<AppIndex> {
     let path = snapshot_path(data_dir);
     let bytes = std::fs::read(&path).ok()?;
     let snapshot: CachedAppSnapshot = serde_json::from_slice(&bytes).ok()?;
-    if !is_compatible(&snapshot) {
+    let now = crate::storage::now_ts().max(0) as u64;
+    if !is_warm_eligible(&snapshot, now) {
         crate::log::info(&format!(
-            "index snapshot incompatible or empty; cold start (path={})",
-            path.display()
+            "index snapshot incompatible/expired/empty; cold start (path={}, age_s={}, saved={})",
+            path.display(),
+            now.saturating_sub(snapshot.saved_at_unix),
+            snapshot.saved_at_unix
         ));
         return None;
     }
@@ -261,5 +285,52 @@ mod tests {
         let loaded = load_from(&dir).expect("compatible snapshot loads");
         assert_eq!(loaded.apps[0].target, index.apps[0].target);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn second_save_overwrites_existing_snapshot() {
+        let dir = std::env::temp_dir().join(format!("kite-snap-ow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut first = AppIndex {
+            apps: vec![sample_item()],
+            system_entries: Vec::new(),
+            retrieval: None,
+        };
+        first.rebuild_retrieval();
+        save_to(&dir, &first).unwrap();
+
+        let mut second_item = sample_item();
+        second_item.name = "Demo App v2".into();
+        second_item.display_name = "Demo App v2".into();
+        second_item.attach_search_fields();
+        let mut second = AppIndex {
+            apps: vec![second_item],
+            system_entries: Vec::new(),
+            retrieval: None,
+        };
+        second.rebuild_retrieval();
+        save_to(&dir, &second).expect("overwrite must succeed on Windows");
+
+        let loaded = load_from(&dir).expect("second save loads");
+        assert_eq!(loaded.apps[0].name, "Demo App v2");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn expired_snapshot_is_not_warm_eligible() {
+        let mut snapshot = from_index(&AppIndex {
+            apps: vec![sample_item()],
+            system_entries: Vec::new(),
+            retrieval: None,
+        });
+        let now = snapshot.saved_at_unix;
+        assert!(is_warm_eligible(&snapshot, now));
+        assert!(is_warm_eligible(&snapshot, now + MAX_WARM_AGE_SECS));
+        assert!(!is_warm_eligible(&snapshot, now + MAX_WARM_AGE_SECS + 1));
+        // 旧格式缺 saved_at_unix → 0 → 过期
+        snapshot.saved_at_unix = 0;
+        assert!(!is_warm_eligible(&snapshot, MAX_WARM_AGE_SECS + 10));
     }
 }

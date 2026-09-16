@@ -147,9 +147,10 @@ fn cache_file(icon_dir: &Path) -> PathBuf {
 }
 
 /// UWP/AppsFolder 枚举结果缓存：COM 枚举约数百毫秒，且无廉价文件 mtime。
-/// 自动重建在 TTL 内复用；设置/托盘「重新扫描」可强制刷新。
+/// 仅 Full 收集 UWP；TTL 内自动复用，设置/托盘「重新扫描」强制刷新。
+/// 30min：装完 Store 应用后下次 Full 会较快吃到，又不至于每次 Full 都 COM 全枚举。
 const UWP_CACHE_VERSION: u32 = 1;
-const UWP_CACHE_TTL_SECS: u64 = 3600;
+const UWP_CACHE_TTL_SECS: u64 = 30 * 60;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct CachedUwpItem {
@@ -266,8 +267,8 @@ mod tests {
         assert_eq!(hit[0].source, "uwp");
         assert!(reloaded.fresh_items(true, 1_000 + 60).is_none(), "force 忽略缓存");
         assert!(
-            reloaded.fresh_items(false, 1_000 + 3_601).is_none(),
-            "过期不命中"
+            reloaded.fresh_items(false, 1_000 + UWP_CACHE_TTL_SECS + 1).is_none(),
+            "超过 30min TTL 不命中"
         );
         let _ = std::fs::remove_dir_all(&d);
     }
