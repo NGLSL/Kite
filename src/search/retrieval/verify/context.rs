@@ -7,20 +7,42 @@ use ib_pinyin::{matcher::PinyinMatcher, pinyin::PinyinNotation};
 use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization};
 use nucleo_matcher::{Config as NucleoConfig, Matcher as NucleoMatcher};
 
-use crate::search::retrieval::doc::RetrievalIndex;
 use crate::search::retrieval::query::ParsedQuery;
 
-/// 每 Query 构建一次的匹配上下文：ib-pinyin 混合拼音 + nucleo 对齐缓冲。
-pub struct QueryContext<'a> {
-    pub parsed: &'a ParsedQuery,
-    pub(crate) pinyin: Option<PinyinMatcher<'a>>,
+/// 跨查询复用的匹配工作区。
+///
+/// `NucleoMatcher` 与对齐缓冲的初始化成本与查询无关：常驻 worker 持有它、
+/// 跨查询复用（每次查询只更新 pattern 与解析结果）；一次性搜索入口用完即弃。
+pub struct MatcherScratch {
     pub(crate) nucleo: NucleoMatcher,
-    pub(crate) nucleo_atom: Option<Atom>,
     pub(crate) hay_buf: Vec<char>,
 }
 
+impl Default for MatcherScratch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MatcherScratch {
+    pub fn new() -> Self {
+        Self {
+            nucleo: NucleoMatcher::new(NucleoConfig::DEFAULT),
+            hay_buf: Vec::new(),
+        }
+    }
+}
+
+/// 每 Query 构建一次的匹配上下文：ib-pinyin 混合拼音 + 借用来的 nucleo 工作区。
+pub struct QueryContext<'a> {
+    pub parsed: &'a ParsedQuery,
+    pub(crate) pinyin: Option<PinyinMatcher<'a>>,
+    pub(crate) nucleo_atom: Option<Atom>,
+    pub(crate) scratch: &'a mut MatcherScratch,
+}
+
 impl<'a> QueryContext<'a> {
-    pub fn build(q: &'a ParsedQuery, _index: &RetrievalIndex) -> Self {
+    pub fn build(q: &'a ParsedQuery, scratch: &'a mut MatcherScratch) -> Self {
         // 含 ASCII 即可参与拼音解释（混输：汉字+拼音/英文）；1 字符走首字母倒排，不建 matcher
         let pinyin = if q.has_ascii_alnum && q.chars.len() >= 2 {
             Some(
@@ -46,9 +68,8 @@ impl<'a> QueryContext<'a> {
         Self {
             parsed: q,
             pinyin,
-            nucleo: NucleoMatcher::new(NucleoConfig::DEFAULT),
             nucleo_atom,
-            hay_buf: Vec::new(),
+            scratch,
         }
     }
 }

@@ -10,7 +10,7 @@ mod align;
 mod context;
 mod evidence;
 
-pub use context::{CharBits, QueryContext};
+pub use context::{CharBits, MatcherScratch, QueryContext};
 pub use evidence::{
     cmp_ranked_hit, MatchEvidence, MatchField, MatchKind, RankedHit, ScoredHit, SCORE_NUCLEO_MAX,
     SCORE_SKIP,
@@ -32,6 +32,7 @@ use crate::search::ranker::{
 use crate::search::retrieval::channels::Candidates;
 use crate::search::retrieval::doc::{DocId, IndexedDoc, RetrievalIndex};
 use crate::search::retrieval::query::ParsedQuery;
+use crate::search::retrieval::SearchRun;
 
 use align::{
     fuzzy_name_or_tokens, loose_mixed_fragments, map_initial_index_to_display, map_nucleo_score,
@@ -42,17 +43,28 @@ const MIN_COMPACT_SUBSTR_LEN: usize = 3;
 const MIN_WORD_PREFIX_LEN: usize = 2;
 const MIN_ACRONYM_LEN: usize = 2;
 
-/// 对候选集验证并评分。
+/// 候选验证按批次查取消：逐个候选查一次原子读会把按键路径拖慢，
+/// 整批只查一次又停不下来，取一个折中的批次大小。
+const VERIFY_CANCEL_BATCH: usize = 64;
+
+/// 对候选集验证并评分；取消时返回 `None`（不产出部分结果）。
+///
+/// 取消检查按小批次进行，已有的阶段边界检查（召回后／验证后／排序前）仍然保留。
 pub fn verify_all(
     index: &RetrievalIndex,
     candidates: &Candidates,
     ctx: &mut QueryContext,
     user_targets: &[UserTarget],
-) -> Vec<ScoredHit> {
+    run: &SearchRun<'_>,
+) -> Option<Vec<ScoredHit>> {
     let mut hits = Vec::new();
     let mut candidate_ids: Vec<_> = candidates.ids.iter().copied().collect();
     candidate_ids.sort_unstable();
-    for id in candidate_ids {
+    run.entering_verify();
+    for (checked, id) in candidate_ids.iter().copied().enumerate() {
+        if checked % VERIFY_CANCEL_BATCH == 0 && run.is_cancelled() {
+            return None;
+        }
         let Some(doc) = index.doc(id) else { continue };
         if let Some(hit) = verify_one(doc, ctx, user_targets) {
             hits.push(ScoredHit {
@@ -63,7 +75,7 @@ pub fn verify_all(
             });
         }
     }
-    hits
+    Some(hits)
 }
 
 /// (score, matched_by, evidence)
@@ -679,9 +691,9 @@ fn verify_one(
     // 5) nucleo-matcher 非连续对齐：只补充证据，不否决已有命中
     if best.map(|(s, _, _)| s < SCORE_NUCLEO_MAX).unwrap_or(true) {
         if ctx.nucleo_atom.is_some() {
-            let hay = Utf32Str::new(name, &mut ctx.hay_buf);
+            let hay = Utf32Str::new(name, &mut ctx.scratch.hay_buf);
             let atom = ctx.nucleo_atom.as_ref().unwrap();
-            if let Some(raw) = atom.score(hay, &mut ctx.nucleo) {
+            if let Some(raw) = atom.score(hay, &mut ctx.scratch.nucleo) {
                 let mapped = map_nucleo_score(raw);
                 if mapped > 0 {
                     best = take_best(
@@ -791,9 +803,9 @@ pub fn reference_search(
     user_targets: &[UserTarget],
     max_results: usize,
 ) -> Vec<SearchResult> {
-    // 参考路径也用同一验证语义；ib-pinyin 需要 Query 生命周期，这里用临时空索引构建上下文
-    let empty = RetrievalIndex::build(&[], &[]);
-    let mut ctx = QueryContext::build(q, &empty);
+    // 参考路径也用同一验证语义；这里是一次性调用，工作区用完即弃。
+    let mut scratch = MatcherScratch::new();
+    let mut ctx = QueryContext::build(q, &mut scratch);
     let mut hits: Vec<(i32, usize, String, DocId, String)> = Vec::new();
     for doc in docs {
         if let Some((score, matched_by, _evidence)) = verify_one(doc, &mut ctx, user_targets) {
@@ -949,6 +961,48 @@ mod tests {
         let bits = CharBits::from_str("google chrome");
         assert!(bits.contains_all(&['g', 'o', 'c']));
         assert!(!bits.contains_all(&['z']));
+    }
+
+    #[test]
+    fn verify_all_stops_when_cancel_lands_mid_batch() {
+        use std::cell::Cell;
+
+        let apps: Vec<_> = (0..VERIFY_CANCEL_BATCH * 2)
+            .map(|i| {
+                let mut item = crate::model::AppItem::scanned(
+                    format!("app{i}"),
+                    format!("Application {i}"),
+                    format!(r"C:\app{i}.exe"),
+                    None,
+                    None,
+                    "test",
+                );
+                item.attach_search_fields();
+                item
+            })
+            .collect();
+        let index = RetrievalIndex::build(&apps, &[]);
+        let candidates = Candidates {
+            ids: index.docs.iter().map(|d| d.id).collect(),
+            stats: Default::default(),
+        };
+        let q = crate::search::retrieval::query::parse("application");
+        let scratch = &mut MatcherScratch::new();
+        let mut ctx = QueryContext::build(&q, scratch);
+        // 第一次查取消返回 false，其后返回 true：只有「在验证循环内按批次重复查取消」
+        // 的实现才会中途停下；若取消只在进循环前查一次，这里会拿到完整候选。
+        let checks = Cell::new(0u32);
+        let cancelled = || {
+            let seen = checks.get();
+            checks.set(seen + 1);
+            seen > 0
+        };
+        let run = SearchRun::new(&cancelled);
+
+        assert!(
+            verify_all(&index, &candidates, &mut ctx, &[], &run).is_none(),
+            "验证中途收到取消必须整体作废，不返回部分结果"
+        );
     }
 
     #[test]

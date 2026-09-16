@@ -69,13 +69,17 @@ impl State {
         }
         self.results_stale = true;
 
-        let retrieval = {
+        // 一次加锁取到自洽的一份来源：有预建索引就按引用共享，
+        // 绝不在这条按键路径上复制整份应用数组与系统入口数组。
+        let source = {
             let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
-            index.retrieval.clone()
-        };
-        let (apps, system_entries) = {
-            let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
-            (index.apps.clone(), index.system_entries.clone())
+            match index.retrieval.clone() {
+                Some(retrieval) => search::service::IndexSource::Prebuilt(retrieval),
+                None => search::service::IndexSource::Snapshot {
+                    apps: index.apps.clone(),
+                    system_entries: index.system_entries.clone(),
+                },
+            }
         };
         let user_targets: Vec<search::UserTarget> = self
             .history
@@ -102,9 +106,7 @@ impl State {
             q_norm,
             user_targets,
             prefs,
-            retrieval,
-            apps,
-            system_entries,
+            source,
             cache,
             cache_epoch,
             on_done: Arc::new(move |generation, query, hits, elapsed_us| {
@@ -232,7 +234,8 @@ impl State {
     }
 
     /// 结果刷新唯一入口：
-    /// - 空 Query：固定 + 最近（同步；不需要应用召回与链接/文件/网页槽）；
+    /// - 空 Query：固定 + 最近（同步；不需要应用召回与链接/文件/网页槽），
+    ///   同时推进请求失效代际，让在途的应用搜索停下（清空输入、隐藏窗口都走这里）；
     /// - 非空 Query：交给常驻 worker，由 `apply_app_search_ready` → `merge_aux_hits`
     ///   组装并落地（含合并、选中复位与日志）。
     ///
@@ -248,6 +251,9 @@ impl State {
             self.request_app_search();
             return;
         }
+
+        // 界面已经不需要应用结果：推进代际停掉在途任务，不留下白算的 CPU。
+        self.app_search_worker.cancel_current();
 
         let (recent, pinned) = self
             .history
@@ -395,10 +401,63 @@ mod tests {
 
         state.refresh_results();
 
+        assert!(
+            state.results.is_empty(),
+            "空 Query 同步重建列表（空索引 + 无历史）"
+        );
+        assert!(!state.results_stale, "空 Query 的同步列表就是当前状态");
         assert_eq!(
             state.app_search_worker.latest_seq(),
+            1,
+            "空 Query 不提交任务，只推进一次失效代际让在途搜索停下"
+        );
+    }
+
+    #[test]
+    fn clearing_query_cancels_in_flight_app_search() {
+        let mut state = test_state("k");
+        state.refresh_results();
+        let submitted = state.app_search_worker.latest_seq();
+        let stale_generation = state.app_query_generation;
+        let index_generation = state.index_generation;
+
+        state.query.clear();
+        state.refresh_results();
+
+        assert!(
+            state.app_search_worker.latest_seq() > submitted,
+            "清空输入必须通知 worker 停止当前任务"
+        );
+        assert!(!state.results_stale, "清空后同步列表即当前状态");
+
+        // 清空后即便在途任务仍把旧结果送回来，也不得落地。
+        state.apply_app_search_ready(
+            stale_generation,
+            "k".into(),
+            vec![settings_result()],
             0,
-            "空 Query 走固定+最近，不应提交 worker"
+            index_generation,
+        );
+        assert!(
+            state.results.is_empty(),
+            "被取消的旧任务不得改变清空后的列表"
+        );
+    }
+
+    #[test]
+    fn hiding_window_cancels_in_flight_app_search() {
+        use crate::ui::actions::hide;
+
+        let mut state = test_state("k");
+        state.refresh_results();
+        let submitted = state.app_search_worker.latest_seq();
+
+        hide(&mut state);
+
+        assert!(state.hidden);
+        assert!(
+            state.app_search_worker.latest_seq() > submitted,
+            "隐藏窗口必须通知 worker 停止当前任务"
         );
     }
 

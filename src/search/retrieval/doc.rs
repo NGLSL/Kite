@@ -10,7 +10,8 @@ use crate::search::normalizer::{compact, split_camel, tokens};
 use crate::search::pinyin_of;
 
 use super::symspell::{self, DeleteIndex};
-use super::verify::{cmp_ranked_hit, CharBits, QueryContext, RankedHit, ScoredHit};
+use super::verify::{cmp_ranked_hit, CharBits, MatcherScratch, QueryContext, RankedHit, ScoredHit};
+use super::SearchRun;
 
 /// 内部文档 ID（快照局部，不持久化）。
 pub type DocId = u32;
@@ -593,23 +594,27 @@ impl RetrievalIndex {
 
     /// 基础轻量候选：召回 → 验证 → into_ranked。**不含**个性化、归并、截断。
     /// 适合缓存；`doc_id` 绑定当前索引代际。
+    ///
+    /// `scratch` 由调用方持有：常驻 worker 跨查询复用同一份 matcher 与字符缓冲，
+    /// 一次性调用方（同步入口、测试）用完即弃。
     pub fn search_base_ranked(
         &self,
         query: &str,
         user_targets: &[UserTarget],
-        cancelled: &dyn Fn() -> bool,
+        scratch: &mut MatcherScratch,
+        run: &SearchRun<'_>,
     ) -> Option<Vec<RankedHit>> {
         let q = super::query::parse(query);
         if q.is_empty() {
             return Some(Vec::new());
         }
-        let mut ctx = QueryContext::build(&q, self);
+        let mut ctx = QueryContext::build(&q, scratch);
         let candidates = super::channels::collect(self, &q, user_targets);
-        if cancelled() {
+        if run.is_cancelled() {
             return None;
         }
-        let scored = super::verify::verify_all(self, &candidates, &mut ctx, user_targets);
-        if cancelled() {
+        let scored = super::verify::verify_all(self, &candidates, &mut ctx, user_targets, run)?;
+        if run.is_cancelled() {
             return None;
         }
         Some(self.into_ranked(scored))
@@ -658,7 +663,9 @@ impl RetrievalIndex {
     }
 
     /// 同 `search_personalized`，但在阶段边界检查协作取消。
-    /// 召回后 / 验证后 / 排序前若 `cancelled()` 为真，返回 None（无部分结果）。
+    /// 召回后 / 验证后 / 排序前若已取消，返回 None（无部分结果）。
+    ///
+    /// 一次性入口：工作区只在本次调用内复用，跨查询复用属于常驻 worker 的职责。
     pub fn search_personalized_cancellable(
         &self,
         query: &str,
@@ -667,12 +674,14 @@ impl RetrievalIndex {
         max_results: usize,
         cancelled: &dyn Fn() -> bool,
     ) -> Option<Vec<crate::model::SearchResult>> {
-        let base = self.search_base_ranked(query, user_targets, cancelled)?;
-        if cancelled() {
+        let run = SearchRun::new(cancelled);
+        let mut scratch = MatcherScratch::new();
+        let base = self.search_base_ranked(query, user_targets, &mut scratch, &run)?;
+        if run.is_cancelled() {
             return None;
         }
         let ranked = self.finish_ranked_from_base(base, personalization, max_results);
-        if cancelled() {
+        if run.is_cancelled() {
             return None;
         }
         Some(self.materialize_ranked(ranked))
@@ -687,7 +696,9 @@ impl RetrievalIndex {
         personalization: Option<&crate::history::Personalization>,
         max_results: usize,
     ) -> Vec<RankedHit> {
-        let Some(base) = self.search_base_ranked(query, user_targets, &|| false) else {
+        let run = SearchRun::new(&|| false);
+        let mut scratch = MatcherScratch::new();
+        let Some(base) = self.search_base_ranked(query, user_targets, &mut scratch, &run) else {
             return Vec::new();
         };
         self.finish_ranked_from_base(base, personalization, max_results)
