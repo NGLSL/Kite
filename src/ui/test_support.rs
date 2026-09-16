@@ -45,6 +45,7 @@ pub(super) fn test_state(query: &str) -> State {
         file_query_generation: 0,
         file_results: Vec::new(),
         app_query_generation: 0,
+        results_stale: false,
         index_generation: 0,
         base_hit_cache: std::sync::Arc::new(search::service::BaseHitCache::default()),
         app_search_worker: std::sync::Arc::new(search::service::AppSearchWorker::spawn()),

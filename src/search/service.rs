@@ -17,11 +17,16 @@ use crate::search::retrieval::RankedHit;
 use crate::search::RetrievalIndex;
 
 /// 基础轻量候选缓存：key = (index_gen, query_norm)。
-/// value 为 into_ranked 后、个性化/归并/截断前的候选（故事 17：不是 TopN 全集）。
+/// value 为 into_ranked 后、个性化/归并/截断前的候选（不是 TopN 全集）。
+///
+/// 代际（`epoch`）解决的是「只清空挡不住在途任务」：别名一类基础候选依赖变化时，
+/// 清空 map 还不够——正在跑的那次搜索完成时会把用旧别名算出的候选写回来，
+/// 缓存随即自我污染。写入必须携带提交时的代际，代际落后即丢弃。
 #[derive(Debug)]
 pub struct BaseHitCache {
     map: Mutex<HashMap<(u64, String), Vec<RankedHit>>>,
     capacity: usize,
+    epoch: AtomicU64,
 }
 
 impl Default for BaseHitCache {
@@ -35,6 +40,7 @@ impl BaseHitCache {
         Self {
             map: Mutex::new(HashMap::new()),
             capacity: capacity.max(1),
+            epoch: AtomicU64::new(0),
         }
     }
 
@@ -43,14 +49,39 @@ impl BaseHitCache {
         map.get(&(index_gen, query_norm.to_string())).cloned()
     }
 
-    pub fn insert(&self, index_gen: u64, query_norm: &str, base: Vec<RankedHit>) {
+    /// 当前失效代际；提交任务时读取，写回时比对。
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst)
+    }
+
+    /// 仅在缓存代际未变时写入，返回是否真正写入。
+    /// 与 [`BaseHitCache::invalidate`] 共用同一把锁，代际判断在锁内完成。
+    pub fn insert_if_epoch(
+        &self,
+        epoch: u64,
+        index_gen: u64,
+        query_norm: &str,
+        base: Vec<RankedHit>,
+    ) -> bool {
         let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        if self.epoch.load(Ordering::SeqCst) != epoch {
+            return false;
+        }
         if map.len() >= self.capacity {
             map.clear();
         }
         map.insert((index_gen, query_norm.to_string()), base);
+        true
     }
 
+    /// 清空并推进代际：既让当前缓存作废，也让在途任务的结果无法再写回。
+    pub fn invalidate(&self) {
+        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        map.clear();
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// 仅清空，不推进代际。用于索引重建：缓存键已含索引代际，旧键不会再被命中。
     pub fn clear(&self) {
         self.map.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
@@ -75,18 +106,6 @@ pub fn personalize_base_hits(
     let mut hits = base;
     crate::history::apply_personalization(&mut hits, prefs);
     hits
-}
-
-/// 个性化快照是否为空（文档化字段契约；缓存本身不再依赖此判断）。
-pub fn prefs_is_empty(prefs: Option<&Personalization>) -> bool {
-    prefs
-        .map(|p| {
-            p.usage.is_empty()
-                && p.pairs.is_empty()
-                && p.pinned.is_empty()
-                && p.demoted.is_empty()
-        })
-        .unwrap_or(true)
 }
 
 /// 最新请求槽：只保留一份，submit 覆盖旧值。
@@ -175,6 +194,8 @@ pub struct AppSearchJob {
     pub apps: Vec<AppItem>,
     pub system_entries: Vec<AppItem>,
     pub cache: Arc<BaseHitCache>,
+    /// 提交时的缓存失效代际：写回前比对，落后则不写。
+    pub cache_epoch: u64,
     /// 完成回调（generation, query, hits, elapsed_us）；取消时不会调用。
     pub on_done: Arc<dyn Fn(u64, String, Vec<SearchResult>, u128) + Send + Sync>,
 }
@@ -229,8 +250,12 @@ fn run_job(job: AppSearchJob, cancelled: &dyn Fn() -> bool) {
         match ret.search_base_ranked(&job.query, &job.user_targets, cancelled) {
             Some(base) => {
                 if !cancelled() {
-                    job.cache
-                        .insert(job.index_generation, &job.q_norm, base.clone());
+                    job.cache.insert_if_epoch(
+                        job.cache_epoch,
+                        job.index_generation,
+                        &job.q_norm,
+                        base.clone(),
+                    );
                 }
                 Some(base)
             }
@@ -315,7 +340,7 @@ mod tests {
         let base = index
             .search_base_ranked("chrome", &[], &|| false)
             .expect("base");
-        cache.insert(1, "chrome", base);
+        assert!(cache.insert_if_epoch(cache.epoch(), 1, "chrome", base));
         assert!(cache.get(1, "chrome").is_some());
         assert!(cache.get(2, "chrome").is_none());
     }
@@ -323,20 +348,28 @@ mod tests {
     #[test]
     fn cache_capacity_clears_old_entries() {
         let cache = BaseHitCache::new(2);
-        cache.insert(1, "a", vec![]);
-        cache.insert(1, "b", vec![]);
-        cache.insert(1, "c", vec![]);
+        let epoch = cache.epoch();
+        cache.insert_if_epoch(epoch, 1, "a", vec![]);
+        cache.insert_if_epoch(epoch, 1, "b", vec![]);
+        cache.insert_if_epoch(epoch, 1, "c", vec![]);
         assert_eq!(cache.len(), 1);
         assert!(cache.get(1, "c").is_some());
     }
 
     #[test]
-    fn empty_prefs_allows_cache() {
-        assert!(prefs_is_empty(None));
-        assert!(prefs_is_empty(Some(&Personalization::default())));
-        let mut p = Personalization::default();
-        p.demoted.insert("x".into());
-        assert!(!prefs_is_empty(Some(&p)));
+    fn invalidate_rejects_writeback_from_in_flight_search() {
+        let cache = BaseHitCache::new(4);
+        // 别名这类基础候选依赖变化：清空 + 推进代际
+        let epoch = cache.epoch();
+        cache.invalidate();
+
+        assert!(
+            !cache.insert_if_epoch(epoch, 1, "qa", vec![]),
+            "失效前提交的在途任务不得把旧别名结果写回"
+        );
+        assert!(cache.get(1, "qa").is_none());
+        assert!(cache.insert_if_epoch(cache.epoch(), 1, "qa", vec![]));
+        assert!(cache.get(1, "qa").is_some());
     }
 
     #[test]
@@ -359,7 +392,7 @@ mod tests {
     #[test]
     fn cache_clear_on_invalidate() {
         let cache = BaseHitCache::new(4);
-        cache.insert(1, "x", vec![]);
+        cache.insert_if_epoch(cache.epoch(), 1, "x", vec![]);
         cache.clear();
         assert!(cache.get(1, "x").is_none());
     }
@@ -431,6 +464,7 @@ mod tests {
             apps: vec![],
             system_entries: vec![],
             cache: cache.clone(),
+            cache_epoch: cache.epoch(),
             on_done: Arc::new(move |generation, _, _, _| {
                 let _ = tx.send(generation);
             }),

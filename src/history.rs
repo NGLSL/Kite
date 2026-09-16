@@ -111,8 +111,21 @@ pub fn preference_adjust(
     item_id: &str,
     quality_tier: i32,
 ) -> PreferenceAdjust {
+    preference_adjust_with_demote(prefs, item_id, quality_tier, prefs.demoted.contains(item_id))
+}
+
+/// 同 `preference_adjust`，但「是否降权」由调用方给出。
+///
+/// 归并路径必须按**等价展示组**判定降权：同组任一入口被降权即整组生效。
+/// 否则会出现「被降权的成员扣分后落选、未扣分的同组入口顶上来」，展示行分数
+/// 回到原值——用户点了降权，那一行却毫无变化。组级判定同时保证同组不重复累加。
+pub fn preference_adjust_with_demote(
+    prefs: &Personalization,
+    item_id: &str,
+    quality_tier: i32,
+    demoted: bool,
+) -> PreferenceAdjust {
     let pinned = prefs.pinned.contains(item_id);
-    let demoted = prefs.demoted.contains(item_id);
     let u = prefs.usage.get(item_id).cloned().unwrap_or_default();
     let p = prefs.pairs.get(item_id).cloned().unwrap_or_default();
     let history = history_boost(&prefs.query_norm, &u, &p, prefs.now);

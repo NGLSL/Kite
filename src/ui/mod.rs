@@ -222,9 +222,12 @@ struct State {
     file_results: Vec<SearchResult>,
     /// 应用搜索 Query 代际（后台 worker 丢弃过期结果）。
     app_query_generation: u64,
+    /// 已展示列表是否已过期：新查询提交后置位，结果落地后清除。
+    /// 过期期间列表可继续显示（避免闪空），但 Enter / Alt+数字 / 点击都不得启动它。
+    results_stale: bool,
     /// 索引代际：扫描完成后递增，用于基础命中缓存失效。
     index_generation: u64,
-    /// 基础命中缓存（仅无个性化时；有历史/Pin/降权则重算）。
+    /// 基础候选缓存：存**个性化前**的轻量候选，个性化每次按最新偏好重放。
     base_hit_cache: std::sync::Arc<search::service::BaseHitCache>,
     /// 常驻应用搜索 worker（全局唯一）。
     app_search_worker: std::sync::Arc<search::service::AppSearchWorker>,

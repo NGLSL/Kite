@@ -110,6 +110,9 @@ pub(super) fn launch_alt_digit(state: &mut State, i: usize) -> Task<Message> {
         if state.query != before {
             state.query = before;
             state.refresh_results();
+            // 列表仍是按下 Alt 前那次搜索的结果——用户按 Alt+N 要的就是它。
+            // 上面的重新提交只是为了文本与请求一致，不该让本次启动被判为过期。
+            state.results_stale = false;
         }
     }
     state.selected = i;
@@ -136,6 +139,13 @@ pub(super) fn move_selection(state: &mut State, delta: i32) -> Task<Message> {
 }
 
 pub(super) fn launch_selected(state: &mut State) -> Task<Message> {
+    // 启动动作只对「当前查询的结果」生效。新查询提交后旧列表仍在屏幕上
+    // （避免闪空），但此时启动它就会打开上一次搜索的应用。Enter / Alt+数字 /
+    // 鼠标点击都汇到这里，有效性判定因此只有一处。
+    if !state.results_are_launchable() {
+        plog("launch ignored: results belong to a previous query");
+        return Task::none();
+    }
     let Some(item) = state.results.get(state.selected).map(|r| r.item.clone()) else {
         plog("enter with empty results; ignored");
         return Task::none();
@@ -365,6 +375,16 @@ pub(super) fn load_aliases(state: &mut State) {
             state.aliases = list;
         }
     }
+}
+
+/// 别名增删改后的统一失效入口。
+///
+/// 别名目标直接决定搜索里明确匹配保护层的命中，因此基础候选缓存以及正在跑的
+/// 请求都要作废：否则同一个输入会继续按旧别名排序；而只清空缓存也不够——
+/// 在途任务完成时还会把用旧别名算出的候选写回来（由缓存代际拦住）。
+pub(super) fn refresh_after_alias_change(state: &mut State) {
+    state.base_hit_cache.invalidate();
+    state.refresh_results();
 }
 
 /// 热键录制态：下一组按键即新快捷键（Esc 取消）。

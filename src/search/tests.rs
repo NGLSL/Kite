@@ -1521,6 +1521,135 @@
     }
 
     #[test]
+    fn demote_applies_across_equivalent_launch_members() {
+        // 同一安装的 .lnk 主入口与桌面入口基础分相同，归并后只展示一行。
+        // 用户降权的是这一行；降权必须落到展示行分数上，不能被同组另一入口抵消。
+        let launch = r"C:\Program Files\Example\ksolaunch.exe";
+        let menu = sourced_item("Example", launch, "start-menu");
+        let desktop = sourced_item("Example", launch, "desktop");
+        let index = RetrievalIndex::build(&[menu.clone(), desktop.clone()], &[]);
+
+        let plain = search_with_personalization(&index, "examp", &[], None, TOP_N);
+        assert_eq!(plain.len(), 1, "同安装同启动身份应归并成一行");
+        let baseline = plain[0].score;
+
+        let mut prefs = crate::history::Personalization::default();
+        prefs.demoted.insert(menu.id.clone());
+        let hits = search_with_personalization(&index, "examp", &[], Some(&prefs), TOP_N);
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].score,
+            baseline - crate::storage::demote::DEMOTE_PENALTY,
+            "降权必须落在展示行分数上: {:?}",
+            (hits[0].item.id.as_str(), &hits[0].matched_by, hits[0].score)
+        );
+        assert!(
+            hits[0].matched_by.contains("+demote"),
+            "展示行应带降权标记: {:?}",
+            hits[0].matched_by
+        );
+        assert_eq!(
+            hits[0].item.target, plain[0].item.target,
+            "降权不得改启动目标"
+        );
+    }
+
+    #[test]
+    fn demote_group_falls_behind_equal_peer_from_another_install() {
+        // 两组同名、同启动身份形状、不同安装根（不归并），基础分相同。
+        // 只降权其中一组，该组必须整体后移。
+        let a_launch = r"C:\Program Files\Alpha\ksolaunch.exe";
+        let b_launch = r"C:\Program Files\Beta\ksolaunch.exe";
+        let a_menu = sourced_item("Example", a_launch, "start-menu");
+        let a_desktop = sourced_item("Example", a_launch, "desktop");
+        let b_menu = sourced_item("Example", b_launch, "start-menu");
+        let index = RetrievalIndex::build(&[a_menu.clone(), a_desktop, b_menu], &[]);
+
+        let plain = search_with_personalization(&index, "examp", &[], None, TOP_N);
+        assert_eq!(plain.len(), 2, "不同安装根不得归并");
+        assert_eq!(plain[0].item.target, a_launch, "先确认降权前该组位于前面");
+
+        let mut prefs = crate::history::Personalization::default();
+        prefs.demoted.insert(a_menu.id.clone());
+        let hits = search_with_personalization(&index, "examp", &[], Some(&prefs), TOP_N);
+
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            hits[0].item.target,
+            b_launch,
+            "被降权的展示组应后移: {:?}",
+            hits.iter()
+                .map(|h| (&h.item.target, h.score))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(hits[1].item.target, a_launch);
+    }
+
+    #[test]
+    fn group_demote_is_not_stacked_and_is_restorable() {
+        let launch = r"C:\Program Files\Example\ksolaunch.exe";
+        let menu = sourced_item("Example", launch, "start-menu");
+        let desktop = sourced_item("Example", launch, "desktop");
+        let index = RetrievalIndex::build(&[menu.clone(), desktop.clone()], &[]);
+        let baseline = search_with_personalization(&index, "examp", &[], None, TOP_N)[0].score;
+
+        // 组内两个入口都被降权：仍只扣一次
+        let mut both = crate::history::Personalization::default();
+        both.demoted.insert(menu.id.clone());
+        both.demoted.insert(desktop.id.clone());
+        let stacked = search_with_personalization(&index, "examp", &[], Some(&both), TOP_N);
+        assert_eq!(
+            stacked[0].score,
+            baseline - crate::storage::demote::DEMOTE_PENALTY,
+            "同组降权不得重复累加"
+        );
+
+        // 恢复优先级后回到原分
+        let restored = search_with_personalization(
+            &index,
+            "examp",
+            &[],
+            Some(&crate::history::Personalization::default()),
+            TOP_N,
+        );
+        assert_eq!(restored[0].score, baseline, "恢复后应回到原序");
+    }
+
+    #[test]
+    fn alias_target_change_reorders_results() {
+        // 别名目标直接决定明确匹配保护层的命中：改指向后同一输入必须立刻改序。
+        // 这也是基础候选缓存必须随别名失效的原因——候选集本身随别名变化。
+        let apps = vec![
+            named_item("alpha", "Alpha Tool"),
+            named_item("beta", "Beta Tool"),
+        ];
+        let index = RetrievalIndex::build(&apps, &[]);
+        let target = |id: &str, name: &str| UserTarget {
+            id: Some(id.into()),
+            name: name.into(),
+        };
+
+        let hits = search_with_personalization(
+            &index,
+            "qa",
+            &[target("alpha", "Alpha Tool")],
+            None,
+            TOP_N,
+        );
+        assert_eq!(hits[0].item.id, "alpha", "别名指向 alpha 时 alpha 应排最前");
+
+        let hits = search_with_personalization(
+            &index,
+            "qa",
+            &[target("beta", "Beta Tool")],
+            None,
+            TOP_N,
+        );
+        assert_eq!(hits[0].item.id, "beta", "改指 beta 后同一输入应立即改序");
+    }
+
+    #[test]
     fn single_char_hits_inner_name_and_pinyin_initial() {
         let apps = vec![
             named_item("notepad", "Notepad"),

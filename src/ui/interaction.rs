@@ -393,6 +393,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             state.alias_candidates.clear();
             state.alias_pick = None;
             load_aliases(state);
+            refresh_after_alias_change(state);
             flash(state, "别名已保存")
         }
         Message::AliasRemove(alias) => {
@@ -400,6 +401,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 let _ = db.remove_alias(&alias);
             }
             load_aliases(state);
+            refresh_after_alias_change(state);
             flash(state, "别名已删除")
         }
         Message::PortableDirInputChanged(value) => {

@@ -718,21 +718,59 @@ impl RetrievalIndex {
     }
 
     /// 只写偏好信息与最终分；排序交给统一比较器，不在个性化阶段分叉。
+    ///
+    /// 降权按**等价展示组**解释：组内任一入口被用户降权，整组一致扣一次分。
+    /// 与展示代表的选择共用同一份等价组信息（`launch_rep` / `launch_members`），
+    /// 不新增第二套等价判定。
     fn apply_personalization_boosts(
         &self,
         ranked: &mut [RankedHit],
         prefs: &crate::history::Personalization,
     ) {
-        use crate::history::{apply_preference_tags, preference_adjust};
+        use crate::history::{apply_preference_tags, preference_adjust_with_demote};
         for hit in ranked.iter_mut() {
             let Some(doc) = self.doc(hit.doc_id) else {
                 continue;
             };
-            let adj = preference_adjust(prefs, &doc.item.id, hit.quality_tier);
+            let demoted = self.group_is_demoted(hit.doc_id, &prefs.demoted);
+            let adj =
+                preference_adjust_with_demote(prefs, &doc.item.id, hit.quality_tier, demoted);
             let base = hit.score;
             hit.score = base + adj.boost;
             hit.matched_by = apply_preference_tags(&hit.matched_by, &adj);
         }
+    }
+
+    /// 等价启动展示组的代表（未入组时就是自己）。
+    fn group_rep_of(&self, doc_id: DocId) -> DocId {
+        self.launch_rep.get(&doc_id).copied().unwrap_or(doc_id)
+    }
+
+    /// 等价启动展示组的成员（含代表自己）；未入组时为空。
+    fn group_members_of(&self, rep: DocId) -> &[DocId] {
+        self.launch_members
+            .get(&rep)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// 该文档所属的等价启动展示组是否被降权：组内任一成员命中即整组生效。
+    /// 单成员组退化为「查自己」，与逐 id 判断等价。
+    fn group_is_demoted(
+        &self,
+        doc_id: DocId,
+        demoted: &std::collections::HashSet<String>,
+    ) -> bool {
+        let members = self.group_members_of(self.group_rep_of(doc_id));
+        if members.is_empty() {
+            return self
+                .doc(doc_id)
+                .is_some_and(|d| demoted.contains(&d.item.id));
+        }
+        members
+            .iter()
+            .copied()
+            .any(|id| self.doc(id).is_some_and(|d| demoted.contains(&d.item.id)))
     }
 
     /// 按预计算等价组折叠：组内相关性用统一比较器，启动配置固定主入口。
@@ -746,11 +784,7 @@ impl RetrievalIndex {
 
         let mut by_rep: HashMap<DocId, Vec<RankedHit>> = HashMap::new();
         for hit in ranked {
-            let rep = self
-                .launch_rep
-                .get(&hit.doc_id)
-                .copied()
-                .unwrap_or(hit.doc_id);
+            let rep = self.group_rep_of(hit.doc_id);
             by_rep.entry(rep).or_default().push(hit);
         }
 
@@ -762,11 +796,7 @@ impl RetrievalIndex {
             // 用户绑定：组内钉选成员优先，且不要求本条查询恰好召回它
             let mut launch_doc_id = static_rep;
             if let Some(prefs) = personalization {
-                let group = self
-                    .launch_members
-                    .get(&static_rep)
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
+                let group = self.group_members_of(static_rep);
                 let group_pinned = group.iter().copied().find(|id| {
                     self.doc(*id)
                         .is_some_and(|d| prefs.pinned.contains(&d.item.id))
@@ -808,11 +838,7 @@ impl RetrievalIndex {
 
             // 图标：启动代表缓存 → 组内其他成员缓存；无缓存则保留主入口提取源
             if !rep.has_icon {
-                let group = self
-                    .launch_members
-                    .get(&static_rep)
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
+                let group = self.group_members_of(static_rep);
                 let icon_hit = group
                     .iter()
                     .copied()
