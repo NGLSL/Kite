@@ -642,7 +642,7 @@ impl RetrievalIndex {
         Some(self.into_ranked(scored))
     }
 
-    /// 在基础候选上：个性化 → 启动组归并 → 排序 → 截断。
+    /// 在基础候选上：个性化 → 命令弱匹配降噪 → 启动组归并 → 排序 → 截断。
     pub fn finish_ranked_from_base(
         &self,
         base: Vec<RankedHit>,
@@ -653,6 +653,7 @@ impl RetrievalIndex {
         if let Some(prefs) = personalization {
             self.apply_personalization_boosts(&mut ranked, prefs);
         }
+        demote_weak_command_aliases(&mut ranked, personalization);
         let mut ranked = self.collapse_launch_groups(ranked, personalization);
         ranked.sort_by(cmp_ranked_hit);
         ranked.truncate(max_results);
@@ -981,6 +982,47 @@ fn strip_shell_target(target: &str) -> &str {
     t.strip_prefix("shell:AppsFolder\\")
         .or_else(|| t.strip_prefix("shell:appsfolder\\"))
         .unwrap_or(t)
+}
+
+/// 非空 Query 命令 Alias 降噪：
+/// - 精确 / 前缀 / 词匹配仍可展示（精确 `7z` 可用）；
+/// - 短 Query（≤2 字符）或弱匹配层沉底，避免 shims 刷屏。
+/// 不删除索引项，不改启动 target。
+/// 尊重明确匹配保护：`quality_tier <= PROTECTED_TIER_MAX` 不因命令降噪后移。
+fn demote_weak_command_aliases(
+    ranked: &mut [RankedHit],
+    personalization: Option<&crate::history::Personalization>,
+) {
+    use crate::model::{source_layer, SourceLayer};
+    use crate::history::PROTECTED_TIER_MAX;
+    /// 弱匹配层阈值：5 起为拼音/词前缀/子串/模糊（见 history::quality_tier）。
+    const WEAK_TIER_MIN: i32 = 5;
+    /// 降噪沉底层：排在正式应用之后。
+    const COMMAND_NOISE_TIER: i32 = 9;
+    /// 弱命令候选扣分，避免同层内仍压过正式应用。
+    const COMMAND_NOISE_SCORE_PENALTY: i32 = 250;
+    /// 短 Query 字符数上限。
+    const SHORT_QUERY_MAX_CHARS: usize = 2;
+
+    let query_norm = personalization
+        .map(|p| p.query_norm.as_str())
+        .unwrap_or("");
+    let short_query = !query_norm.is_empty() && query_norm.chars().count() <= SHORT_QUERY_MAX_CHARS;
+    for hit in ranked.iter_mut() {
+        if source_layer(&hit.source) != SourceLayer::CommandAlias {
+            continue;
+        }
+        // 明确匹配保护优先于命令降噪（CONTEXT / 规格）。
+        if hit.quality_tier <= PROTECTED_TIER_MAX {
+            continue;
+        }
+        let weak = hit.quality_tier >= WEAK_TIER_MIN
+            || (short_query && hit.quality_tier > PROTECTED_TIER_MAX);
+        if weak {
+            hit.quality_tier = COMMAND_NOISE_TIER;
+            hit.score = hit.score.saturating_sub(COMMAND_NOISE_SCORE_PENALTY);
+        }
+    }
 }
 
 /// 索引快照预计算：成员 → 主入口，以及主入口 → 成员列表。

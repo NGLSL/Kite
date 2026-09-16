@@ -157,7 +157,9 @@ function Wait-IndexReady([int]$procId, [int]$timeoutMs, [long]$fromOffset) {
                         $buf = New-Object byte[] ($len - $fromOffset)
                         $read = $fs.Read($buf, 0, $buf.Length)
                         $text = [System.Text.Encoding]::UTF8.GetString($buf, 0, $read)
-                        if ($text -match 'index complete n=\d+') { return $true }
+                        # Warm Start：index complete；Cold Start：bootstrap published 也算首次可搜索
+                        if ($text -match 'index (bootstrap|complete) n=\d+') { return $true }
+                        if ($text -match 'warm start from snapshot') { return $true }
                     }
                 } finally { $fs.Close() }
             } catch {
@@ -167,6 +169,58 @@ function Wait-IndexReady([int]$procId, [int]$timeoutMs, [long]$fromOffset) {
         Start-Sleep -Milliseconds 200
     }
     return $false
+}
+
+function Get-StartupPhases([long]$fromOffset, [datetime]$processStartUtc) {
+    $log = Join-Path $env:APPDATA "com.kite.launcher\kite.log"
+    $out = [ordered]@{
+        time_to_window_ready_ms = $null
+        time_to_first_searchable_ms = $null
+        time_to_full_index_ms = $null
+        warm_start = $false
+        bootstrap_seen = $false
+        full_seen = $false
+    }
+    if (-not (Test-Path $log)) { return [pscustomobject]$out }
+    $text = ""
+    try {
+        $fs = [System.IO.File]::Open($log, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $len = $fs.Length
+            if ($len -lt $fromOffset) { $fromOffset = 0 }
+            if ($len -gt $fromOffset) {
+                [void]$fs.Seek($fromOffset, [System.IO.SeekOrigin]::Begin)
+                $buf = New-Object byte[] ($len - $fromOffset)
+                $read = $fs.Read($buf, 0, $buf.Length)
+                $text = [System.Text.Encoding]::UTF8.GetString($buf, 0, $read)
+            }
+        } finally { $fs.Close() }
+    } catch { return [pscustomobject]$out }
+
+    # kite.log 行格式：[unix_ms] message
+    $msEpoch = [long]($processStartUtc.ToUniversalTime() - [datetime]'1970-01-01Z').TotalMilliseconds
+    function Resolve-MarkerOffset([string]$pattern) {
+        foreach ($line in ($text -split "`n")) {
+            if ($line -match '^\[(\d+)\]\s+' ) {
+                $ts = [long]$Matches[1]
+                $rest = $line.Substring($line.IndexOf(']') + 1)
+                if ($rest -match $pattern) { return [math]::Max(0, $ts - $msEpoch) }
+            }
+        }
+        return $null
+    }
+
+    if ($text -match 'warm start from snapshot') { $out.warm_start = $true }
+    if ($text -match 'index bootstrap') { $out.bootstrap_seen = $true }
+    if ($text -match 'index snapshot saved|index complete') { $out.full_seen = $true }
+
+    $first = Resolve-MarkerOffset 'index bootstrap n=|warm start from snapshot|index complete n='
+    $full = Resolve-MarkerOffset 'index snapshot saved|index complete n='
+    if ($first -ne $null) { $out.time_to_first_searchable_ms = $first }
+    if ($full -ne $null) { $out.time_to_full_index_ms = $full }
+    # 窗口就绪：进程启动后首次可见由调用方写入；这里仅作日志侧补充
+    $out.time_to_window_ready_ms = Resolve-MarkerOffset 'window ready'
+    return [pscustomobject]$out
 }
 
 if (-not $ExePath) {
@@ -193,17 +247,35 @@ $logLenBefore = 0
 if (Test-Path $logPath) { $logLenBefore = (Get-Item $logPath).Length }
 
 Write-Host "Starting $ExePath ..."
+$startUtc = [DateTime]::UtcNow
 $proc = Start-Process -FilePath $ExePath -PassThru
 Start-Sleep -Milliseconds 800
 if ($proc.HasExited) { throw "Kite exited immediately code=$($proc.ExitCode)" }
+$procStartUtc = $proc.StartTime.ToUniversalTime()
+
+# 首次唤起到窗口可见（time_to_window_ready 的实测部分）
+Send-AltSpace
+$timeToWindowReadyMs = Wait-KiteVisible -procId $proc.Id -timeoutMs 3000
+if ($timeToWindowReadyMs -ge 0) { Send-Esc; [void](Wait-KiteHidden -procId $proc.Id -timeoutMs 500) }
 
 Write-Host "Waiting for index ready (pid=$($proc.Id)) ..."
 $ready = Wait-IndexReady -procId $proc.Id -timeoutMs 60000 -fromOffset $logLenBefore
 if (-not $ready) { Write-Warning "Index-ready marker not observed; continuing after extra wait" ; Start-Sleep -Seconds 3 }
 
+$phases = Get-StartupPhases -fromOffset $logLenBefore -processStartUtc $procStartUtc
+if ($phases.time_to_window_ready_ms -eq $null -and $timeToWindowReadyMs -ge 0) {
+    $phases | Add-Member -NotePropertyName measured_window_ready_ms -NotePropertyValue ([math]::Round($timeToWindowReadyMs, 1)) -Force
+}
+Write-Host ("Startup phases: warm={0} first_searchable={1}ms full={2}ms" -f `
+    $phases.warm_start, $phases.time_to_first_searchable_ms, $phases.time_to_full_index_ms)
+
 # 索引发布后仍有收尾工作（见文件头说明）：等到它结束，静默样本才有意义。
+# 同时记录 settle 窗口 CPU，识别 Full 之后的空转。
 Write-Host ("Settling {0}s before the idle baseline ..." -f $SettleSeconds)
+$settleBefore = (Get-Process -Id $proc.Id).TotalProcessorTime
 Start-Sleep -Seconds $SettleSeconds
+$settleAfter = (Get-Process -Id $proc.Id).TotalProcessorTime
+$postIndexSettleCpuS = [math]::Round(($settleAfter - $settleBefore).TotalSeconds, 3)
 
 # Stable idle baseline
 $before = Get-Process -Id $proc.Id
@@ -314,6 +386,13 @@ $summary = [pscustomobject]@{
     idle_seconds = $IdleSeconds
     settle_seconds = $SettleSeconds
     idle_cpu_delta_s = [math]::Round($cpuDelta, 3)
+    post_index_settle_cpu_s = $postIndexSettleCpuS
+    time_to_window_ready_ms = $(if ($timeToWindowReadyMs -ge 0) { [math]::Round($timeToWindowReadyMs, 1) } else { $null })
+    time_to_first_searchable_ms = $phases.time_to_first_searchable_ms
+    time_to_full_index_ms = $phases.time_to_full_index_ms
+    warm_start = $phases.warm_start
+    bootstrap_seen = $phases.bootstrap_seen
+    full_seen = $phases.full_seen
     idle_private_mb = $privateIdle
     idle_working_mb = $workingIdle
     final_private_mb = $finalPrivate

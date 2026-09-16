@@ -25,6 +25,7 @@ pub fn run() -> iced::Result {
     ));
 
     let _ = BOOT_DIR.set(data_dir.clone());
+    app::snapshot::init(data_dir.clone());
     iced::application(boot_entry, update, view)
         .title("Kite")
         .window(Settings {
@@ -95,6 +96,14 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         .ok();
 
     let index = std::sync::Arc::new(Mutex::new(AppIndex::empty()));
+    // Warm Start：兼容 last-good 直接恢复可搜索快照；失败则保持 empty，走 Cold Bootstrap。
+    if let Some(loaded) = app::snapshot::load() {
+        let n = loaded.apps.len();
+        *index
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = loaded;
+        plog(&format!("boot restored last-good snapshot n={n}"));
+    }
     let saved_settings = history_db
         .as_ref()
         .map(HistoryDb::load_settings)

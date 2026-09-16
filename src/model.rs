@@ -136,3 +136,31 @@ impl AppIndex {
         self.retrieval = Some(std::sync::Arc::new(index));
     }
 }
+
+/// 索引来源的产品分层：用于空 Query 可见性与结果降噪，不表示删除索引。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceLayer {
+    /// 正式应用入口：Start Menu / Desktop / UWP 等。
+    Formal,
+    /// 补充发现：App Paths / Uninstall / portable。
+    Supplemental,
+    /// 命令 Alias：Scoop / WindowsApps / WinGet / Chocolatey。
+    CommandAlias,
+    /// 系统内置入口。
+    System,
+}
+
+/// 由扫描 source 字符串映射到产品分层。未知来源按正式入口处理，避免误杀。
+pub fn source_layer(source: &str) -> SourceLayer {
+    match source {
+        "commands" | "scoop" => SourceLayer::CommandAlias,
+        "app-paths" | "uninstall" | "portable" => SourceLayer::Supplemental,
+        "builtin-system" | "win-settings" => SourceLayer::System,
+        _ => SourceLayer::Formal,
+    }
+}
+
+/// 空 Query 默认列表是否隐藏该来源（Pin/最近使用仍可覆盖）。
+pub fn is_hidden_on_empty_query(source: &str) -> bool {
+    matches!(source_layer(source), SourceLayer::CommandAlias)
+}

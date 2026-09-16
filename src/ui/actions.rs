@@ -363,23 +363,34 @@ pub(super) fn show_launcher(state: &mut State) -> Task<Message> {
         plog("show before window ready; ignored");
         return Task::none();
     };
+    // 下次打开时采用挂起的 Full，避免可见期间打断列表。
+    super::interaction::apply_pending_full(state);
     state.hidden = false;
     state.epoch += 1;
+    // 每次唤起按鼠标所在 monitor 重新定位（uTools 式多显示器跟随）。
+    let place = system::window_place::position_on_cursor_monitor(WINDOW_W, WINDOW_H);
     if state.files_mode {
         state.request_file_search();
     }
     state.refresh_results();
     // 对齐 Kite：唤起即响（SND_ASYNC，不阻塞显示）
     system::sound::play_open();
-    plog(&format!("show issued epoch={}", state.epoch));
-    Task::batch([
+    plog(&format!(
+        "show issued epoch={} place={place:?}",
+        state.epoch
+    ));
+    let mut tasks = vec![
         // 搜索窗口只需要前台焦点，不应持续置顶，否则会压住截图层和其它全局快捷键 UI。
         window::set_level(id, window::Level::Normal),
         window::set_mode(id, window::Mode::Windowed),
         window::gain_focus(id),
         iced::widget::operation::focus(state.input_id.clone()),
         sync_scroll(state),
-    ])
+    ];
+    if let Some((x, y)) = place {
+        tasks.push(window::move_to(id, iced::Point::new(x, y)));
+    }
+    Task::batch(tasks)
 }
 
 pub(super) fn hide(state: &mut State) {
@@ -391,6 +402,8 @@ pub(super) fn hide(state: &mut State) {
     state.menu = None;
     state.query.clear();
     state.invalidate_file_search();
+    // 隐藏后采用后台 Full，用户下次看到的就是新快照。
+    super::interaction::apply_pending_full(state);
     state.refresh_results();
 }
 

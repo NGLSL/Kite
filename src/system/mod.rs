@@ -13,3 +13,4 @@ pub mod search_engine;
 pub mod singleton;
 pub mod sound;
 pub mod update;
+pub mod window_place;

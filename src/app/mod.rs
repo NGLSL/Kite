@@ -5,6 +5,7 @@ pub mod builtin;
 mod control_panel;
 mod launcher;
 pub mod scanner;
+pub mod snapshot;
 pub mod uwp;
 pub mod watch;
 pub mod web;

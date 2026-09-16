@@ -843,6 +843,95 @@
     }
 
     #[test]
+    fn empty_query_hides_bare_command_aliases() {
+        let formal = sourced_item("7-Zip File Manager", r"C:\7z\7zFM.exe", "start-menu");
+        let command = sourced_item("7z", r"C:\tools\7z.exe", "commands");
+        let scoop = sourced_item("ripgrep", r"C:\scoop\shims\rg.exe", "scoop");
+        let apps = vec![command, scoop, formal.clone()];
+        let hits = order_by_recent(&apps, &[], &[], 10);
+        assert_eq!(hits.len(), 1, "empty query must not flood with command aliases");
+        assert_eq!(hits[0].item.id, formal.id);
+    }
+
+    #[test]
+    fn empty_query_keeps_pinned_or_recent_command_aliases() {
+        let formal = sourced_item("Code", r"C:\Code\Code.exe", "start-menu");
+        let command = sourced_item("rg", r"C:\tools\rg.exe", "commands");
+        let pinned_id = command.id.clone();
+        let apps = vec![command, formal];
+        let hits = order_by_recent(&apps, &[], &[pinned_id.clone()], 10);
+        assert_eq!(hits[0].item.id, pinned_id);
+        assert_eq!(hits[0].matched_by, "pinned");
+
+        let hits = order_by_recent(&apps, &[pinned_id.clone()], &[], 10);
+        assert_eq!(hits[0].item.id, pinned_id);
+        assert_eq!(hits[0].matched_by, "recent");
+    }
+
+    #[test]
+    fn exact_command_query_still_recalls_command_entry() {
+        let formal = sourced_item(
+            "7-Zip File Manager",
+            r"C:\Program Files\7-Zip\7zFM.exe",
+            "start-menu",
+        );
+        let command = sourced_item("7z", r"C:\tools\7z.exe", "commands");
+        let index = RetrievalIndex::build(&[formal, command], &[]);
+        let hits = search_with_personalization(&index, "7z", &[], None, TOP_N);
+        assert!(
+            hits.iter().any(|h| h.item.source == "commands" && h.item.name == "7z"),
+            "exact command name must remain launchable: {:?}",
+            hits.iter().map(|h| &h.item.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn short_query_prefers_formal_app_over_command_shims() {
+        let formal = sourced_item(
+            "7-Zip File Manager",
+            r"C:\Program Files\7-Zip\7zFM.exe",
+            "start-menu",
+        );
+        let cmd_7z = sourced_item("7z", r"C:\tools\7z.exe", "commands");
+        let cmd_7zfm = sourced_item("7zfm", r"C:\tools\7zfm.exe", "commands");
+        let cmd_7zg = sourced_item("7zg", r"C:\tools\7zg.exe", "commands");
+        let index =
+            RetrievalIndex::build(&[cmd_7z, cmd_7zfm, cmd_7zg, formal.clone()], &[]);
+        let hits = search_with_personalization(&index, "7", &[], None, TOP_N);
+        assert!(
+            !hits.is_empty(),
+            "short query should still return something"
+        );
+        assert_eq!(
+            hits[0].item.id, formal.id,
+            "short query must rank formal 7-Zip first, got {:?}",
+            hits.iter().map(|h| (&h.item.name, &h.item.source)).collect::<Vec<_>>()
+        );
+        let command_rows = hits
+            .iter()
+            .filter(|h| h.item.source == "commands")
+            .count();
+        assert!(
+            command_rows == 0 || hits.iter().position(|h| h.item.source == "commands").unwrap() > 0,
+            "command shims must not dominate short-query head"
+        );
+    }
+
+    #[test]
+    fn source_layer_classifies_formal_supplemental_and_commands() {
+        use crate::model::{source_layer, SourceLayer};
+        assert_eq!(source_layer("start-menu"), SourceLayer::Formal);
+        assert_eq!(source_layer("desktop"), SourceLayer::Formal);
+        assert_eq!(source_layer("uwp"), SourceLayer::Formal);
+        assert_eq!(source_layer("app-paths"), SourceLayer::Supplemental);
+        assert_eq!(source_layer("uninstall"), SourceLayer::Supplemental);
+        assert_eq!(source_layer("commands"), SourceLayer::CommandAlias);
+        assert_eq!(source_layer("scoop"), SourceLayer::CommandAlias);
+        assert_eq!(source_layer("builtin-system"), SourceLayer::System);
+        assert_eq!(source_layer("unknown-future"), SourceLayer::Formal);
+    }
+
+    #[test]
     fn name_candidates_rank_prefix_over_contains() {
         let apps: Vec<_> = ["Google Chrome", "Chrome Remote Desktop", "My Chrome Box"]
             .iter()

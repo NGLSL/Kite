@@ -61,12 +61,13 @@ pub fn view(state: &State) -> Element<'_, Message> {
             ..container::Style::default()
         });
 
-    // 右键菜单以 overlay 叠加（css .ctx-menu）
+    // 右键菜单以 overlay 叠加；无菜单时 overlay 为空，保持 Scrollable 在树中的位置不变。
     let root: Element<'_, Message> = root.into();
-    match &state.menu {
-        Some((item, x, y)) => stack![root, menu_overlay(state, item, *x, *y)].into(),
-        None => root,
-    }
+    let overlay: Element<'_, Message> = match &state.menu {
+        Some((item, x, y)) => menu_overlay(state, item, *x, *y),
+        None => Space::new().width(Length::Fill).height(Length::Fill).into(),
+    };
+    stack![root, overlay].into()
 }
 
 fn divider() -> Element<'static, Message> {
@@ -209,10 +210,16 @@ fn results_area(state: &State) -> Element<'_, Message> {
         .id(scroll_id())
         .width(Length::Fill)
         .height(Length::Fill);
+    // 右侧 gutter：避免 scrollbar 盖住 Alt+N 等行内内容。
     container(scroller)
         .width(Length::Fill)
         .height(Length::Fill)
-        .padding(8.0)
+        .padding(Padding {
+            top: 8.0,
+            right: 14.0,
+            bottom: 8.0,
+            left: 8.0,
+        })
         .into()
 }
 
@@ -250,11 +257,23 @@ fn item_row<'a>(
         });
 
     // 结果只展示用户可识别的名称；AUMID、exe 名和路径仍保存在 item 中供启动和右键操作。
-    let body = text(r.item.display_name.clone())
+    // 选中/hover 时第二行弱显示 target 路径；行高保持 52px，不因路径动态增高。
+    let name_line = text(r.item.display_name.clone())
         .size(15.0)
         .font(name_font())
         .color(TEXT)
         .width(Length::Fill);
+    let body: Element<'_, Message> = if active {
+        let path = truncate_middle(&r.item.target, 56);
+        column![
+            name_line,
+            text(path).size(11.0).color(TEXT_MUTED).width(Length::Fill)
+        ]
+        .spacing(1.0)
+        .into()
+    } else {
+        name_line.into()
+    };
 
     let hint_text = if i < 9 {
         if pinned {
@@ -298,7 +317,8 @@ fn item_row<'a>(
             .height(52.0)
             .padding(Padding {
                 top: 8.0,
-                right: 12.0,
+                // 右侧留给 scrollbar（约 10px）+ 视觉留白，避免 Alt+N 贴边。
+                right: 22.0,
                 bottom: 8.0,
                 left: 14.0
             })
@@ -331,7 +351,7 @@ fn item_row<'a>(
 }
 
 /// 底部快捷键条（css .footer-bar）：kbd 胶囊 + 品牌位（快捷键标签）。
-fn footer_bar(_state: &State) -> Element<'static, Message> {
+fn footer_bar(state: &State) -> Element<'static, Message> {
     fn kbd(s: &'static str) -> Element<'static, Message> {
         container(text(s).size(10.0).color(TEXT))
             .padding([1.0, 5.0])
@@ -352,12 +372,17 @@ fn footer_bar(_state: &State) -> Element<'static, Message> {
             .align_y(alignment::Alignment::Center)
             .into()
     }
+    let hotkey_label = if state.hotkey_label.is_empty() {
+        "Alt + Space".to_string()
+    } else {
+        state.hotkey_label.clone()
+    };
     let bar = row![
         pair("↑↓", "选择"),
         pair("Enter", "打开"),
         pair("Esc", "关闭"),
         Space::new().width(Length::Fill),
-        text("Alt + Space").size(11.0).color(TEXT_MUTED),
+        text(hotkey_label).size(11.0).color(TEXT_MUTED),
     ]
     .spacing(14.0)
     .align_y(alignment::Alignment::Center);
@@ -504,6 +529,19 @@ impl canvas::Program<Message> for Magnifier {
 
 fn first_char(s: &str) -> String {
     s.chars().next().map(|c| c.to_string()).unwrap_or_default()
+}
+
+/// 路径过长时中间省略，保留首尾可辨识片段。
+fn truncate_middle(s: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_chars {
+        return s.to_string();
+    }
+    let keep_head = max_chars.saturating_sub(1) / 2;
+    let keep_tail = max_chars.saturating_sub(1) - keep_head;
+    let head: String = chars[..keep_head].iter().collect();
+    let tail: String = chars[chars.len() - keep_tail..].iter().collect();
+    format!("{head}…{tail}")
 }
 
 // container/text_input 等类型仅用于签名约束的引用，避免未使用告警

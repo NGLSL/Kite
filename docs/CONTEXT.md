@@ -18,3 +18,4 @@
 | **匹配位置证据** | 命中在原名称上的 start/span/gaps/edit_cost；不可映射记未知，不当作最优起点 |
 | **搜索代际** | Query 代际 + 索引代际；过期结果不得合并进当前列表 |
 | **评分诊断** | 命中字段→验证方式→分/偏好标签→归并入口的调试明细，不改变排序 |
+| **SourceLayer** | 索引来源的产品分层：Formal（开始菜单/桌面/UWP）、Supplemental（App Paths/Uninstall/portable）、CommandAlias（Scoop/WindowsApps/WinGet/Chocolatey）、System（内置系统入口）。用于空 Query 可见性与弱匹配降噪，**不是**用户 Demote/Alias |

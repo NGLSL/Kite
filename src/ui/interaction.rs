@@ -491,24 +491,10 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::FullIndexReady(n) => {
             plog(&format!("full index ready n={n}"));
             state.index_ready = true;
-            // 旧含 source 的 id 迁移到 stable id，保留 Pin/历史/Alias
-            if let Some(db) = &mut state.history {
-                let items: Vec<(String, String, Option<String>)> = {
-                    let g = state.index.lock().unwrap_or_else(|e| e.into_inner());
-                    g.apps
-                        .iter()
-                        .map(|a| (a.id.clone(), a.target.clone(), a.args.clone()))
-                        .collect()
-                };
-                let moved = db.migrate_legacy_ids_for_items(&items);
-                if moved > 0 {
-                    plog(&format!("identity remap moved={moved}"));
-                }
-                state.pinned = db.pinned_ids().into_iter().collect();
+            // 可见时不打断；用户主动重扫则立即采用，避免「扫描完成」与列表不一致。
+            if state.hidden || state.rescan_pending {
+                apply_pending_full(state);
             }
-            state.index_generation = state.index_generation.wrapping_add(1);
-            state.base_hit_cache.clear();
-            state.refresh_results();
             if std::mem::take(&mut state.rescan_pending) {
                 flash(state, &format!("扫描完成，共 {n} 条"))
             } else {
@@ -516,6 +502,44 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             }
         }
     }
+}
+
+/// 采用后台 Full 挂起快照；Launcher 可见期间不调用。
+pub(super) fn apply_pending_full(state: &mut State) {
+    let Some(full) = super::backend::take_pending_full() else {
+        return;
+    };
+    let count = full.apps.len();
+    let applied = state
+        .index
+        .lock()
+        .map(|mut current| {
+            *current = full;
+            true
+        })
+        .unwrap_or(false);
+    if !applied {
+        return;
+    }
+    plog(&format!("applied pending full snapshot n={count}"));
+    // 旧含 source 的 id 迁移到 stable id，保留 Pin/历史/Alias
+    if let Some(db) = &mut state.history {
+        let items: Vec<(String, String, Option<String>)> = {
+            let g = state.index.lock().unwrap_or_else(|e| e.into_inner());
+            g.apps
+                .iter()
+                .map(|a| (a.id.clone(), a.target.clone(), a.args.clone()))
+                .collect()
+        };
+        let moved = db.migrate_legacy_ids_for_items(&items);
+        if moved > 0 {
+            plog(&format!("identity remap moved={moved}"));
+        }
+        state.pinned = db.pinned_ids().into_iter().collect();
+    }
+    state.index_generation = state.index_generation.wrapping_add(1);
+    state.base_hit_cache.clear();
+    state.refresh_results();
 }
 
 fn capture_menu_item(results: &[SearchResult], index: usize) -> Option<AppItem> {
