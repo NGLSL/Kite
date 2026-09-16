@@ -3,14 +3,16 @@
     use super::*;
 
     fn item(name: &str) -> AppItem {
+        // 测试默认走正式入口，避免未知 source 被当成 Discovery 层。
         let mut it = AppItem::scanned(
             name.to_string(),
             name.to_string(),
             format!("C:\\fake\\{name}.exe"),
             None,
             None,
-            "test",
+            "start-menu",
         );
+        it.is_lnk = true;
         it.attach_search_fields();
         it
     }
@@ -854,6 +856,61 @@
     }
 
     #[test]
+    fn empty_query_shows_portable_as_formal_and_hides_discovery() {
+        let formal = sourced_item("Code", r"C:\Code\Code.exe", "start-menu");
+        let portable = sourced_item("Portable IDE", r"D:\Apps\IDE\ide.exe", "portable");
+        let app_path = sourced_item("HelperTool", r"C:\Apps\Helper\helper.exe", "app-paths");
+        let apps = vec![formal.clone(), portable.clone(), app_path.clone()];
+        let hits = order_by_recent(&apps, &[], &[], 10);
+        let ids: Vec<_> = hits.iter().map(|h| h.item.id.as_str()).collect();
+        assert!(ids.contains(&formal.id.as_str()));
+        assert!(
+            ids.contains(&portable.id.as_str()),
+            "portable is Tier A formal on empty query: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&app_path.id.as_str()) && hits.len() == 2,
+            "unabsorbed app-paths must not fill empty query: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn empty_query_hides_system_folder_noise_but_keeps_real_apps() {
+        let formal = sourced_item("Code", r"C:\Code\Code.exe", "start-menu");
+        let admin_tools = sourced_item(
+            "Administrative Tools",
+            r"C:\WINDOWS\system32\control.exe",
+            "start-menu",
+        );
+        let narrator = sourced_item(
+            "Narrator",
+            r"C:\WINDOWS\system32\narrator.exe",
+            "start-menu",
+        );
+        let powershell = sourced_item(
+            "Windows PowerShell",
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            "start-menu",
+        );
+        let apps = vec![
+            admin_tools.clone(),
+            formal.clone(),
+            narrator.clone(),
+            powershell.clone(),
+        ];
+        let hits = order_by_recent(&apps, &[], &[], 10);
+        let ids: Vec<_> = hits.iter().map(|h| h.item.id.as_str()).collect();
+        assert!(
+            !ids.contains(&admin_tools.id.as_str())
+                && !ids.contains(&narrator.id.as_str())
+                && !ids.contains(&powershell.id.as_str()),
+            "System32 formal entries must not fill empty query: {ids:?}"
+        );
+        assert_eq!(hits.len(), 1);
+        assert!(ids.contains(&formal.id.as_str()));
+    }
+
+    #[test]
     fn empty_query_keeps_pinned_or_recent_command_aliases() {
         let formal = sourced_item("Code", r"C:\Code\Code.exe", "start-menu");
         let command = sourced_item("rg", r"C:\tools\rg.exe", "commands");
@@ -918,17 +975,57 @@
     }
 
     #[test]
+    fn short_query_prefers_formal_over_discovery_app_paths() {
+        let formal = sourced_item(
+            "7-Zip File Manager",
+            r"C:\Program Files\7-Zip\7zFM.exe",
+            "start-menu",
+        );
+        let discovery = sourced_item("7zfm", r"C:\Program Files\7-Zip\7zFM.exe", "app-paths");
+        let index = RetrievalIndex::build(&[discovery, formal.clone()], &[]);
+        let hits = search_with_personalization(&index, "7", &[], None, TOP_N);
+        assert!(
+            !hits.is_empty() && hits[0].item.id == formal.id,
+            "short query must rank formal app first over app-paths, got {:?}",
+            hits.iter().map(|h| (&h.item.name, &h.item.source)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn app_paths_exe_still_searchable_when_no_formal_shortcut() {
+        let only = sourced_item("ExamplePlayer", r"C:\Apps\Example\ExamplePlayer.exe", "app-paths");
+        let index = RetrievalIndex::build(&[only.clone()], &[]);
+        let hits = search_with_personalization(&index, "ExamplePlayer", &[], None, TOP_N);
+        assert!(
+            hits.iter().any(|h| h.item.id == only.id),
+            "tier-c fallback must remain searchable when no formal entry exists"
+        );
+    }
+
+    #[test]
     fn source_layer_classifies_formal_supplemental_and_commands() {
-        use crate::model::{source_layer, SourceLayer};
+        use crate::model::{is_discovery_source, is_path_formal_source, source_layer, SourceLayer};
         assert_eq!(source_layer("start-menu"), SourceLayer::Formal);
         assert_eq!(source_layer("desktop"), SourceLayer::Formal);
         assert_eq!(source_layer("uwp"), SourceLayer::Formal);
+        assert_eq!(source_layer("apps-folder"), SourceLayer::Formal);
+        assert_eq!(source_layer("portable"), SourceLayer::Formal);
         assert_eq!(source_layer("app-paths"), SourceLayer::Supplemental);
         assert_eq!(source_layer("uninstall"), SourceLayer::Supplemental);
         assert_eq!(source_layer("commands"), SourceLayer::CommandAlias);
         assert_eq!(source_layer("scoop"), SourceLayer::CommandAlias);
         assert_eq!(source_layer("builtin-system"), SourceLayer::System);
-        assert_eq!(source_layer("unknown-future"), SourceLayer::Formal);
+        assert_eq!(source_layer("builtin"), SourceLayer::System);
+        assert_eq!(source_layer("win-settings"), SourceLayer::System);
+        // Formal 是白名单：未知来源默认 Supplemental，不当正式应用。
+        assert_eq!(source_layer("unknown-future"), SourceLayer::Supplemental);
+        assert!(is_discovery_source("app-paths"));
+        assert!(is_discovery_source("uninstall"));
+        assert!(!is_discovery_source("commands"));
+        assert!(!is_discovery_source("unknown-future"));
+        assert!(is_path_formal_source("start-menu"));
+        assert!(is_path_formal_source("portable"));
+        assert!(!is_path_formal_source("uwp"));
     }
 
     #[test]

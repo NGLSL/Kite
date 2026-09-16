@@ -5,7 +5,8 @@ use crate::model::{AppItem, SearchResult};
 use super::normalizer;
 use super::ranker;
 /// 空 Query 默认列表：固定项优先，其次最近使用，不足再按索引顺序补满。
-/// 命令 Alias 来源默认不进补满段；Pin / 最近使用仍可出现。
+/// Tier C（命令 Alias、App Paths/Uninstall）默认不进补满段；Pin / 最近使用仍可出现。
+/// 用户 Portable 属 Tier A，会进补满段。
 pub fn order_by_recent(
     apps: &[AppItem],
     recent_ids: &[String],
@@ -43,7 +44,7 @@ pub fn order_by_recent(
         if hits.iter().any(|h| h.item.id == item.id) {
             continue;
         }
-        if crate::model::is_hidden_on_empty_query(&item.source) {
+        if crate::model::is_hidden_on_empty_fill(&item.source, &item.target) {
             continue;
         }
         hits.push(SearchResult::scored(item.clone(), 0, "default"));
