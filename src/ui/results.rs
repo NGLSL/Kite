@@ -48,15 +48,6 @@ impl State {
         })
     }
 
-    /// 空 Query 同步默认列表；非空走后台应用搜索。
-    pub(super) fn refresh_search_for_query(&mut self) {
-        if search::normalize_for_index(&self.query).is_empty() {
-            self.refresh_results();
-        } else {
-            self.request_app_search();
-        }
-    }
-
     /// 提交常驻 worker：最新请求覆盖；个性化在截断前进入统一排序。
     /// 仅当无个性化状态时允许缓存基础命中。
     pub(super) fn request_app_search(&mut self) {
@@ -121,6 +112,7 @@ impl State {
     }
 
     /// 应用后台结果：Query/索引代际核对后合并链接/文件/网页槽位。
+    /// 非空 Query 的最终列表全部由此落地（`refresh_results` 不再内联一份）。
     pub(super) fn apply_app_search_ready(
         &mut self,
         generation: u64,
@@ -159,8 +151,12 @@ impl State {
         ));
     }
 
-    /// 网址 / Everything 文件 / 网页搜索槽位合并（与同步路径同一套规则）。
-    fn merge_aux_hits(&self, mut hits: Vec<SearchResult>, q_norm: &str) -> Vec<SearchResult> {
+    /// 最终列表组装的唯一实现：应用命中 → 网址直达 → 合并 Everything 文件 →
+    /// 截断 → 网页搜索槽位 → 嗅探搜索引擎模板写回。
+    ///
+    /// 调用方只有异步主路径（`apply_app_search_ready`）；同步刷新不再内联一份，
+    /// 避免「第 5 位网页搜索」「文件结果过滤」这类规则改一处漏一处。
+    fn merge_aux_hits(&mut self, mut hits: Vec<SearchResult>, q_norm: &str) -> Vec<SearchResult> {
         let preferred = self.history.as_ref().and_then(|h| h.preferred_browser());
         let search_template = self.history.as_ref().and_then(|h| h.search_url_template());
         let is_url = search::url::normalize_url(&self.query).is_some();
@@ -201,144 +197,59 @@ impl State {
                 hits = search::rerank(hits, search::MAX_RESULTS);
             }
         }
+        self.cache_detected_search_template(search_template.is_none(), preferred.as_deref());
         hits
     }
 
-    /// 对齐 commands::search_apps 的完整管线（缺内置设置页 UI，其余全量）：
-    /// 空 Query 走固定+最近；非空走 内置项 → 应用召回 → 链接识别 → 文件 →
-    /// 历史加权 → 网页搜索槽位；列表出全量（滚动加载在进程内直接滚动可见）。
+    /// 未缓存模板时嗅探一次并写回（副本库），避免每次读浏览器配置。
+    fn cache_detected_search_template(&mut self, missing: bool, preferred: Option<&str>) {
+        if !missing {
+            return;
+        }
+        let Some(pref) = preferred else {
+            return;
+        };
+        let Some(template) = system::search_engine::detect_search_template(pref) else {
+            return;
+        };
+        if let Some(db) = self.history.as_mut() {
+            let _ = db.set_search_url_template(&template);
+        }
+    }
+
+    /// 结果刷新唯一入口：
+    /// - 空 Query：固定 + 最近（同步；不需要应用召回与链接/文件/网页槽）；
+    /// - 非空 Query：交给常驻 worker，由 `apply_app_search_ready` → `merge_aux_hits`
+    ///   组装并落地（含合并、选中复位与日志）。
+    ///
+    /// 非空分支不再内联搜索：Pipeline 只此一条，Pin/降权/文件切换等同步动作
+    /// 与逐键输入走同一条路径。
     pub(super) fn refresh_results(&mut self) {
         let t0 = Instant::now();
         let q_norm = search::normalize_for_index(&self.query);
         if let Some(db) = &self.history {
             self.pinned = db.pinned_ids().into_iter().collect();
         }
-        self.results = if q_norm.is_empty() {
-            let (recent, pinned) = self
-                .history
-                .as_ref()
-                .map(|h| {
-                    (
-                        h.recent_ids(search::MAX_RESULTS).unwrap_or_default(),
-                        h.pinned_ids(),
-                    )
-                })
-                .unwrap_or_default();
+        if !q_norm.is_empty() {
+            self.request_app_search();
+            return;
+        }
+
+        let (recent, pinned) = self
+            .history
+            .as_ref()
+            .map(|h| {
+                (
+                    h.recent_ids(search::MAX_RESULTS).unwrap_or_default(),
+                    h.pinned_ids(),
+                )
+            })
+            .unwrap_or_default();
+        let default_list = {
             let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
             search::order_by_recent(&index.apps, &recent, &pinned, search::MAX_RESULTS)
-        } else {
-            let user_targets: Vec<search::UserTarget> = self
-                .history
-                .as_ref()
-                .map(|h| {
-                    h.alias_matches(&q_norm)
-                        .into_iter()
-                        .map(|a| search::UserTarget {
-                            id: a.target_id,
-                            name: a.target_name.to_lowercase(),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            // 克隆同代索引 Arc 后立即释放锁，应用匹配不持全局锁。
-            let retrieval = {
-                let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
-                index.retrieval.clone()
-            };
-            // 个性化在截断前进入统一排序：全量 Usage + 本 Query 配对 + Pin。
-            let prefs = self.history.as_ref().map(|db| history::Personalization {
-                usage: db.usage_all(),
-                pairs: db.query_pairs_for(&q_norm),
-                pinned: db.pinned_ids().into_iter().collect(),
-                demoted: db.demoted_ids().into_iter().collect(),
-                now: storage::now_ts(),
-                query_norm: q_norm.clone(),
-            });
-            // 应用 + 系统入口：多路召回 → 验证 → 个性化 → 一次截断
-            let mut hits = if let Some(ret) = retrieval {
-                search::search_with_personalization(
-                    &ret,
-                    &self.query,
-                    &user_targets,
-                    prefs.as_ref(),
-                    search::MAX_RESULTS,
-                )
-            } else {
-                let (apps, system_entries) = {
-                    let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
-                    (index.apps.clone(), index.system_entries.clone())
-                };
-                search::search_system_personalized(
-                    &apps,
-                    &system_entries,
-                    &self.query,
-                    &user_targets,
-                    prefs.as_ref(),
-                    search::MAX_RESULTS,
-                )
-            };
-
-            // 链接识别：网址 → 列已装浏览器直达（偏好优先）
-            let preferred = self.history.as_ref().and_then(|h| h.preferred_browser());
-            let search_template = self.history.as_ref().and_then(|h| h.search_url_template());
-            let is_url = search::url::normalize_url(&self.query).is_some();
-            if let Some(url) = search::url::normalize_url(&self.query) {
-                let mut merged = app::web::build_hits(&url, preferred.as_deref(), &self.icon_dir);
-                merged.append(&mut hits);
-                hits = merged;
-            }
-
-            // Everything 在后台查询；这里只合并已完成的真实文件结果。
-            if self.files_mode {
-                hits.extend(
-                    self.file_results
-                        .iter()
-                        .filter(|result| result.item.source != "everything-status")
-                        .cloned(),
-                );
-            }
-
-            // 应用主结果已在统一入口完成个性化与层排序；此处不再二次加分/纯分数重排。
-            hits.truncate(search::MAX_RESULTS);
-
-            // 网页搜索：非网址；有应用类结果时第 5 位固定「用浏览器搜索」，否则列浏览器
-            if !is_url && !self.query.trim().is_empty() {
-                let has_app_like = hits
-                    .iter()
-                    .any(|h| h.item.source != "browser" && h.item.source != "websearch");
-                if has_app_like {
-                    if let Some(web) = app::web::build_primary_search_hit(
-                        self.query.trim(),
-                        preferred.as_deref(),
-                        &self.icon_dir,
-                        search_template.as_deref(),
-                    ) {
-                        hits = app::web::insert_at_slot(hits, web, app::web::WEB_SEARCH_SLOT);
-                    }
-                } else {
-                    hits = app::web::build_search_hits(
-                        self.query.trim(),
-                        preferred.as_deref(),
-                        &self.icon_dir,
-                        search_template.as_deref(),
-                    );
-                    hits = search::rerank(hits, search::MAX_RESULTS);
-                }
-            }
-
-            // 成功嗅探到引擎模板则写回（副本库），避免每次读浏览器配置
-            if search_template.is_none() {
-                if let Some(pref) = preferred.as_deref() {
-                    if let Some(t) = system::search_engine::detect_search_template(pref) {
-                        if let Some(db) = self.history.as_mut() {
-                            let _ = db.set_search_url_template(&t);
-                        }
-                    }
-                }
-            }
-
-            hits
         };
+        self.results = default_list;
         if self.files_mode {
             prepend_dependency_status(&mut self.results, &self.file_results);
         }
@@ -436,11 +347,58 @@ pub(super) fn is_current_file_response(
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::test_state;
     use super::{
         build_file_results, everything_status_result, is_current_file_response,
         prepend_dependency_status,
     };
     use crate::system::everything::{self, Availability};
+    use crate::ui::actions::menu_action;
+    use crate::ui::MenuAction;
+
+    #[test]
+    fn non_empty_query_refresh_delegates_to_worker() {
+        let mut state = test_state("k");
+        let before = state.app_search_worker.latest_seq();
+
+        state.refresh_results();
+
+        assert!(
+            state.app_search_worker.latest_seq() > before,
+            "非空 Query 必须交给常驻 worker 组装，而不是同步内联一份"
+        );
+        assert_eq!(state.app_query_generation, 1);
+        // 同步调用不再改写列表：结果只由 AppSearchReady 落地。
+        assert_eq!(state.results.len(), 1);
+        assert_eq!(state.results[0].item.id, "kite:settings");
+    }
+
+    #[test]
+    fn empty_query_refresh_stays_synchronous() {
+        let mut state = test_state("");
+
+        state.refresh_results();
+
+        assert_eq!(
+            state.app_search_worker.latest_seq(),
+            0,
+            "空 Query 走固定+最近，不应提交 worker"
+        );
+    }
+
+    #[test]
+    fn pin_toggle_on_non_empty_query_routes_through_worker() {
+        let mut state = test_state("k");
+        let item = state.results[0].item.clone();
+        let before = state.app_search_worker.latest_seq();
+
+        let _ = menu_action(&mut state, item, MenuAction::TogglePin);
+
+        assert!(
+            state.app_search_worker.latest_seq() > before,
+            "Pin 与 Demote 必须共用同一条刷新路径（worker）"
+        );
+    }
 
     #[test]
     fn stale_or_disabled_file_results_are_rejected() {

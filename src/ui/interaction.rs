@@ -105,7 +105,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             state.query = q;
             state.request_file_search();
-            state.refresh_search_for_query();
+            state.refresh_results();
             state.hover_suppressed = false;
             sync_scroll(state)
         }
@@ -160,7 +160,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 hits.len()
             ));
             state.file_results = hits;
-            state.refresh_search_for_query();
+            state.refresh_results();
             Task::none()
         }
         Message::AppSearchReady(generation, query, hits, elapsed_us, index_generation) => {
@@ -493,7 +493,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             state.index_generation = state.index_generation.wrapping_add(1);
             state.base_hit_cache.clear();
-            state.refresh_search_for_query();
+            state.refresh_results();
             if std::mem::take(&mut state.rescan_pending) {
                 flash(state, &format!("扫描完成，共 {n} 条"))
             } else {

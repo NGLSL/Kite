@@ -21,6 +21,7 @@ pub(super) fn menu_action(state: &mut State, item: AppItem, action: MenuAction) 
                 };
                 plog(&format!("ctx pin toggle ok={}", r.is_ok()));
             }
+            // 与 Demote 共用同一入口：非空 Query 同样交给常驻 worker 重排。
             state.refresh_results();
         }
         MenuAction::Demote | MenuAction::Undemote => {
@@ -32,7 +33,7 @@ pub(super) fn menu_action(state: &mut State, item: AppItem, action: MenuAction) 
                 };
                 plog(&format!("ctx demote action={action:?} ok={} id={}", r.is_ok(), item.id));
             }
-            state.refresh_search_for_query();
+            state.refresh_results();
         }
     }
     Task::none()

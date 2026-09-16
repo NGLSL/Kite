@@ -32,6 +32,8 @@ mod results;
 mod runtime;
 mod search_view;
 mod settings_view;
+#[cfg(test)]
+mod test_support;
 mod tray;
 
 use actions::*;
