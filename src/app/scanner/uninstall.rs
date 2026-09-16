@@ -147,7 +147,10 @@ fn entry_to_item(source: &str, entry: &UninstallEntry) -> Option<RawItem> {
     // vendors give their updater a neutral executable name while advertising
     // "Product Updater" in DisplayName; indexing that row would expose a
     // maintenance helper as the primary application.
-    if is_auxiliary_target(target_path) || contains_auxiliary_marker(&name) {
+    if is_auxiliary_target(target_path)
+        || contains_auxiliary_marker(&name)
+        || !super::util::allows_discovery_fallback(&name, &target)
+    {
         return None;
     }
 
@@ -342,31 +345,19 @@ fn is_auxiliary_target(path: &Path) -> bool {
     let stem = path
         .file_stem()
         .or_else(|| path.file_name())
-        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .map(|name| name.to_string_lossy())
         .unwrap_or_default();
-    contains_auxiliary_marker(&stem)
+    super::util::is_helper_name(&stem)
 }
 
 fn contains_auxiliary_marker(value: &str) -> bool {
-    const MARKERS: &[&str] = &[
-        "uninstall",
-        "unins",
-        "setup",
-        "install",
-        "updater",
-        "update",
-        "crashpad",
-        "crashreport",
-        "crash-reporter",
-        "helper",
-        "repair",
-        "maintenance",
-        "runtime",
-        "redistributable",
-        "webview",
-    ];
-    let value = value.to_ascii_lowercase();
-    MARKERS.iter().any(|marker| value.contains(marker))
+    if super::util::is_helper_name(value) {
+        return true;
+    }
+    // Uninstall 注册表额外噪声：InstallShield / * Runtime* 等。
+    const UNINSTALL_ONLY: &[&str] = &["install", "runtime", "crash-reporter"];
+    let lower = value.to_ascii_lowercase();
+    UNINSTALL_ONLY.iter().any(|marker| lower.contains(marker))
 }
 
 fn target_key(path: &str) -> String {

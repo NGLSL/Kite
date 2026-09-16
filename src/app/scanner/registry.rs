@@ -92,6 +92,13 @@ fn app_path_item(source: &str, sub: &str, raw_target: &str) -> Option<RawItem> {
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| sub.trim_end_matches(".exe").to_string());
+    // Tier C：helper/系统目录不物化为独立应用行（可被正式入口吸收的另议）。
+    if !super::util::allows_discovery_fallback(&name, &target) {
+        crate::log::info(&format!(
+            "app-paths: skip non-app {sub} name={name} -> {target}"
+        ));
+        return None;
+    }
     let working_dir = Path::new(&target)
         .parent()
         .map(|p| p.to_string_lossy().to_string());

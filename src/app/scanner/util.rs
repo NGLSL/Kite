@@ -115,6 +115,138 @@ fn is_generic_install_subdir(name: &str) -> bool {
         && n[6..].chars().all(|c| c.is_ascii_digit()))
 }
 
+/// Helper / 维护程序名称（uninstall、updater、crashpad…）。
+/// Discovery 过滤与命令别名过滤共用，避免两份漂移的名单。
+pub fn is_helper_name(name: &str) -> bool {
+    let compact = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect::<String>();
+    if compact.is_empty() {
+        return true;
+    }
+    const MARKERS: &[&str] = &[
+        "uninstall",
+        "uninstaller",
+        "unins",
+        "update",
+        "updater",
+        "setup",
+        "installer",
+        "installhelper",
+        "repair",
+        "maintenance",
+        "crashpad",
+        "crashreport",
+        "crashreporter",
+        "helper",
+        "elevated",
+        "redistributable",
+        "redist",
+        "webview2",
+        "webview",
+    ];
+    MARKERS.iter().any(|marker| compact.contains(marker))
+}
+
+/// Discovery 目标是否位于系统或包管理器目录（不应独立展示为应用）。
+/// 路径规则委托 model，避免 search/scanner 各持一份目录表。
+pub fn is_discovery_system_path(target: &str) -> bool {
+    crate::model::is_system_dir_target(target)
+}
+
+/// App Paths / Uninstall 兜底独立行是否允许物化。
+pub fn allows_discovery_fallback(name: &str, target: &str) -> bool {
+    !is_helper_name(name) && !is_discovery_system_path(target)
+}
+
+/// 空 Query 补满噪声：系统目录目标。
+pub fn is_system_folder_shortcut_noise(target: &str) -> bool {
+    is_discovery_system_path(target)
+}
+
+#[cfg(test)]
+mod discovery_filter_tests {
+    use super::*;
+
+    #[test]
+    fn helper_names_are_rejected() {
+        assert!(is_helper_name("Product Updater"));
+        assert!(is_helper_name("FooCrashpadHandler"));
+        assert!(is_helper_name("unins000"));
+        assert!(!is_helper_name("7-Zip"));
+        assert!(!is_helper_name("ExamplePlayer"));
+    }
+
+    #[test]
+    fn system_and_package_manager_paths_are_rejected() {
+        assert!(is_discovery_system_path(
+            r"C:\Windows\System32\CompatTelRunner.exe"
+        ));
+        assert!(is_discovery_system_path(
+            r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\python.exe"
+        ));
+        assert!(is_discovery_system_path(
+            r"C:\ProgramData\chocolatey\bin\ripgrep.exe"
+        ));
+        assert!(!is_discovery_system_path(
+            r"C:\Program Files\Example\app.exe"
+        ));
+        assert!(!is_discovery_system_path(r"D:\Portable\App\app.exe"));
+    }
+
+    #[test]
+    fn fallback_requires_clean_name_and_path() {
+        assert!(allows_discovery_fallback(
+            "ExamplePlayer",
+            r"C:\Apps\ExamplePlayer.exe"
+        ));
+        assert!(!allows_discovery_fallback(
+            "ExampleUpdater",
+            r"C:\Apps\ExampleUpdater.exe"
+        ));
+        assert!(!allows_discovery_fallback(
+            "cvtres",
+            r"C:\Windows\System32\cvtres.exe"
+        ));
+    }
+
+    #[test]
+    fn system_folder_noise_hides_all_system_dir_targets() {
+        assert!(is_system_folder_shortcut_noise(
+            r"C:\WINDOWS\system32\control.exe"
+        ));
+        assert!(is_system_folder_shortcut_noise(
+            r"C:\Windows\SysWOW64\appverif.exe"
+        ));
+        assert!(is_system_folder_shortcut_noise(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        ));
+        assert!(is_system_folder_shortcut_noise(
+            r"C:\Windows\System32\narrator.exe"
+        ));
+        assert!(!is_system_folder_shortcut_noise(
+            r"C:\Program Files\Notepad++\notepad++.exe"
+        ));
+    }
+
+    #[test]
+    fn lnk_target_rejects_documents_allows_apps_and_shell() {
+        assert!(is_launchable_lnk_target(r"C:\Apps\app.exe"));
+        assert!(is_launchable_lnk_target(r"C:\Windows\System32\diskmgmt.msc"));
+        assert!(is_launchable_lnk_target(r"shell:AppsFolder\Foo!App"));
+        assert!(is_launchable_lnk_target(r"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"));
+        assert!(!is_launchable_lnk_target(
+            r"D:\Program Files (x86)\MSI\Localization reference.pdf"
+        ));
+        assert!(!is_launchable_lnk_target(r"C:\Help\app.chm"));
+        assert!(!is_launchable_lnk_target(r"C:\Docs\readme.txt"));
+        assert!(!is_launchable_lnk_target(r"C:\Setup\install.msi"));
+        assert!(!is_launchable_lnk_target(""));
+    }
+}
+
 /// 展示名族：去掉版本后缀后的小写紧凑名。
 pub fn display_family_key(name: &str) -> String {
     let mut s = name.trim().to_lowercase();
@@ -140,13 +272,17 @@ pub fn legacy_item_id(target: &str, args: Option<&str>, source: &str) -> String 
     hash_id(&[&normalize_path_key(target), args.unwrap_or(""), source])
 }
 
-/// 常见扫描 source 枚举，覆盖旧 id 可能取值。
+/// 常见扫描 source 枚举，覆盖旧 id 可能取值；新增 source 时同步。
 pub const KNOWN_SOURCES: &[&str] = &[
     "start-menu",
     "desktop",
-    "app-paths",
-    "scoop",
+    "portable",
     "uwp",
+    "apps-folder",
+    "app-paths",
+    "uninstall",
+    "scoop",
+    "commands",
     "builtin",
     "builtin-system",
     "win-settings",
@@ -178,6 +314,29 @@ pub fn is_skippable_shortcut(name: &str) -> bool {
         "setup",
     ];
     SKIP.iter().any(|s| lower.contains(s))
+}
+
+/// .lnk 解析出的 target 是否像可启动应用，而不是文档/安装包。
+/// 开始菜单常见「Localization reference.pdf」「帮助.chm」等文档快捷方式。
+pub fn is_launchable_lnk_target(target: &str) -> bool {
+    let t = target.trim();
+    if t.is_empty() {
+        return false;
+    }
+    if t.starts_with("shell:") || t.starts_with("::") {
+        return true;
+    }
+    let Some(ext) = Path::new(t)
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+    else {
+        // 无扩展名：多半是解析异常或非文件，不当应用。
+        return false;
+    };
+    matches!(
+        ext.as_str(),
+        "exe" | "com" | "bat" | "cmd" | "msc" | "appref-ms" | "lnk"
+    )
 }
 
 /// `/from=startmenu` 等启动来源标记：已验证不改变“打开应用”动作。

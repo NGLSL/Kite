@@ -29,7 +29,8 @@ use std::time::{Duration, Instant};
 use crate::model::{AppIndex, AppItem};
 use cache::UwpCache;
 use merge::{
-    dedupe, exclude_system_name_duplicates, merge_command_name_duplicates,
+    absorb_discovery_rows, dedupe, exclude_system_name_duplicates, merge_command_name_duplicates,
+    merge_same_name_formal_duplicates,
 };
 use pass::FAST_BUDGET;
 use scoop::collect_scoop_shims;
@@ -103,6 +104,8 @@ fn scan_apps_with_options(icon_dir: &Path, pass: ScanPass, options: &ScanOptions
     crate::log::info(&format!("scan pass={pass:?} start"));
 
     // Full：UWP/Store 枚举（COM，较慢）与目录扫描并行。
+    // UWP 仅 Full 收集；30min TTL 内自动复用，手动「重新扫描」强制刷新。
+    // 不要对 Full 无条件 force——那会让 UWP 缓存永远 miss。
     let uwp_force = options.force_uwp_refresh;
     let uwp_icon_dir = icon_dir.to_path_buf();
     let uwp_worker = if pass.include_uwp() {
@@ -183,32 +186,35 @@ fn scan_apps_with_options(icon_dir: &Path, pass: ScanPass, options: &ScanOptions
             raw.len(),
             t0.elapsed()
         ));
+    }
 
-        for root in &options.portable_dirs {
-            if budget_exhausted(budget, t0) || raw.len() >= max_total {
-                break;
-            }
-            let before = raw.len();
-            collect_from_dir(
-                root,
-                "portable",
-                other_depth,
-                budget,
-                t0,
-                max_per_dir,
-                max_total,
-                &mut raw,
-                &mut cache,
-            );
-            crate::log::info(&format!(
-                "portable {}: +{} -> total {} in {:?}",
-                root.display(),
-                raw.len() - before,
-                raw.len(),
-                t0.elapsed()
-            ));
+    // 用户 Portable：Tier A 正式入口，Bootstrap/Full 都收集。
+    for root in &options.portable_dirs {
+        if budget_exhausted(budget, t0) || raw.len() >= max_total {
+            break;
         }
+        let before = raw.len();
+        collect_from_dir(
+            root,
+            "portable",
+            other_depth,
+            budget,
+            t0,
+            max_per_dir,
+            max_total,
+            &mut raw,
+            &mut cache,
+        );
+        crate::log::info(&format!(
+            "portable {}: +{} -> total {} in {:?}",
+            root.display(),
+            raw.len() - before,
+            raw.len(),
+            t0.elapsed()
+        ));
+    }
 
+    if pass.include_supplemental_sources() {
         let before = raw.len();
         commands::collect_command_entries(commands::COMMAND_SOURCE, &mut raw);
         crate::log::info(&format!(
@@ -266,7 +272,7 @@ fn scan_apps_with_options(icon_dir: &Path, pass: ScanPass, options: &ScanOptions
         ));
     }
 
-    if !budget_exhausted(budget, t0) && raw.len() < max_total {
+    if pass.include_app_paths() && !budget_exhausted(budget, t0) && raw.len() < max_total {
         let t = Instant::now();
         registry::collect_app_paths("app-paths", &mut raw);
         crate::log::info(&format!(
@@ -303,6 +309,8 @@ fn scan_apps_with_options(icon_dir: &Path, pass: ScanPass, options: &ScanOptions
 
     let mut items = dedupe(raw);
     merge_command_name_duplicates(&mut items);
+    absorb_discovery_rows(&mut items);
+    merge_same_name_formal_duplicates(&mut items);
     let system_entries = crate::app::builtin::materialize_system_entries(Some(icon_dir));
     exclude_system_name_duplicates(&mut items, &system_entries);
     crate::log::info(&format!(
@@ -491,13 +499,16 @@ mod tests {
         let icon_dir = root.join("icons");
         std::fs::create_dir_all(&icon_dir).unwrap();
 
+        let portable = root.join("portable");
+        std::fs::create_dir_all(&portable).unwrap();
+        let portable_exe = portable.join("Portable Tool.exe");
+        std::fs::write(&portable_exe, b"fixture").unwrap();
+
         let options = ScanOptions {
             extra_scoop_shim_dirs: vec![shims.clone()],
-            portable_dirs: vec![root.join("portable")],
+            portable_dirs: vec![portable.clone()],
             force_uwp_refresh: false,
         };
-        std::fs::create_dir_all(root.join("portable")).unwrap();
-        std::fs::write(root.join("portable").join("Portable Tool.exe"), b"x").unwrap();
 
         let bootstrap = scan_apps_pass_with_options(&icon_dir, ScanPass::Bootstrap, &options);
         assert!(
@@ -511,8 +522,16 @@ mod tests {
             !bootstrap
                 .apps
                 .iter()
-                .any(|item| item.source == "portable" || item.source == "commands"),
-            "Bootstrap must not index portable/command supplemental sources"
+                .any(|item| item.source == "commands"),
+            "Bootstrap must not index command aliases"
+        );
+        assert!(
+            bootstrap
+                .apps
+                .iter()
+                .any(|item| item.source == "portable"
+                    && item.target == portable_exe.to_string_lossy()),
+            "Bootstrap must keep configured portable apps as formal entries"
         );
         assert!(
             bootstrap.retrieval.is_some(),

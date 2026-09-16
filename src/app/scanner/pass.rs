@@ -19,8 +19,8 @@ pub(crate) const FULL_MAX_TOTAL: usize = 8000;
 /// 扫描档位：Bootstrap 首屏 vs 后台完整补扫。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanPass {
-    /// 首屏 Bootstrap：只扫高价值正式入口（开始菜单/桌面/App Paths/系统入口），
-    /// 有时间预算；不做图标、metadata、UWP、uninstall、Scoop/commands、protocol。
+    /// 首屏 Bootstrap：只扫高价值正式入口（开始菜单/桌面/配置 Portable/系统入口），
+    /// 有时间预算并批量提图标；不做 metadata、UWP、uninstall、Scoop/commands、App Paths、protocol。
     Bootstrap,
     /// 有时间预算、浅层、不提图标、不含 UWP（测试与兼容路径，不作生产首屏）。
     Fast,
@@ -33,9 +33,14 @@ impl ScanPass {
         !matches!(self, ScanPass::Full)
     }
 
-    /// Scoop / portable / commands / uninstall 等补充来源。
+    /// Scoop / commands / uninstall 等发现与命令来源。
     pub(crate) fn include_supplemental_sources(self) -> bool {
         !matches!(self, ScanPass::Bootstrap)
+    }
+
+    /// App Paths：Fast/Full 收集；Bootstrap 只保留 A+B 高价值入口，不含 App Paths。
+    pub(crate) fn include_app_paths(self) -> bool {
+        matches!(self, ScanPass::Fast | ScanPass::Full)
     }
 
     pub(crate) fn include_uwp(self) -> bool {
@@ -46,8 +51,10 @@ impl ScanPass {
         matches!(self, ScanPass::Full)
     }
 
+    /// Bootstrap 也提图标：Cold Start 第一印象优先于省 200–300ms。
+    /// Warm Start 走 snapshot，不付这笔成本。
     pub(crate) fn include_icons(self) -> bool {
-        matches!(self, ScanPass::Full)
+        matches!(self, ScanPass::Bootstrap | ScanPass::Full)
     }
 
     pub(crate) fn include_protocols(self) -> bool {
@@ -107,9 +114,14 @@ mod tests {
         assert!(!ScanPass::Bootstrap.include_supplemental_sources());
         assert!(ScanPass::Fast.include_supplemental_sources());
         assert!(ScanPass::Full.include_supplemental_sources());
+        assert!(!ScanPass::Bootstrap.include_app_paths());
+        assert!(ScanPass::Fast.include_app_paths());
+        assert!(ScanPass::Full.include_app_paths());
         assert!(!ScanPass::Bootstrap.include_uwp());
         assert!(!ScanPass::Bootstrap.include_metadata());
-        assert!(!ScanPass::Bootstrap.include_icons());
+        assert!(ScanPass::Bootstrap.include_icons());
+        assert!(!ScanPass::Fast.include_icons());
+        assert!(ScanPass::Full.include_icons());
         assert!(!ScanPass::Bootstrap.include_protocols());
         assert!(ScanPass::Full.include_uwp());
         assert_eq!(ScanPass::Bootstrap.start_menu_depth(), START_MENU_MAX_DEPTH);

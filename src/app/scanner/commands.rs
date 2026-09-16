@@ -69,35 +69,26 @@ pub fn should_index_command_name(name: &str) -> bool {
     }
 
     // Use a compact form so both `Foo-Updater` and `FooUpdater` are covered.
-    // These names are maintenance or implementation helpers, not user-facing
-    // launch entries.
+    // Shared helper markers live in util; this list is WindowsApps/package-only noise.
+    if super::util::is_helper_name(name) {
+        return false;
+    }
     let compact = name
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .flat_map(|c| c.to_lowercase())
         .collect::<String>();
-    const HELPER_MARKERS: &[&str] = &[
-        "uninstall",
-        "uninstaller",
-        "unins",
-        "update",
-        "updater",
-        "setup",
-        "installer",
-        "installhelper",
-        "repair",
-        "maintenance",
-        "crashpad",
-        "crashreport",
-        "helper",
+    const COMMAND_ONLY_HELPERS: &[&str] = &[
         "mcphost",
         "mcpserver",
-        "elevated",
         "adminserver",
         "packaging",
         "pcappce",
     ];
-    if HELPER_MARKERS.iter().any(|marker| compact.contains(marker)) {
+    if COMMAND_ONLY_HELPERS
+        .iter()
+        .any(|marker| compact.contains(marker))
+    {
         return false;
     }
 

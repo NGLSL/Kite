@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::model::AppItem;
 
 use super::commands;
-use super::util::{hash_id, normalize_path_key};
+use super::util::{hash_id, launch_identity, normalize_path_key};
 use super::RawItem;
 
 pub(crate) fn dedupe(raw: Vec<RawItem>) -> Vec<RawItem> {
@@ -119,13 +119,211 @@ pub(crate) fn merge_command_name_duplicates(items: &mut Vec<RawItem>) {
     }
 }
 
+fn formal_source_rank(source: &str) -> Option<u8> {
+    match source {
+        "start-menu" => Some(0),
+        "desktop" => Some(1),
+        "portable" => Some(2),
+        "apps-folder" | "uwp" => Some(3),
+        _ => None,
+    }
+}
+
+fn is_shell_app_source(source: &str) -> bool {
+    matches!(source, "apps-folder" | "uwp")
+}
+
+fn is_url_shortcut(target: &str) -> bool {
+    std::path::Path::new(target)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("url"))
+}
+
+fn compact_item_name(item: &AppItem) -> String {
+    crate::search::normalize_for_index(&item.name)
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect()
+}
+
+/// Formal 同名是否允许归并。**不单靠同名**——需 shell 孪生、双 .url，
+/// 或与 discovery 相同的同安装/同启动身份规则。
+fn formal_pair_merges(a: &AppItem, b: &AppItem) -> bool {
+    let ca = compact_item_name(a);
+    if ca.is_empty() || ca != compact_item_name(b) {
+        return false;
+    }
+    let a_shell = is_shell_app_source(&a.source);
+    let b_shell = is_shell_app_source(&b.source);
+    // shell AUMID + 路径正式入口：Chrome、Application Verifier 等双行。
+    if a_shell != b_shell {
+        return true;
+    }
+    // 桌面 .url + 开始菜单 Steam .url：同名游戏快捷方式。
+    if !a_shell && is_url_shortcut(&a.target) && is_url_shortcut(&b.target) {
+        return true;
+    }
+    // 同安装/同启动身份（与 discovery 归并同一套规则）。
+    discovery_absorbs_into(a, b) || discovery_absorbs_into(b, a)
+}
+
+/// 同名 Formal 入口归并成一行（shell 孪生 / 双 .url / 同安装）。
+/// winner 按 start-menu > desktop > portable > apps/uwp。
+/// 同名不同安装根/不同 exe 的产品保持两行，避免误杀。
+pub(crate) fn merge_same_name_formal_duplicates(items: &mut Vec<RawItem>) {
+    let mut groups: std::collections::HashMap<String, Vec<usize>> = Default::default();
+    for (index, (item, _)) in items.iter().enumerate() {
+        if formal_source_rank(&item.source).is_none() {
+            continue;
+        }
+        let key = compact_item_name(item);
+        if key.is_empty() {
+            continue;
+        }
+        groups.entry(key).or_default().push(index);
+    }
+
+    let mut remove = std::collections::HashSet::new();
+    for indices in groups.into_values() {
+        if indices.len() < 2 {
+            continue;
+        }
+        let Some(&winner) = indices
+            .iter()
+            .min_by(|&&a, &&b| {
+                formal_source_rank(&items[a].0.source)
+                    .unwrap_or(u8::MAX)
+                    .cmp(&formal_source_rank(&items[b].0.source).unwrap_or(u8::MAX))
+                    .then_with(|| items[a].0.id.cmp(&items[b].0.id))
+            })
+        else {
+            continue;
+        };
+        for &loser in &indices {
+            if loser == winner || remove.contains(&loser) {
+                continue;
+            }
+            if !formal_pair_merges(&items[winner].0, &items[loser].0) {
+                continue;
+            }
+            let alias = items[loser].0.clone();
+            keep_shortcut_names(&mut items[winner].0, &alias);
+            if items[winner].1.is_none() {
+                items[winner].1 = items[loser].1.clone();
+            }
+            remove.insert(loser);
+        }
+    }
+
+    if !remove.is_empty() {
+        let mut index = 0usize;
+        items.retain(|_| {
+            let keep = !remove.contains(&index);
+            index += 1;
+            keep
+        });
+    }
+}
+
+/// App Paths / Uninstall 能确认与正式/系统入口同一产品时只补关键词/图标，不独立成行。
+/// 未吸收且通过启发式的 Discovery 行保留为 Tier C 兜底。不吸入 commands。
+pub(crate) fn absorb_discovery_rows(items: &mut Vec<RawItem>) {
+    use crate::model::{is_discovery_source, source_layer, SourceLayer};
+
+    let mut remove = std::collections::HashSet::new();
+    for i in 0..items.len() {
+        if !is_discovery_source(&items[i].0.source) || remove.contains(&i) {
+            continue;
+        }
+        let discovery = items[i].0.clone();
+        let discovery_icon = items[i].1.clone();
+        let Some(winner) = items.iter().enumerate().find_map(|(j, (host, _))| {
+            (j != i
+                && !remove.contains(&j)
+                && !is_discovery_source(&host.source)
+                && matches!(
+                    source_layer(&host.source),
+                    SourceLayer::Formal | SourceLayer::System
+                )
+                && discovery_absorbs_into(&discovery, host))
+            .then_some(j)
+        }) else {
+            continue;
+        };
+        keep_shortcut_names(&mut items[winner].0, &discovery);
+        if items[winner].1.is_none() {
+            items[winner].1 = discovery_icon;
+        }
+        remove.insert(i);
+    }
+    if !remove.is_empty() {
+        let mut index = 0usize;
+        items.retain(|_| {
+            let keep = !remove.contains(&index);
+            index += 1;
+            keep
+        });
+    }
+}
+
+/// 同一 launch identity / 同一 exe（参数等价）/ 同安装根且名称族或 exe 词干链接。
+fn discovery_absorbs_into(discovery: &AppItem, formal: &AppItem) -> bool {
+    use super::util::{args_equivalent_for_merge, install_root_dir, launch_identity, names_share_install_family};
+
+    if launch_identity(&discovery.target, discovery.args.as_deref())
+        == launch_identity(&formal.target, formal.args.as_deref())
+    {
+        return true;
+    }
+
+    let td = normalize_path_key(&discovery.target);
+    let tf = normalize_path_key(&formal.target);
+    if !td.is_empty() && td == tf {
+        return args_equivalent_for_merge(discovery.args.as_deref(), formal.args.as_deref());
+    }
+
+    let (Some(rd), Some(rf)) = (install_root_dir(&discovery.target), install_root_dir(&formal.target))
+    else {
+        return false;
+    };
+    if rd != rf {
+        return false;
+    }
+    if !args_equivalent_for_merge(discovery.args.as_deref(), formal.args.as_deref()) {
+        return false;
+    }
+    names_share_install_family(&discovery.name, &formal.name)
+        || exe_stem_links_to_name(&discovery.target, &formal.name)
+        || exe_stem_links_to_name(&formal.target, &discovery.name)
+}
+
+fn exe_stem_links_to_name(target: &str, name: &str) -> bool {
+    let Some(stem) = std::path::Path::new(target)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase())
+    else {
+        return false;
+    };
+    if stem.len() < 3 {
+        return false;
+    }
+    let compact_name = crate::search::normalize_for_index(name)
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>();
+    // 仅允许「展示名包含 exe 词干」或全等；反向前缀（code ← CodeHelper）会误吸收。
+    !compact_name.is_empty() && (stem == compact_name || compact_name.starts_with(&stem))
+}
+
 /// 同一 target 的不同参数可能代表不同的启动语义（例如普通 PowerShell
 /// 与 Developer PowerShell），不能仅按 exe 路径合并。工作目录不参与
 /// 去重：开始菜单、桌面快捷方式经常只是在快捷方式元数据中提供了
 /// 不同的起始位置，而启动器会将无效或未提供的目录统一回落到用户主目录。
+/// 使用 `launch_identity`：`shell:AppsFolder\<绝对 exe 路径>` 与直接路径同一键。
 fn dedupe_key(item: &AppItem) -> String {
-    let target = normalize_path_key(&item.target);
-    hash_id(&[&target, item.args.as_deref().unwrap_or("")])
+    hash_id(&[
+        &launch_identity(&item.target, item.args.as_deref()),
+    ])
 }
 
 pub(crate) fn keep_shortcut_names(winner: &mut AppItem, other: &AppItem) {
@@ -328,6 +526,287 @@ mod tests {
         assert!(
             apps.is_empty(),
             "same-named AppsFolder row duplicates an existing system entry"
+        );
+    }
+
+    #[test]
+    fn discovery_same_target_is_absorbed_into_formal_row() {
+        let target = r"C:\Program Files\Example\example.exe";
+        let formal = AppItem::scanned(
+            "formal".into(),
+            "Example App".into(),
+            target.into(),
+            None,
+            None,
+            "start-menu",
+        );
+        let discovery = AppItem::scanned(
+            "discovery".into(),
+            "example".into(),
+            target.into(),
+            None,
+            None,
+            "app-paths",
+        );
+        let mut items = vec![(formal, None), (discovery, None)];
+        absorb_discovery_rows(&mut items);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].0.source, "start-menu");
+        assert!(items[0]
+            .0
+            .search_keywords
+            .iter()
+            .any(|kw| kw.eq_ignore_ascii_case("example")));
+    }
+
+    #[test]
+    fn discovery_same_install_and_stem_family_is_absorbed() {
+        let formal = AppItem::scanned(
+            "formal".into(),
+            "WPS Office".into(),
+            r"D:\Program Files\WPS Office\ksolaunch.exe".into(),
+            None,
+            None,
+            "start-menu",
+        );
+        let discovery = AppItem::scanned(
+            "discovery".into(),
+            "wps".into(),
+            r"D:\Program Files\WPS Office\12.1.0\office6\wps.exe".into(),
+            None,
+            None,
+            "app-paths",
+        );
+        let mut items = vec![(formal, None), (discovery, None)];
+        absorb_discovery_rows(&mut items);
+        assert_eq!(
+            items.len(),
+            1,
+            "same install product should absorb app-paths, got {:?}",
+            items.iter().map(|(i, _)| (&i.name, &i.source)).collect::<Vec<_>>()
+        );
+        assert_eq!(items[0].0.source, "start-menu");
+    }
+
+    #[test]
+    fn unabsorbed_discovery_fallback_row_is_kept() {
+        let formal = AppItem::scanned(
+            "formal".into(),
+            "Chrome".into(),
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe".into(),
+            None,
+            None,
+            "start-menu",
+        );
+        let discovery = AppItem::scanned(
+            "discovery".into(),
+            "ExamplePlayer".into(),
+            r"C:\Apps\Example\ExamplePlayer.exe".into(),
+            None,
+            None,
+            "app-paths",
+        );
+        let mut items = vec![(formal, None), (discovery, None)];
+        absorb_discovery_rows(&mut items);
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().any(|(i, _)| i.source == "app-paths"));
+    }
+
+    #[test]
+    fn discovery_with_different_launch_args_is_not_absorbed() {
+        let target = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+        let formal = AppItem::scanned(
+            "formal".into(),
+            "PowerShell".into(),
+            target.into(),
+            None,
+            None,
+            "start-menu",
+        );
+        let discovery = AppItem::scanned(
+            "discovery".into(),
+            "powershell".into(),
+            target.into(),
+            Some("-NoExit -Command Enter-VsDevShell".into()),
+            None,
+            "app-paths",
+        );
+        let mut items = vec![(formal, None), (discovery, None)];
+        absorb_discovery_rows(&mut items);
+        assert_eq!(
+            items.len(),
+            2,
+            "different launch args must stay separate rows"
+        );
+    }
+
+    #[test]
+    fn discovery_is_not_absorbed_into_command_alias() {
+        let target = r"C:\Apps\Example\example.exe";
+        let command = AppItem::scanned(
+            "cmd".into(),
+            "Example".into(),
+            target.into(),
+            None,
+            None,
+            "commands",
+        );
+        let discovery = AppItem::scanned(
+            "discovery".into(),
+            "Example App".into(),
+            target.into(),
+            None,
+            None,
+            "app-paths",
+        );
+        let mut items = vec![(command, None), (discovery, None)];
+        absorb_discovery_rows(&mut items);
+        assert_eq!(items.len(), 2, "commands are not absorption hosts");
+        assert!(items.iter().any(|(i, _)| i.source == "app-paths"));
+    }
+
+    #[test]
+    fn shell_apps_folder_path_merges_with_direct_exe() {
+        let path = r"C:\Program Files\Adobe\Adobe Lightroom Classic\Lightroom.exe";
+        let direct = AppItem::scanned(
+            "direct".into(),
+            "Adobe Lightroom Classic".into(),
+            path.into(),
+            None,
+            None,
+            "start-menu",
+        );
+        let shell = AppItem::scanned(
+            "shell".into(),
+            "Adobe Lightroom Classic".into(),
+            format!(r"shell:AppsFolder\{path}"),
+            None,
+            None,
+            "apps-folder",
+        );
+        let items = dedupe(vec![(direct, None), (shell, None)]);
+        assert_eq!(
+            items.len(),
+            1,
+            "shell-wrapped absolute path must dedupe with direct exe"
+        );
+        assert_eq!(items[0].0.source, "start-menu");
+    }
+
+    #[test]
+    fn apps_folder_aumid_row_merges_into_same_name_path_entry() {
+        let path = AppItem::scanned(
+            "path".into(),
+            "Application Verifier (WOW)".into(),
+            r"C:\Windows\SysWOW64\appverif.exe".into(),
+            None,
+            None,
+            "start-menu",
+        );
+        let shell = AppItem::scanned(
+            "shell".into(),
+            "Application Verifier (WOW)".into(),
+            r"shell:AppsFolder\{D65231B0-1234-4E5E-A8E7C6EA7D27}\appverif.exe".into(),
+            None,
+            None,
+            "apps-folder",
+        );
+        let mut items = vec![(shell, None), (path, None)];
+        merge_same_name_formal_duplicates(&mut items);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].0.source, "start-menu");
+        assert_eq!(items[0].0.name, "Application Verifier (WOW)");
+    }
+
+    #[test]
+    fn desktop_and_start_menu_same_name_url_merge() {
+        let start = AppItem::scanned(
+            "sm".into(),
+            "Dying Light".into(),
+            r"C:\Users\admin\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Steam\Dying Light.url".into(),
+            None,
+            None,
+            "start-menu",
+        );
+        let desk = AppItem::scanned(
+            "desk".into(),
+            "Dying Light".into(),
+            r"C:\Users\admin\Desktop\Games\Dying Light.url".into(),
+            None,
+            None,
+            "desktop",
+        );
+        let mut items = vec![(desk, None), (start, None)];
+        merge_same_name_formal_duplicates(&mut items);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].0.source, "start-menu");
+    }
+
+    #[test]
+    fn store_uwp_without_path_twin_is_kept() {
+        let store = AppItem::scanned(
+            "store".into(),
+            "Contoso App".into(),
+            r"shell:AppsFolder\Contoso.App_abc!App".into(),
+            None,
+            None,
+            "uwp",
+        );
+        let mut items = vec![(store, None)];
+        merge_same_name_formal_duplicates(&mut items);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].0.source, "uwp");
+    }
+
+    #[test]
+    fn chrome_aumid_and_start_menu_merge() {
+        let start = AppItem::scanned(
+            "sm".into(),
+            "Google Chrome".into(),
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe".into(),
+            None,
+            None,
+            "start-menu",
+        );
+        let shell = AppItem::scanned(
+            "shell".into(),
+            "Google Chrome".into(),
+            r"shell:AppsFolder\Chrome".into(),
+            None,
+            None,
+            "apps-folder",
+        );
+        let mut items = vec![(shell, None), (start, None)];
+        merge_same_name_formal_duplicates(&mut items);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].0.source, "start-menu");
+    }
+
+    #[test]
+    fn same_name_different_targets_are_both_kept() {
+        let wechat = AppItem::scanned(
+            "a".into(),
+            "微信".into(),
+            r"C:\A\WeChat\WeChat.exe".into(),
+            None,
+            None,
+            "start-menu",
+        );
+        let weixin = AppItem::scanned(
+            "b".into(),
+            "微信".into(),
+            r"C:\B\Weixin\Weixin.exe".into(),
+            None,
+            None,
+            "start-menu",
+        );
+        let mut items = vec![(wechat, None), (weixin, None)];
+        merge_same_name_formal_duplicates(&mut items);
+        assert_eq!(
+            items.len(),
+            2,
+            "同名不同安装根不得合并: {:?}",
+            items.iter().map(|(i, _)| &i.target).collect::<Vec<_>>()
         );
     }
 }

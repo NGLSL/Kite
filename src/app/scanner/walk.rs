@@ -80,6 +80,10 @@ pub(crate) fn collect_from_dir(
                 parsed
             };
             if let Some((target, args, working_dir, icon_src)) = resolved {
+                // 文档/安装包等非应用 target 不进索引（MSI Afterburner PDF 说明书等）。
+                if !util::is_launchable_lnk_target(&target) {
+                    continue;
+                }
                 let name = app_display_name(&file_name);
                 let id = stable_item_id(&target, args.as_deref());
                 let mut item = AppItem::scanned(id, name, target, args, working_dir, source);
