@@ -172,7 +172,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             sync_scroll(state)
         }
         Message::Rescan => {
-            plog("rescan requested from settings/tray");
+            state.qlog(|| "rescan requested from settings/tray".to_owned());
             state.rescan_pending = true;
             {
                 let mut options = state
@@ -189,7 +189,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             flash(state, "正在重新扫描应用索引…")
         }
         Message::Quit => {
-            plog("quit requested");
+            state.qlog(|| "quit requested".to_owned());
             std::process::exit(0);
         }
         Message::FlashClear => {
@@ -274,7 +274,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::OpenReleases => {
             let r = app::uwp::launch_shell_path(system::update::LATEST_RELEASE_URL);
-            plog(&format!("open releases err={r:?}"));
+            state.qlog(|| format!("open releases err={r:?}"));
             if r.is_err() {
                 flash(state, "打开 GitHub 最新发布页失败")
             } else {
@@ -283,7 +283,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::OpenRepository => {
             let r = app::uwp::launch_shell_path(system::update::REPOSITORY_URL);
-            plog(&format!("open repository err={r:?}"));
+            state.qlog(|| format!("open repository err={r:?}"));
             if r.is_err() {
                 flash(state, "打开 Kite 仓库失败")
             } else {
@@ -291,7 +291,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             }
         }
         Message::HotkeyUnavailable(spec) => {
-            plog(&format!("hotkey unavailable: {spec}"));
+            state.qlog(|| format!("hotkey unavailable: {spec}"));
             let show = open_settings(state);
             state.settings_section = Section::Hotkey;
             Task::batch([
@@ -309,7 +309,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 flash(state, "快捷键已更新")
             }
             Err(error) => {
-                plog(&format!("hotkey change rejected: {spec}; error={error}"));
+                state.qlog(|| format!("hotkey change rejected: {spec}; error={error}"));
                 flash(state, &format!("快捷键 {spec} 无法使用，请换一个组合键"))
             }
         },
@@ -325,7 +325,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 let _ = db.save_setting("autostart", if v { "1" } else { "0" });
             }
             let r = system::autostart::set_autostart(v);
-            plog(&format!("autostart -> {v} err={r:?}"));
+            state.qlog(|| format!("autostart -> {v} err={r:?}"));
             flash(state, "设置已保存")
         }
         Message::SetHideOnBlur(v) => {

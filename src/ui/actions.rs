@@ -306,6 +306,11 @@ mod interactive_log_gate_tests {
             &mut state,
             Message::FileSearchReady(0, String::new(), Vec::new(), 0),
         );
+        // 设置窗口内的动作：快捷键变更被拒
+        let _ = update(
+            &mut state,
+            Message::HotkeyRegistrationResult("Alt+X".into(), Err("boom".into())),
+        );
 
         assert_eq!(
             log::test_records(),
@@ -327,6 +332,10 @@ mod interactive_log_gate_tests {
             &mut state,
             Message::FileSearchReady(0, String::new(), Vec::new(), 0),
         );
+        let _ = update(
+            &mut state,
+            Message::HotkeyRegistrationResult("Alt+X".into(), Err("boom".into())),
+        );
 
         let records = log::test_records();
         assert!(
@@ -340,6 +349,10 @@ mod interactive_log_gate_tests {
         assert!(
             records.iter().any(|r| r.contains("file search ")),
             "开启时文件搜索落地必须仍写日志，实际：{records:?}"
+        );
+        assert!(
+            records.iter().any(|r| r.contains("hotkey change rejected")),
+            "开启时设置窗口动作必须仍写日志，实际：{records:?}"
         );
     }
 }
