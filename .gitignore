@@ -38,3 +38,6 @@ Thumbs.db
 
 # MiMo / mimocode local config and project skills
 .mimocode/
+
+# WorkBuddy local config, project skills and memory
+.workbuddy/
