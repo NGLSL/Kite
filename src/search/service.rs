@@ -327,7 +327,7 @@ fn run_job(job: AppSearchJob, run: &SearchRun<'_>, scratch: &mut MatcherScratch)
 
     // 阶段 1：用最新 prefs 完成个性化/归并/排序/截断
     let ranked =
-        index.finish_ranked_from_base(base, job.prefs.as_ref(), crate::search::MAX_RESULTS);
+        index.finish_ranked_from_base(base, job.prefs.as_ref(), &job.query, crate::search::MAX_RESULTS);
     if run.is_cancelled() {
         return;
     }

@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-/// 可启动的 Windows 应用条目（开始菜单 / 桌面 / App Paths）。
+/// 可启动的 Windows 应用条目（正式入口 / 系统入口 / Tier C 发现与命令）。
 #[derive(Debug, Clone, Serialize)]
 pub struct AppItem {
     pub id: String,
@@ -137,30 +137,72 @@ impl AppIndex {
     }
 }
 
-/// 索引来源的产品分层：用于空 Query 可见性与结果降噪，不表示删除索引。
+/// 索引来源的产品分层（Tier）：用于空 Query 可见性与结果降噪，不表示删除索引。
+///
+/// - **Tier A Formal**：Start Menu / Desktop / UWP / 用户 Portable
+/// - **Tier B System**：Kite curated 系统入口
+/// - **Tier C**：`Supplemental`（App Paths / Uninstall）与 `CommandAlias`（包管理器命令）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceLayer {
-    /// 正式应用入口：Start Menu / Desktop / UWP 等。
+    /// Tier A：用户可识别的正式应用入口。
     Formal,
-    /// 补充发现：App Paths / Uninstall / portable。
+    /// Tier C：发现来源——可作 alias/元数据/兜底，默认不当正式应用刷屏。
     Supplemental,
-    /// 命令 Alias：Scoop / WindowsApps / WinGet / Chocolatey。
+    /// Tier C：命令 Alias：Scoop / WindowsApps / WinGet / Chocolatey。
     CommandAlias,
-    /// 系统内置入口。
+    /// Tier B：Kite curated 系统入口。
     System,
 }
 
-/// 由扫描 source 字符串映射到产品分层。未知来源按正式入口处理，避免误杀。
+/// 由扫描 source 字符串映射到产品分层。**Formal 是白名单**，未知来源默认 Supplemental，
+/// 避免未来新扫描器忘记分类就变成正式应用。
 pub fn source_layer(source: &str) -> SourceLayer {
     match source {
+        "start-menu" | "desktop" | "uwp" | "apps-folder" | "portable" => SourceLayer::Formal,
+        "builtin" | "builtin-system" | "win-settings" => SourceLayer::System,
+        "app-paths" | "uninstall" => SourceLayer::Supplemental,
         "commands" | "scoop" => SourceLayer::CommandAlias,
-        "app-paths" | "uninstall" | "portable" => SourceLayer::Supplemental,
-        "builtin-system" | "win-settings" => SourceLayer::System,
-        _ => SourceLayer::Formal,
+        _ => SourceLayer::Supplemental,
     }
+}
+
+/// Discovery 来源（App Paths / Uninstall）：可作吸收/兜底，不单独刷屏。
+/// 与 `source_layer` 的 Supplemental 白名单对齐；未知 source 不算 Discovery。
+pub fn is_discovery_source(source: &str) -> bool {
+    matches!(source, "app-paths" | "uninstall")
+}
+
+/// 路径型正式入口：开始菜单 / 桌面 / 用户 Portable（不含 UWP）。
+pub fn is_path_formal_source(source: &str) -> bool {
+    matches!(source, "start-menu" | "desktop" | "portable")
 }
 
 /// 空 Query 默认列表是否隐藏该来源（Pin/最近使用仍可覆盖）。
 pub fn is_hidden_on_empty_query(source: &str) -> bool {
-    matches!(source_layer(source), SourceLayer::CommandAlias)
+    matches!(
+        source_layer(source),
+        SourceLayer::CommandAlias | SourceLayer::Supplemental
+    )
+}
+
+/// 目标是否落在系统目录（System32/SysWOW64/WindowsApps…）。
+/// 空 Query 不把这类正式快捷方式当应用补满；仍可搜索。
+pub fn is_system_dir_target(target: &str) -> bool {
+    let norm = target.trim().replace('/', "\\").to_ascii_lowercase();
+    const FRAGMENTS: &[&str] = &[
+        r"\windows\system32\",
+        r"\windows\syswow64\",
+        r"\windows\winsxs\",
+        r"\windowsapps\",
+        r"\winget\links\",
+        r"\chocolatey\bin\",
+        r"\microsoft\windowsapps\",
+    ];
+    let padded = format!("\\{norm}\\");
+    FRAGMENTS.iter().any(|fragment| padded.contains(fragment))
+}
+
+/// 空 Query 默认补满是否隐藏（来源层 + 系统目录噪声）。Pin/最近仍可覆盖。
+pub fn is_hidden_on_empty_fill(source: &str, target: &str) -> bool {
+    is_hidden_on_empty_query(source) || is_system_dir_target(target)
 }

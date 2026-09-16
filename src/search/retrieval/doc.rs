@@ -642,18 +642,21 @@ impl RetrievalIndex {
         Some(self.into_ranked(scored))
     }
 
-    /// 在基础候选上：个性化 → 命令弱匹配降噪 → 启动组归并 → 排序 → 截断。
+    /// 在基础候选上：个性化 → Tier C 弱匹配降噪 → 启动组归并 → 排序 → 截断。
+    /// 短 Query 判定来自本次搜索词，不依赖 Personalization（无历史 DB 时语义一致）。
     pub fn finish_ranked_from_base(
         &self,
         base: Vec<RankedHit>,
         personalization: Option<&crate::history::Personalization>,
+        query: &str,
         max_results: usize,
     ) -> Vec<RankedHit> {
         let mut ranked = base;
         if let Some(prefs) = personalization {
             self.apply_personalization_boosts(&mut ranked, prefs);
         }
-        demote_weak_command_aliases(&mut ranked, personalization);
+        let q_norm = crate::search::normalize_for_index(query);
+        demote_weak_tier_c(&mut ranked, &q_norm);
         let mut ranked = self.collapse_launch_groups(ranked, personalization);
         ranked.sort_by(cmp_ranked_hit);
         ranked.truncate(max_results);
@@ -703,7 +706,7 @@ impl RetrievalIndex {
         if run.is_cancelled() {
             return None;
         }
-        let ranked = self.finish_ranked_from_base(base, personalization, max_results);
+        let ranked = self.finish_ranked_from_base(base, personalization, query, max_results);
         if run.is_cancelled() {
             return None;
         }
@@ -724,7 +727,7 @@ impl RetrievalIndex {
         let Some(base) = self.search_base_ranked(query, user_targets, &mut scratch, &run) else {
             return Vec::new();
         };
-        self.finish_ranked_from_base(base, personalization, max_results)
+        self.finish_ranked_from_base(base, personalization, query, max_results)
     }
 
     fn into_ranked(&self, scored: Vec<ScoredHit>) -> Vec<RankedHit> {
@@ -935,7 +938,7 @@ fn is_shell_package(target: &str) -> bool {
 }
 
 fn is_friendly_source(source: &str) -> bool {
-    matches!(source, "start-menu" | "desktop" | "portable")
+    crate::model::is_path_formal_source(source)
 }
 
 /// 已确认同一安装、同一启动动作的入口才合并；不单靠同名，不无条件忽略参数。
@@ -984,43 +987,39 @@ fn strip_shell_target(target: &str) -> &str {
         .unwrap_or(t)
 }
 
-/// 非空 Query 命令 Alias 降噪：
+/// 非空 Query 的 Tier C 降噪（命令 Alias + Discovery）：
 /// - 精确 / 前缀 / 词匹配仍可展示（精确 `7z` 可用）；
-/// - 短 Query（≤2 字符）或弱匹配层沉底，避免 shims 刷屏。
+/// - 短 Query（≤2 字符）或弱匹配层沉底，避免 shims / 注册表发现项刷屏。
+/// `query_norm` 来自本次搜索词，不读 Personalization。
 /// 不删除索引项，不改启动 target。
-/// 尊重明确匹配保护：`quality_tier <= PROTECTED_TIER_MAX` 不因命令降噪后移。
-fn demote_weak_command_aliases(
-    ranked: &mut [RankedHit],
-    personalization: Option<&crate::history::Personalization>,
-) {
+/// 尊重明确匹配保护：`quality_tier <= PROTECTED_TIER_MAX` 不因分层降噪后移。
+fn demote_weak_tier_c(ranked: &mut [RankedHit], query_norm: &str) {
     use crate::model::{source_layer, SourceLayer};
     use crate::history::PROTECTED_TIER_MAX;
     /// 弱匹配层阈值：5 起为拼音/词前缀/子串/模糊（见 history::quality_tier）。
     const WEAK_TIER_MIN: i32 = 5;
     /// 降噪沉底层：排在正式应用之后。
-    const COMMAND_NOISE_TIER: i32 = 9;
-    /// 弱命令候选扣分，避免同层内仍压过正式应用。
-    const COMMAND_NOISE_SCORE_PENALTY: i32 = 250;
+    const TIER_C_NOISE_TIER: i32 = 9;
+    /// 弱候选扣分，避免同层内仍压过正式应用。
+    const TIER_C_NOISE_SCORE_PENALTY: i32 = 250;
     /// 短 Query 字符数上限。
     const SHORT_QUERY_MAX_CHARS: usize = 2;
 
-    let query_norm = personalization
-        .map(|p| p.query_norm.as_str())
-        .unwrap_or("");
     let short_query = !query_norm.is_empty() && query_norm.chars().count() <= SHORT_QUERY_MAX_CHARS;
     for hit in ranked.iter_mut() {
-        if source_layer(&hit.source) != SourceLayer::CommandAlias {
+        let layer = source_layer(&hit.source);
+        if layer != SourceLayer::CommandAlias && layer != SourceLayer::Supplemental {
             continue;
         }
-        // 明确匹配保护优先于命令降噪（CONTEXT / 规格）。
+        // 明确匹配保护优先于分层降噪（CONTEXT / 规格）。
         if hit.quality_tier <= PROTECTED_TIER_MAX {
             continue;
         }
         let weak = hit.quality_tier >= WEAK_TIER_MIN
             || (short_query && hit.quality_tier > PROTECTED_TIER_MAX);
         if weak {
-            hit.quality_tier = COMMAND_NOISE_TIER;
-            hit.score = hit.score.saturating_sub(COMMAND_NOISE_SCORE_PENALTY);
+            hit.quality_tier = TIER_C_NOISE_TIER;
+            hit.score = hit.score.saturating_sub(TIER_C_NOISE_SCORE_PENALTY);
         }
     }
 }
