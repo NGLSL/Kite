@@ -385,6 +385,47 @@ mod tests {
     use crate::ui::MenuAction;
 
     #[test]
+    fn bootstrap_ready_bumps_index_generation_and_clears_base_cache() {
+        use super::super::interaction::update;
+        use super::super::Message;
+
+        let mut state = test_state("chrome");
+        {
+            let mut item = crate::model::AppItem::scanned(
+                "chrome".into(),
+                "Google Chrome".into(),
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe".into(),
+                None,
+                None,
+                "start-menu",
+            );
+            item.attach_search_fields();
+            let mut index = state.index.lock().unwrap_or_else(|e| e.into_inner());
+            index.apps.push(item);
+            index.rebuild_retrieval();
+        }
+        let before_gen = state.index_generation;
+        let epoch = state.base_hit_cache.epoch();
+        assert!(state
+            .base_hit_cache
+            .insert_if_epoch(epoch, before_gen, "chrome", vec![]));
+        assert!(!state.base_hit_cache.is_empty());
+        state.index_ready = false;
+
+        let _ = update(&mut state, Message::BootstrapReady(1));
+
+        assert!(
+            state.index_generation == before_gen.wrapping_add(1),
+            "Bootstrap 必须提升索引代际"
+        );
+        assert!(
+            state.base_hit_cache.is_empty(),
+            "Bootstrap 后不得继续服务旧代际候选缓存"
+        );
+        assert!(state.index_ready);
+    }
+
+    #[test]
     fn non_empty_query_refresh_delegates_to_worker() {
         let mut state = test_state("k");
         let before = state.app_search_worker.latest_seq();

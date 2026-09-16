@@ -12,9 +12,9 @@ use crate::model::{AppIndex, AppItem};
 
 pub const SNAPSHOT_VERSION: u32 = 1;
 pub const SEARCH_SCHEMA_VERSION: u32 = 1;
-/// Warm Start 资格：超过该年龄的 last-good 不恢复，走冷 Bootstrap。
-/// Full 连续失败时避免「越用越旧」；成功 Full 会覆盖并刷新时间戳。
-const MAX_WARM_AGE_SECS: u64 = 24 * 3600;
+/// 仅用于日志/观测：超过该年龄仍可 Warm Start（stale-while-revalidate），
+/// 启动后本来就会跑 Full 刷新。硬拒绝 last-good 会牺牲两天未开用户的首屏体验。
+const WARM_SOFT_AGE_SECS: u64 = 24 * 3600;
 
 const FILE_NAME: &str = "index-snapshot.json";
 
@@ -72,7 +72,7 @@ pub struct CachedAppItem {
 pub struct CachedAppSnapshot {
     pub snapshot_version: u32,
     pub search_schema_version: u32,
-    /// Full 写入时刻（unix 秒）；旧快照缺字段为 0，视为过期。
+    /// Full 写入时刻（unix 秒）；旧快照缺字段为 0，仅影响 age 日志，不阻止 Warm。
     #[serde(default)]
     pub saved_at_unix: u64,
     pub apps: Vec<CachedAppItem>,
@@ -165,12 +165,6 @@ fn is_compatible(snapshot: &CachedAppSnapshot) -> bool {
         && !snapshot.apps.is_empty()
 }
 
-/// 版本兼容且未超过 Warm 最大年龄。
-fn is_warm_eligible(snapshot: &CachedAppSnapshot, now_unix: u64) -> bool {
-    is_compatible(snapshot)
-        && now_unix.saturating_sub(snapshot.saved_at_unix) <= MAX_WARM_AGE_SECS
-}
-
 /// Full 成功后写 last-good。Bootstrap/不完整结果不要调用。
 pub fn save(index: &AppIndex) -> std::io::Result<()> {
     save_to(&runtime_data_dir(), index)
@@ -182,15 +176,62 @@ pub fn save_to(data_dir: &Path, index: &AppIndex) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_vec(&snapshot)?;
     std::fs::write(&tmp, json)?;
-    // Windows 的 rename 不会覆盖已存在目标；与 ScanCache 一致：先删再改名。
-    if path.exists() {
-        let _ = std::fs::remove_file(&path);
-    }
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+    atomic_replace(&tmp, &path)
 }
 
-/// Warm Start：版本兼容且未超过 24h 则返回可搜索 AppIndex；否则 None（冷启动）。
+/// 用 `ReplaceFileW` / `MoveFileExW` 把 tmp 换到 dest，避免「先删再 rename」
+/// 中间态窗口里进程被杀或读到空 last-good。失败再退回 remove+rename。
+fn atomic_replace(tmp: &Path, dest: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Storage::FileSystem::{
+            MoveFileExW, ReplaceFileW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+            REPLACEFILE_WRITE_THROUGH,
+        };
+        use windows::core::PCWSTR;
+
+        fn wide(p: &Path) -> Vec<u16> {
+            p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+        }
+
+        let tmp_w = wide(tmp);
+        let dest_w = wide(dest);
+        let replaced = unsafe {
+            if dest.exists() {
+                // dest 已存在：ReplaceFileW 原子替换，保留 dest 的 ACL/属性。
+                let r = ReplaceFileW(
+                    PCWSTR(dest_w.as_ptr()),
+                    PCWSTR(tmp_w.as_ptr()),
+                    PCWSTR::null(),
+                    REPLACEFILE_WRITE_THROUGH,
+                    None,
+                    None,
+                );
+                if r.is_ok() {
+                    return Ok(());
+                }
+            }
+            // 首次写入或 ReplaceFileW 失败（如 dest 被占用）：MoveFileExW 同卷替换。
+            MoveFileExW(
+                PCWSTR(tmp_w.as_ptr()),
+                PCWSTR(dest_w.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if replaced.is_ok() {
+            return Ok(());
+        }
+    }
+    // 兜底：跨平台路径 / 上述 API 失败
+    if dest.exists() {
+        let _ = std::fs::remove_file(dest);
+    }
+    std::fs::rename(tmp, dest)
+}
+
+/// Warm Start：版本兼容即可恢复（含很旧的 last-good）；启动后 Full 会刷新。
+/// schema 不兼容 / 损坏 / 空 apps 才拒绝。
 pub fn load() -> Option<AppIndex> {
     load_from(&runtime_data_dir())
 }
@@ -199,22 +240,30 @@ pub fn load_from(data_dir: &Path) -> Option<AppIndex> {
     let path = snapshot_path(data_dir);
     let bytes = std::fs::read(&path).ok()?;
     let snapshot: CachedAppSnapshot = serde_json::from_slice(&bytes).ok()?;
-    let now = crate::storage::now_ts().max(0) as u64;
-    if !is_warm_eligible(&snapshot, now) {
+    if !is_compatible(&snapshot) {
         crate::log::info(&format!(
-            "index snapshot incompatible/expired/empty; cold start (path={}, age_s={}, saved={})",
-            path.display(),
-            now.saturating_sub(snapshot.saved_at_unix),
-            snapshot.saved_at_unix
+            "index snapshot incompatible or empty; cold start (path={})",
+            path.display()
         ));
         return None;
     }
+    let now = crate::storage::now_ts().max(0) as u64;
+    let age = now.saturating_sub(snapshot.saved_at_unix);
     let index = into_index(snapshot);
-    crate::log::info(&format!(
-        "warm start from snapshot n={} ({})",
-        index.apps.len(),
-        path.display()
-    ));
+    if age > WARM_SOFT_AGE_SECS {
+        crate::log::info(&format!(
+            "warm start from aged snapshot n={} age_s={} ({})",
+            index.apps.len(),
+            age,
+            path.display()
+        ));
+    } else {
+        crate::log::info(&format!(
+            "warm start from snapshot n={} ({})",
+            index.apps.len(),
+            path.display()
+        ));
+    }
     Some(index)
 }
 
@@ -319,18 +368,18 @@ mod tests {
     }
 
     #[test]
-    fn expired_snapshot_is_not_warm_eligible() {
+    fn aged_snapshot_still_warm_eligible() {
         let mut snapshot = from_index(&AppIndex {
             apps: vec![sample_item()],
             system_entries: Vec::new(),
             retrieval: None,
         });
-        let now = snapshot.saved_at_unix;
-        assert!(is_warm_eligible(&snapshot, now));
-        assert!(is_warm_eligible(&snapshot, now + MAX_WARM_AGE_SECS));
-        assert!(!is_warm_eligible(&snapshot, now + MAX_WARM_AGE_SECS + 1));
-        // 旧格式缺 saved_at_unix → 0 → 过期
-        snapshot.saved_at_unix = 0;
-        assert!(!is_warm_eligible(&snapshot, MAX_WARM_AGE_SECS + 10));
+        // 很旧但仍兼容：允许 Warm（stale-while-revalidate）
+        snapshot.saved_at_unix = snapshot
+            .saved_at_unix
+            .saturating_sub(WARM_SOFT_AGE_SECS * 7);
+        assert!(is_compatible(&snapshot));
+        snapshot.search_schema_version += 1;
+        assert!(!is_compatible(&snapshot), "schema 不兼容必须拒绝");
     }
 }

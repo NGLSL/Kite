@@ -501,6 +501,16 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 Task::none()
             }
         }
+        Message::BootstrapReady(n) => {
+            plog(&format!("bootstrap index ready n={n}"));
+            state.index_ready = true;
+            // Bootstrap 直接替换了 state.index：必须作废 query/base 缓存代际，
+            // 否则 Bootstrap 前基于 empty index 的结果可能被当成当前代。
+            state.index_generation = state.index_generation.wrapping_add(1);
+            state.base_hit_cache.clear();
+            state.refresh_results();
+            Task::none()
+        }
     }
 }
 

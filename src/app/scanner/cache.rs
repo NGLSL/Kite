@@ -36,7 +36,8 @@ struct CacheEntry {
 pub struct ScanCache {
     file: PathBuf,
     entries: HashMap<String, CacheEntry>,
-    /// 本次扫描见过的路径；save 时只保留这些，自动清掉已删除的 lnk。
+    /// 本次扫描见过的路径；Full 的 `save(true)` 只保留这些，自动清掉已删除的 lnk。
+    /// Bootstrap/Fast 的 `save(false)` 会保留未见到的旧条目。
     seen: HashSet<String>,
     pub hits: usize,
     pub misses: usize,
@@ -107,14 +108,15 @@ impl ScanCache {
         );
     }
 
-    /// 原子写盘（tmp + rename）；失败静默，下次全量扫描即可。
-    pub fn save(&self) {
+    /// 写盘。`prune_unseen=true` 时只保留本轮 `seen` 的路径（Full 用，清掉已删 lnk）。
+    /// Bootstrap/Fast 是部分扫描，必须 `prune_unseen=false`，否则会把 Full 仍需要的深层缓存裁掉。
+    pub fn save(&self, prune_unseen: bool) {
         let file = CacheFile {
             version: CACHE_VERSION,
             entries: self
                 .entries
                 .iter()
-                .filter(|(k, _)| self.seen.contains(*k))
+                .filter(|(k, _)| !prune_unseen || self.seen.contains(*k))
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
         };
@@ -282,7 +284,7 @@ mod tests {
         let mut cache = ScanCache::load(&dir);
         assert_eq!(cache.lookup(&lnk), None, "首次必然 miss");
         cache.record(&lnk, &resolved());
-        cache.save();
+        cache.save(true);
 
         let mut again = ScanCache::load(&dir);
         assert_eq!(
@@ -301,7 +303,7 @@ mod tests {
         std::fs::write(&lnk, b"old").unwrap();
         let mut cache = ScanCache::load(&dir);
         cache.record(&lnk, &resolved());
-        cache.save();
+        cache.save(true);
 
         std::fs::write(&lnk, b"new content").unwrap();
         let mut again = ScanCache::load(&dir);
@@ -334,11 +336,32 @@ mod tests {
         std::fs::write(&lnk, b"x").unwrap();
         let mut cache = ScanCache::load(&dir);
         cache.record(&lnk, &resolved());
-        // 第二次扫描没再见到该文件：新缓存实例的 seen 为空 → 保存后条目被清掉
+        // 第二次扫描没再见到该文件：prune_unseen=true → 保存后条目被清掉
         let second = ScanCache::load(&dir);
-        second.save();
+        second.save(true);
         let mut again = ScanCache::load(&dir);
         assert_eq!(again.lookup(&lnk), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn partial_scan_save_keeps_unseen_entries() {
+        let dir = temp_dir("no-prune");
+        let lnk = dir.join("deep.lnk");
+        std::fs::write(&lnk, b"x").unwrap();
+        let mut full = ScanCache::load(&dir);
+        full.record(&lnk, &resolved());
+        full.save(true);
+
+        // Bootstrap 只看到别的路径：不得裁掉 deep.lnk
+        let bootstrap = ScanCache::load(&dir);
+        bootstrap.save(false);
+        let mut again = ScanCache::load(&dir);
+        assert_eq!(
+            again.lookup(&lnk).map(|r| r.0),
+            Some(r"C:\apps\foo.exe".into()),
+            "partial scan must not prune unseen lnk cache"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

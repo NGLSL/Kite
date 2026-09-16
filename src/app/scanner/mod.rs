@@ -188,7 +188,46 @@ fn scan_apps_with_options(icon_dir: &Path, pass: ScanPass, options: &ScanOptions
         ));
     }
 
-    // 用户 Portable：Tier A 正式入口，Bootstrap/Full 都收集。
+    // Start Menu/Desktop 优先，Portable 其后：避免大 Portable 目录吃光 Bootstrap 预算。
+    let steps: [(&str, PathBuf, &str, usize); 4] = [
+        ("user-start", user_start, "start-menu", start_depth),
+        ("common-start", common_start, "start-menu", start_depth),
+        ("user-desktop", user_desktop, "desktop", other_depth),
+        ("public-desktop", public_desktop, "desktop", other_depth),
+    ];
+
+    for (label, root, source, max_depth) in steps {
+        if budget_exhausted(budget, t0) {
+            crate::log::info(&format!("scan budget hit before {label}"));
+            break;
+        }
+        if raw.len() >= max_total {
+            crate::log::info(&format!(
+                "scan safety cap max_total={max_total} before {label}; uncovered dir recorded"
+            ));
+            break;
+        }
+        let before = raw.len();
+        collect_from_dir(
+            &root,
+            source,
+            max_depth,
+            budget,
+            t0,
+            max_per_dir,
+            max_total,
+            &mut raw,
+            &mut cache,
+        );
+        crate::log::info(&format!(
+            "{label}: +{} -> total {} in {:?}",
+            raw.len() - before,
+            raw.len(),
+            t0.elapsed()
+        ));
+    }
+
+    // 用户 Portable：Tier A 正式入口，Bootstrap/Full 都收集；排在 Start Menu/Desktop 之后。
     for root in &options.portable_dirs {
         if budget_exhausted(budget, t0) || raw.len() >= max_total {
             break;
@@ -234,44 +273,6 @@ fn scan_apps_with_options(icon_dir: &Path, pass: ScanPass, options: &ScanOptions
         ));
     }
 
-    let steps: [(&str, PathBuf, &str, usize); 4] = [
-        ("user-start", user_start, "start-menu", start_depth),
-        ("common-start", common_start, "start-menu", start_depth),
-        ("user-desktop", user_desktop, "desktop", other_depth),
-        ("public-desktop", public_desktop, "desktop", other_depth),
-    ];
-
-    for (label, root, source, max_depth) in steps {
-        if budget_exhausted(budget, t0) {
-            crate::log::info(&format!("scan budget hit before {label}"));
-            break;
-        }
-        if raw.len() >= max_total {
-            crate::log::info(&format!(
-                "scan safety cap max_total={max_total} before {label}; uncovered dir recorded"
-            ));
-            break;
-        }
-        let before = raw.len();
-        collect_from_dir(
-            &root,
-            source,
-            max_depth,
-            budget,
-            t0,
-            max_per_dir,
-            max_total,
-            &mut raw,
-            &mut cache,
-        );
-        crate::log::info(&format!(
-            "{label}: +{} -> total {} in {:?}",
-            raw.len() - before,
-            raw.len(),
-            t0.elapsed()
-        ));
-    }
-
     if pass.include_app_paths() && !budget_exhausted(budget, t0) && raw.len() < max_total {
         let t = Instant::now();
         registry::collect_app_paths("app-paths", &mut raw);
@@ -282,7 +283,8 @@ fn scan_apps_with_options(icon_dir: &Path, pass: ScanPass, options: &ScanOptions
         ));
     }
 
-    cache.save();
+    // 仅 Full 裁剪 unseen：Bootstrap/Fast 预算/深度有限，不能清掉深层缓存。
+    cache.save(matches!(pass, ScanPass::Full));
     crate::log::info(&format!(
         "lnk cache: {} hits / {} misses in {:?}",
         cache.hits,

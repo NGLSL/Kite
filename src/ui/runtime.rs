@@ -97,11 +97,14 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
 
     let index = std::sync::Arc::new(Mutex::new(AppIndex::empty()));
     // Warm Start：兼容 last-good 直接恢复可搜索快照；失败则保持 empty，走 Cold Bootstrap。
+    let mut index_ready = false;
     if let Some(loaded) = app::snapshot::load() {
         let n = loaded.apps.len();
         *index
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = loaded;
+        // 已有可搜索 RetrievalIndex：语义上应视为 ready，不必等 FullIndexReady。
+        index_ready = true;
         plog(&format!("boot restored last-good snapshot n={n}"));
     }
     let saved_settings = history_db
@@ -270,7 +273,7 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         alt_down: false,
         query_at_alt: None,
         alt_digit_consumed: false,
-        index_ready: false,
+        index_ready,
         rescan_pending: false,
         files_mode: false,
         file_query_generation: 0,

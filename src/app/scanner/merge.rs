@@ -809,4 +809,174 @@ mod tests {
             items.iter().map(|(i, _)| &i.target).collect::<Vec<_>>()
         );
     }
+
+    /// 本机 formal 归并 dry-run：`cargo test --lib dryrun_formal -- --ignored --nocapture`
+    /// 用于在收紧 shell 同名吸收前，先看真实 Start Menu/Desktop/UWP 会不会错合并。
+    #[test]
+    #[ignore = "本机数据 dry-run，不进默认 CI"]
+    fn dryrun_formal_pair_merges_on_this_machine() {
+        use super::super::cache::ScanCache;
+        use super::super::pass::{
+            FULL_MAX_PER_DIR, FULL_MAX_TOTAL, FULL_OTHER_SOURCE_MAX_DEPTH, FULL_START_MENU_MAX_DEPTH,
+        };
+        use super::super::walk::collect_from_dir;
+        use std::collections::BTreeMap;
+        use std::path::PathBuf;
+        use std::time::Instant;
+
+        let icon_dir = std::env::temp_dir().join("kite-formal-merge-dryrun");
+        let mut cache = ScanCache::load(&icon_dir);
+        let mut items: Vec<RawItem> = Vec::new();
+        let t0 = Instant::now();
+
+        let user_start = crate::app::scanner::util::user_start_menu_dir()
+            .unwrap_or_else(|| {
+                dirs::data_dir()
+                    .unwrap_or_default()
+                    .join("Microsoft/Windows/Start Menu")
+            });
+        let common_start = crate::app::scanner::util::common_start_menu_dir()
+            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData\Microsoft\Windows\Start Menu"));
+        let roots: [(PathBuf, &str); 4] = [
+            (user_start, "start-menu"),
+            (common_start, "start-menu"),
+            (dirs::desktop_dir().unwrap_or_default(), "desktop"),
+            (PathBuf::from(r"C:\Users\Public\Desktop"), "desktop"),
+        ];
+        for (root, source) in roots {
+            let depth = if source == "start-menu" {
+                FULL_START_MENU_MAX_DEPTH
+            } else {
+                FULL_OTHER_SOURCE_MAX_DEPTH
+            };
+            collect_from_dir(
+                &root,
+                source,
+                depth,
+                None,
+                t0,
+                FULL_MAX_PER_DIR,
+                FULL_MAX_TOTAL,
+                &mut items,
+                &mut cache,
+            );
+        }
+        crate::app::uwp::collect_uwp("uwp", &mut items);
+
+        println!("=== formal dry-run: collected {} raw items ===", items.len());
+
+        // 只看 formal 源的同名组
+        let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (i, (item, _)) in items.iter().enumerate() {
+            if formal_source_rank(&item.source).is_none() {
+                continue;
+            }
+            let key = compact_item_name(item);
+            if key.is_empty() {
+                continue;
+            }
+            groups.entry(key).or_default().push(i);
+        }
+
+        let multi: Vec<_> = groups.into_values().filter(|v| v.len() >= 2).collect();
+        println!("same-name formal groups (n>=2): {}", multi.len());
+
+        let mut would_merge = 0usize;
+        let mut keep_both = 0usize;
+        let mut high_risk = 0usize;
+        let mut diff_target_merges = 0usize;
+        for indices in &multi {
+            // 按与 merge 相同的 winner 规则
+            let Some(&winner) = indices.iter().min_by(|&&a, &&b| {
+                formal_source_rank(&items[a].0.source)
+                    .unwrap_or(u8::MAX)
+                    .cmp(&formal_source_rank(&items[b].0.source).unwrap_or(u8::MAX))
+                    .then_with(|| items[a].0.id.cmp(&items[b].0.id))
+            }) else {
+                continue;
+            };
+            let mut lines = Vec::new();
+            lines.push(format!(
+                "GROUP name={} winner=[{}] {} -> {} args={:?} id={}",
+                items[winner].0.name,
+                items[winner].0.source,
+                items[winner].0.id,
+                items[winner].0.target,
+                items[winner].0.args,
+                launch_identity(&items[winner].0.target, items[winner].0.args.as_deref())
+            ));
+            for &loser in indices {
+                if loser == winner {
+                    continue;
+                }
+                let merges = formal_pair_merges(&items[winner].0, &items[loser].0);
+                let shell_pair = is_shell_app_source(&items[winner].0.source)
+                    != is_shell_app_source(&items[loser].0.source);
+                if merges {
+                    would_merge += 1;
+                } else {
+                    keep_both += 1;
+                }
+                if shell_pair && merges {
+                    high_risk += 1;
+                }
+                if merges
+                    && normalize_path_key(&items[winner].0.target)
+                        != normalize_path_key(&items[loser].0.target)
+                {
+                    diff_target_merges += 1;
+                }
+                lines.push(format!(
+                    "  {} [{}] {} -> {} args={:?} id={}{}",
+                    if merges { "MERGE " } else { "KEEP  " },
+                    items[loser].0.source,
+                    items[loser].0.id,
+                    items[loser].0.target,
+                    items[loser].0.args,
+                    launch_identity(&items[loser].0.target, items[loser].0.args.as_deref()),
+                    if shell_pair { "  (shell+path)" } else { "" }
+                ));
+            }
+            // 打印：任意 KEEP、任意 shell+path、或任意不同 target 的 MERGE（错合并候选）
+            let any_keep = indices
+                .iter()
+                .any(|&l| l != winner && !formal_pair_merges(&items[winner].0, &items[l].0));
+            let any_shell_merge = indices.iter().any(|&l| {
+                l != winner
+                    && is_shell_app_source(&items[winner].0.source)
+                        != is_shell_app_source(&items[l].0.source)
+                    && formal_pair_merges(&items[winner].0, &items[l].0)
+            });
+            let any_diff_target_merge = indices.iter().any(|&l| {
+                l != winner
+                    && formal_pair_merges(&items[winner].0, &items[l].0)
+                    && normalize_path_key(&items[winner].0.target)
+                        != normalize_path_key(&items[l].0.target)
+            });
+            if any_keep || any_shell_merge || any_diff_target_merge {
+                for line in &lines {
+                    println!("{line}");
+                }
+            }
+        }
+        println!(
+            "summary: groups={} merge_pairs={} keep_pairs={} shell_path_merges={} diff_target_merges={}",
+            multi.len(),
+            would_merge,
+            keep_both,
+            high_risk,
+            diff_target_merges
+        );
+
+        let mut after = items.clone();
+        merge_same_name_formal_duplicates(&mut after);
+        println!(
+            "merge_same_name_formal_duplicates: {} -> {}",
+            items.len(),
+            after.len()
+        );
+
+        // 断言只是防静默失败；真实结论看 --nocapture 输出
+        assert!(!items.is_empty(), "本机 formal 扫描不应为空");
+    }
 }

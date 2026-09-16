@@ -168,7 +168,9 @@ fn publish_bootstrap(
         "index bootstrap n={count} {status} in {:?} (generation={generation})",
         started.elapsed()
     ));
-    let _ = tx.unbounded_send(Message::FullIndexReady(count));
+    // Bootstrap 是一次真实的索引代际变化：不可复用 FullIndexReady
+    // （那会让 UI 误以为要取 pending Full，并跳过代际失效）。
+    let _ = tx.unbounded_send(Message::BootstrapReady(count));
     true
 }
 

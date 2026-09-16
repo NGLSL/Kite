@@ -196,6 +196,8 @@ enum Message {
     HotkeyRegistrationResult(String, Result<(), String>),
     /// 后台完整扫描完成并已原子替换快照。
     FullIndexReady(usize),
+    /// Cold Bootstrap 已发布可搜索索引；必须提升代际并作废旧缓存。
+    BootstrapReady(usize),
     /// 二次启动：请求主实例显示窗口（已显示则只抢焦点，不切换隐藏）。
     EnsureVisible,
 }
