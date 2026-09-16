@@ -1,10 +1,15 @@
 # Kite 100 次连续唤起 + 驻留资源采样。
 # 方法对齐 docs/PERFORMANCE.md：Alt+Space → 窗口可见 → Esc，间隔 20ms。
 # 用法：.\scripts\measure-performance.ps1 [-Iterations 100] [-OutCsv path]
+#
+# 静默 CPU 口径：索引发布（index complete）后还有约 4-5 秒的收尾工作
+# （无日志输出，实测 10 秒窗口内可烧掉 ~4.6 秒 CPU）。因此必须等这段收尾
+# 结束再取基线，否则 idle_cpu_delta_s 量到的是收尾而不是静默。
 param(
     [int]$Iterations = 100,
     [int]$IdleSeconds = 20,
     [int]$GapMs = 20,
+    [int]$SettleSeconds = 15,
     [string]$OutCsv = "",
     [string]$ExePath = ""
 )
@@ -133,24 +138,30 @@ function Get-LogMarker {
     if (Test-Path $log) { (Get-Item $log).Length } else { 0 }
 }
 
-function Wait-IndexReady([int]$procId, [int]$timeoutMs) {
+function Wait-IndexReady([int]$procId, [int]$timeoutMs, [long]$fromOffset) {
+    # 只认本次启动之后新追加的日志：应用从不打印 pid，而 tail 里通常还留着
+    # 上一次运行的 index complete，按 tail 判断会立刻"就绪"，把 6 秒多的索引
+    # 扫描算进后面的静默窗口（idle_cpu_delta_s 因此被扫描 CPU 污染）。
     $log = Join-Path $env:APPDATA "com.kite.launcher\kite.log"
     $deadline = [DateTime]::UtcNow.AddMilliseconds($timeoutMs)
     while ([DateTime]::UtcNow -lt $deadline) {
         if (Test-Path $log) {
-            $tail = Get-Content $log -Tail 80 -ErrorAction SilentlyContinue
-            $ready = $tail | Where-Object { $_ -match 'index complete|full index ready|index ready' }
-            $ours = $tail | Where-Object { $_ -match "pid=$procId" -or $_ -match "entry version=.*pid=$procId" }
-            # Prefer a line after our pid that says index complete
-            if ($ready) {
-                $recent = Get-Content $log -Tail 200 -ErrorAction SilentlyContinue
-                $sawPid = $false
-                foreach ($line in $recent) {
-                    if ($line -match "pid=$procId") { $sawPid = $true }
-                    if ($sawPid -and $line -match 'index complete n=\d+') { return $true }
-                }
-                # Fallback: log already has a completed index for this process tree
-                if ($ready) { return $true }
+            try {
+                $fs = [System.IO.File]::Open($log, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                try {
+                    $len = $fs.Length
+                    # 日志达到上限后会裁剪重写，偏移失效时从头读。
+                    if ($len -lt $fromOffset) { $fromOffset = 0 }
+                    if ($len -gt $fromOffset) {
+                        [void]$fs.Seek($fromOffset, [System.IO.SeekOrigin]::Begin)
+                        $buf = New-Object byte[] ($len - $fromOffset)
+                        $read = $fs.Read($buf, 0, $buf.Length)
+                        $text = [System.Text.Encoding]::UTF8.GetString($buf, 0, $read)
+                        if ($text -match 'index complete n=\d+') { return $true }
+                    }
+                } finally { $fs.Close() }
+            } catch {
+                # 读取竞争（写盘/裁剪）不应中断测量，下一轮再试。
             }
         }
         Start-Sleep -Milliseconds 200
@@ -176,15 +187,23 @@ if (-not $OutCsv) {
 Get-Process kite -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 500
 
+# 记录启动前的日志长度：只有这之后新出现的 index complete 才算本次就绪。
+$logPath = Join-Path $env:APPDATA "com.kite.launcher\kite.log"
+$logLenBefore = 0
+if (Test-Path $logPath) { $logLenBefore = (Get-Item $logPath).Length }
+
 Write-Host "Starting $ExePath ..."
 $proc = Start-Process -FilePath $ExePath -PassThru
 Start-Sleep -Milliseconds 800
 if ($proc.HasExited) { throw "Kite exited immediately code=$($proc.ExitCode)" }
 
 Write-Host "Waiting for index ready (pid=$($proc.Id)) ..."
-$ready = Wait-IndexReady -procId $proc.Id -timeoutMs 60000
+$ready = Wait-IndexReady -procId $proc.Id -timeoutMs 60000 -fromOffset $logLenBefore
 if (-not $ready) { Write-Warning "Index-ready marker not observed; continuing after extra wait" ; Start-Sleep -Seconds 3 }
-Start-Sleep -Milliseconds 1500
+
+# 索引发布后仍有收尾工作（见文件头说明）：等到它结束，静默样本才有意义。
+Write-Host ("Settling {0}s before the idle baseline ..." -f $SettleSeconds)
+Start-Sleep -Seconds $SettleSeconds
 
 # Stable idle baseline
 $before = Get-Process -Id $proc.Id
@@ -293,6 +312,7 @@ $summary = [pscustomobject]@{
     working_min_mb = $workStats.min
     working_max_mb = $workStats.max
     idle_seconds = $IdleSeconds
+    settle_seconds = $SettleSeconds
     idle_cpu_delta_s = [math]::Round($cpuDelta, 3)
     idle_private_mb = $privateIdle
     idle_working_mb = $workingIdle

@@ -1,9 +1,24 @@
 import csv
 import math
 import statistics
+import sys
 from pathlib import Path
 
-csv_path = Path(r"D:\Project\Kite\docs\performance-kite-20260916-011716.csv")
+# 用法：python scripts/render-performance-svg.py [输入 csv] [输出 svg]
+# 默认仍是 2026-09-16 上午那轮的数据与文件，便于复现原曲线。
+csv_path = Path(
+    sys.argv[1]
+    if len(sys.argv) > 1
+    else r"D:\Project\Kite\docs\performance-kite-20260916-011716.csv"
+)
+out_path = Path(
+    sys.argv[2] if len(sys.argv) > 2 else r"D:\Project\Kite\docs\performance-100.svg"
+)
+subtitle = (
+    sys.argv[3]
+    if len(sys.argv) > 3
+    else "Windows 11 26200 · i5-13490F · Release · Alt+Space → 窗口可见 · 2026-09-16"
+)
 rows = list(csv.DictReader(csv_path.open(encoding="utf-8-sig")))
 opens = [float(r["open_ms"]) for r in rows]
 priv = [float(r["private_mb"]) for r in rows]
@@ -68,7 +83,7 @@ parts.append(
 )
 parts.append(
     f'<text x="48" y="68" fill="#94a3b8" font-family="Segoe UI" font-size="13">'
-    f"Windows 11 26200 · i5-13490F · Release · Alt+Space → 窗口可见 · 2026-09-16</text>"
+    f"{subtitle}</text>"
 )
 parts.append(
     '<g font-family="Segoe UI" font-size="12" fill="#cbd5e1">'
@@ -126,7 +141,7 @@ parts.append(
 )
 parts.append("</svg>")
 
-out = Path(r"D:\Project\Kite\docs\performance-100.svg")
+out = out_path
 out.write_text("\n".join(parts), encoding="utf-8")
 print(f"wrote {out}")
 print(
