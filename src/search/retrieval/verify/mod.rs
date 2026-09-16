@@ -35,8 +35,9 @@ use crate::search::retrieval::query::ParsedQuery;
 use crate::search::retrieval::SearchRun;
 
 use align::{
-    fuzzy_name_or_tokens, loose_mixed_fragments, map_initial_index_to_display, map_nucleo_score,
-    match_mixed_pinyin, ordered_mixed_align, ordered_skip_score, ordered_token_span,
+    fuzzy_name_or_tokens, loose_mixed_fragments, map_compact_index_to_source,
+    map_compact_span_to_source, map_initial_index_to_display, map_nucleo_score, match_mixed_pinyin,
+    ordered_mixed_align, ordered_skip_score, ordered_token_span,
 };
 
 const MIN_COMPACT_SUBSTR_LEN: usize = 3;
@@ -80,6 +81,23 @@ pub fn verify_all(
 
 /// (score, matched_by, evidence)
 type BestHit = (i32, &'static str, MatchEvidence);
+
+/// 紧凑字段上连续命中的证据：起点与跨度都换算回**原文**字符坐标。
+///
+/// 紧凑串只是原文去掉空白，命中跨度因此可能比紧凑长度更长（中间夹着空白）；
+/// 直接拿紧凑长度当跨度会让同分细排混用两套坐标系。
+fn compact_contiguous(
+    field: MatchField,
+    source: &str,
+    compact_start: usize,
+    compact_len: usize,
+) -> MatchEvidence {
+    MatchEvidence::contiguous(
+        field,
+        map_compact_index_to_source(source, compact_start),
+        map_compact_span_to_source(source, compact_start, compact_len),
+    )
+}
 
 fn take_best(best: Option<BestHit>, score: i32, kind: &'static str, evidence: MatchEvidence) -> Option<BestHit> {
     Some(match best {
@@ -196,48 +214,61 @@ fn verify_one(
         }
     }
 
-    // 2b) Compact
+    // 2b) Compact：命中位置要映射回**原文**的真实字符下标（含空白），而不是紧凑文本里的序号。
+    // 起点与跨度都按原文算，同分细排才能在同一个坐标系里比较。
+    // 映射不了记未知（usize::MAX），不能假装最优起点。
     if q_compact.len() >= 2 {
-        for candidate in [doc.compact_name.as_str(), doc.compact_display.as_str()] {
-            if candidate == q_compact {
+        for (compact_field, source) in [
+            (doc.compact_name.as_str(), doc.name.as_str()),
+            (doc.compact_display.as_str(), doc.display.as_str()),
+        ] {
+            if compact_field == q_compact {
                 best = take_best(
                     best,
                     SCORE_COMPACT_EXACT,
                     "compact-exact",
-                    MatchEvidence::exact(MatchField::Name),
+                    MatchEvidence::exact_at(
+                        MatchField::Name,
+                        map_compact_index_to_source(source, 0),
+                    ),
                 );
             } else if q_compact.len() >= MIN_COMPACT_SUBSTR_LEN {
-                if let Some(start) = candidate.find(q_compact) {
+                if let Some(byte_at) = compact_field.find(q_compact) {
                     best = take_best(
                         best,
                         SCORE_COMPACT_SUBSTRING,
                         "compact-substring",
-                        MatchEvidence::contiguous(
+                        compact_contiguous(
                             MatchField::Name,
-                            candidate[..start].chars().count(),
+                            source,
+                            compact_field[..byte_at].chars().count(),
                             q_compact.chars().count(),
                         ),
                     );
                 }
             }
         }
-        for candidate in &doc.keyword_compacts {
-            if candidate == q_compact {
+        for (compact, keyword) in doc.keyword_compacts.iter().zip(&doc.keywords) {
+            if compact.as_str() == q_compact {
                 best = take_best(
                     best,
                     SCORE_WORD_EXACT,
                     "keyword-compact-exact",
-                    MatchEvidence::exact(MatchField::Keyword),
+                    MatchEvidence::exact_at(
+                        MatchField::Keyword,
+                        map_compact_index_to_source(keyword, 0),
+                    ),
                 );
             } else if q_compact.len() >= MIN_COMPACT_SUBSTR_LEN {
-                if let Some(start) = candidate.find(q_compact) {
+                if let Some(byte_at) = compact.find(q_compact) {
                     best = take_best(
                         best,
                         SCORE_COMPACT_SUBSTRING - 60,
                         "keyword-compact-substring",
-                        MatchEvidence::contiguous(
+                        compact_contiguous(
                             MatchField::Keyword,
-                            candidate[..start].chars().count(),
+                            keyword,
+                            compact[..byte_at].chars().count(),
                             q_compact.chars().count(),
                         ),
                     );
@@ -571,21 +602,29 @@ fn verify_one(
             }
         }
         if q_compact.len() >= 2 {
-            for compact in &doc.context_compacts {
-                if compact == q_compact {
+            for (compact, field) in doc.context_compacts.iter().zip(&doc.context_fields) {
+                if compact.as_str() == q_compact {
                     best = take_best(
                         best,
                         SCORE_COMPACT_EXACT - CONTEXT_COMPACT_DISCOUNT,
                         "context-compact-exact",
-                        MatchEvidence::exact(MatchField::Context),
+                        MatchEvidence::exact_at(
+                            MatchField::Context,
+                            map_compact_index_to_source(field, 0),
+                        ),
                     );
                 } else if q_compact.len() >= MIN_COMPACT_SUBSTR_LEN {
-                    if let Some(start) = compact.find(q_compact) {
+                    if let Some(byte_at) = compact.find(q_compact) {
                         best = take_best(
                             best,
                             SCORE_COMPACT_SUBSTRING - CONTEXT_COMPACT_DISCOUNT,
                             "context-compact-substring",
-                            MatchEvidence::contiguous(MatchField::Context, start, q_len),
+                            compact_contiguous(
+                                MatchField::Context,
+                                field,
+                                compact[..byte_at].chars().count(),
+                                q_compact.chars().count(),
+                            ),
                         );
                     }
                 }
@@ -961,6 +1000,51 @@ mod tests {
         let bits = CharBits::from_str("google chrome");
         assert!(bits.contains_all(&['g', 'o', 'c']));
         assert!(!bits.contains_all(&['z']));
+    }
+
+    #[test]
+    fn compact_position_maps_back_to_source_including_whitespace() {
+        // 含空白的文本上，compact 的第 n 个字符要映射回原文里的真实字符下标。
+        assert_eq!(map_compact_index_to_source("we chat", 0), 0);
+        assert_eq!(map_compact_index_to_source("we chat", 2), 3); // wechat 的 'c'
+        assert_eq!(map_compact_index_to_source("we chat", 5), 6); // wechat 的 't'
+        assert_eq!(map_compact_index_to_source("to do list", 2), 3); // todolist 的 'd'
+        assert_eq!(
+            map_compact_index_to_source("we chat", 6),
+            usize::MAX,
+            "映射不了要记未知，不得写成 0 或最优起点"
+        );
+
+        // 跨度也要按原文算：同分细排比较的是原文字符覆盖，
+        // 直接用紧凑长度会把「夹在中间的那几个空白」漏掉。
+        assert_eq!(
+            map_compact_span_to_source("to do list", 2, 6),
+            7,
+            "todolist 命中 'dolist' 覆盖原文 'do list'（7 字符），不是紧凑文本的 6"
+        );
+        assert_eq!(
+            map_compact_span_to_source("we chat", 2, 4),
+            4,
+            "'chat' 无内部空白"
+        );
+        assert_eq!(
+            map_compact_span_to_source("we chat", 6, 1),
+            usize::MAX,
+            "越界同样记未知"
+        );
+        assert_eq!(
+            map_compact_span_to_source("we chat", 0, 0),
+            usize::MAX,
+            "空匹配没有跨度，不得记成 0"
+        );
+    }
+
+    #[test]
+    fn unknown_position_never_outranks_a_real_one() {
+        let unknown = MatchEvidence::contiguous(MatchField::Name, usize::MAX, 3);
+        let real = MatchEvidence::contiguous(MatchField::Name, 5, 3);
+        assert!(real.outranks(&unknown));
+        assert!(!unknown.outranks(&real));
     }
 
     #[test]

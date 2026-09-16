@@ -279,6 +279,7 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         hide_on_blur: true,
         autostart: false,
         history_recording: true,
+        query_log: true,
         hotkey: "Alt+Space".into(),
         hotkey_label: "Alt+Space".into(),
         aliases: Vec::new(),
@@ -301,6 +302,7 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
     state.hide_on_blur = saved_settings.hide_on_blur;
     state.autostart = saved_settings.autostart;
     state.history_recording = saved_settings.history_recording;
+    state.query_log = saved_settings.query_log;
     state.hotkey = saved_settings.hotkey;
     state.hotkey_label = saved_settings.hotkey_label;
     state.refresh_results();

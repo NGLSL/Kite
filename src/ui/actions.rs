@@ -321,6 +321,7 @@ pub(super) fn open_settings(state: &mut State) -> Task<Message> {
         state.hide_on_blur = s.hide_on_blur;
         state.autostart = s.autostart;
         state.history_recording = s.history_recording;
+        state.query_log = s.query_log;
         state.hotkey = s.hotkey.clone();
         state.hotkey_label = s.hotkey_label.clone();
         state.portable_dirs = s.portable_dirs;

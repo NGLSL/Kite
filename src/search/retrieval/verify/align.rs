@@ -35,6 +35,45 @@ pub(crate) fn map_initial_index_to_display(doc: &IndexedDoc, initial_byte_at: us
     usize::MAX
 }
 
+/// compact 串中的字符下标 → 原文（含空白）的**真实**字符下标；不可映射返回 `usize::MAX`。
+///
+/// compact 只去掉空白，所以原文第 n 个非空白字符就是 compact 的第 n 个字符。
+/// 与 [`map_initial_index_to_display`] 同一约定：映射不了就是「未知」，
+/// 不得写成 0，也不得写成看起来最优的起点。
+pub(crate) fn map_compact_index_to_source(source: &str, compact_index: usize) -> usize {
+    let mut non_ws = 0usize;
+    for (i, ch) in source.chars().enumerate() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        if non_ws == compact_index {
+            return i;
+        }
+        non_ws += 1;
+    }
+    usize::MAX
+}
+
+/// compact 串上一段连续匹配 `[compact_start, compact_start + len)` → 原文（含空白）的字符跨度。
+///
+/// 起点与跨度都必须回落到**原文**坐标系，否则同分细排会拿紧凑文本的长度去和别的
+/// 匹配方式比较。跨度按走通的那段原文计算：含在其中的空白也算覆盖。
+/// 不可映射返回 `usize::MAX`（未知）。
+pub(crate) fn map_compact_span_to_source(source: &str, compact_start: usize, len: usize) -> usize {
+    if len == 0 {
+        return usize::MAX;
+    }
+    let Some(last) = compact_start.checked_add(len - 1) else {
+        return usize::MAX;
+    };
+    let first = map_compact_index_to_source(source, compact_start);
+    let last = map_compact_index_to_source(source, last);
+    if first == usize::MAX || last == usize::MAX {
+        return usize::MAX;
+    }
+    last - first + 1
+}
+
 /// nucleo u16 分映射到本内核分数域（低质量，不抢精确/前缀）。
 pub(crate) fn map_nucleo_score(raw: u16) -> i32 {
     // nucleo 分数量级约 0..~200+；线性压到 100..SCORE_NUCLEO_MAX

@@ -49,10 +49,15 @@ pub struct MatchEvidence {
 
 impl MatchEvidence {
     pub fn exact(field: MatchField) -> Self {
+        Self::exact_at(field, 0)
+    }
+
+    /// 整字段精确命中，但起点是映射回原文后的真实位置（派生字段用）。
+    pub fn exact_at(field: MatchField, start: usize) -> Self {
         Self {
             field,
             kind: MatchKind::Exact,
-            start: 0,
+            start,
             span: usize::MAX,
             gaps: 0,
             edit_cost: 0,

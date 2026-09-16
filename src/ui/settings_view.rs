@@ -333,6 +333,11 @@ fn general_card(state: &State) -> Element<'_, Message> {
             ),
         ),
         flow_row(
+            "查询与按键诊断日志",
+            "关闭后键入与查询不再写日志，排查时再打开".to_string(),
+            toggle(state.query_log, Message::SetQueryLog(!state.query_log)),
+        ),
+        flow_row(
             "清空使用历史",
             "删除全部启动次数与查询配对，固定项不受影响".to_string(),
             std_button("清空", Message::ClearHistory),

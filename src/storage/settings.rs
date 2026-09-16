@@ -16,6 +16,9 @@ pub struct Settings {
     pub search_files: bool,
     /// 是否记录启动历史（Usage + Query History）；暂停后 record 直接跳过。
     pub history_recording: bool,
+    /// 输入与查询级诊断日志（Alt/IME 按键、结果就绪／过期等）；默认开启，排查时再关。
+    /// 只影响按键频率的日志，一次性事件日志（激活、启动、扫描、更新）不受影响。
+    pub query_log: bool,
     /// 用户明确授权扫描的便携软件目录。
     pub portable_dirs: Vec<String>,
 }
@@ -29,6 +32,7 @@ impl Default for Settings {
             hotkey_label: crate::system::hotkey::DEFAULT_HOTKEY.into(),
             search_files: false,
             history_recording: true,
+            query_log: true,
             portable_dirs: Vec::new(),
         }
     }
@@ -84,6 +88,9 @@ impl HistoryDb {
         }
         if let Ok(v) = self.get_setting("history_recording") {
             s.history_recording = v != "0";
+        }
+        if let Ok(v) = self.get_setting("query_log") {
+            s.query_log = v != "0";
         }
         if let Ok(v) = self.get_setting("portable_dirs") {
             s.portable_dirs = serde_json::from_str::<Vec<String>>(&v)
@@ -258,6 +265,7 @@ mod tests {
         let s = db.load_settings();
         assert!(!s.search_files, "搜文件默认关闭");
         assert!(s.history_recording, "历史记录默认开启");
+        assert!(s.query_log, "查询日志默认开启，默认仍保留可诊断性");
     }
 
     #[test]
@@ -265,9 +273,28 @@ mod tests {
         let mut db = temp_db();
         db.save_setting("search_files", "1").unwrap();
         db.save_setting("history_recording", "0").unwrap();
+        db.save_setting("query_log", "0").unwrap();
         let s = db.load_settings();
         assert!(s.search_files);
         assert!(!s.history_recording);
+        assert!(!s.query_log);
+    }
+
+    #[test]
+    fn query_log_setting_survives_reopen() {
+        let dir = std::env::temp_dir().join(format!("kite-querylog-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let nanos = std::time::SystemTime::now().elapsed().unwrap().as_nanos();
+        let path = dir.join(format!("qlog-{nanos}.db"));
+        {
+            let mut db = HistoryDb::open(&path).expect("open temp db");
+            db.save_setting("query_log", "0").unwrap();
+        }
+        let db = HistoryDb::open(&path).expect("reopen temp db");
+        assert!(
+            !db.load_settings().query_log,
+            "关掉的查询日志开关必须在重启后仍然生效"
+        );
     }
 
     #[test]

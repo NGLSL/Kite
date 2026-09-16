@@ -57,6 +57,7 @@ pub(super) fn test_state(query: &str) -> State {
         hide_on_blur: true,
         autostart: false,
         history_recording: true,
+        query_log: true,
         hotkey: "Alt+Space".into(),
         hotkey_label: "Alt+Space".into(),
         aliases: Vec::new(),

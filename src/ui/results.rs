@@ -139,10 +139,12 @@ impl State {
             || query != self.query
             || index_generation != self.index_generation
         {
-            plog(&format!(
-                "app search stale generation={generation} current={} index_gen={index_generation} cur_index={} query={query:?}",
-                self.app_query_generation, self.index_generation
-            ));
+            self.qlog(|| {
+                format!(
+                    "app search stale generation={generation} current={} index_gen={index_generation} cur_index={} query={query:?}",
+                    self.app_query_generation, self.index_generation
+                )
+            });
             return;
         }
         let q_norm = search::normalize_for_index(&self.query);
@@ -160,11 +162,13 @@ impl State {
             .first()
             .map(|r| r.item.display_name.as_str())
             .unwrap_or("-");
-        plog(&format!(
-            "app search ready generation={generation} query={query:?} -> {} results in {elapsed_us}us top='{top}' epoch={}",
-            self.results.len(),
-            self.epoch
-        ));
+        self.qlog(|| {
+            format!(
+                "app search ready generation={generation} query={query:?} -> {} results in {elapsed_us}us top='{top}' epoch={}",
+                self.results.len(),
+                self.epoch
+            )
+        });
     }
 
     /// 最终列表组装的唯一实现：应用命中 → 网址直达 → 合并 Everything 文件 →
@@ -283,13 +287,15 @@ impl State {
             .first()
             .map(|r| r.item.display_name.as_str())
             .unwrap_or("-");
-        plog(&format!(
-            "query '{:?}' -> {} results in {}us top='{top}' epoch={}",
-            self.query,
-            self.results.len(),
-            t0.elapsed().as_micros(),
-            self.epoch
-        ));
+        self.qlog(|| {
+            format!(
+                "query '{:?}' -> {} results in {}us top='{top}' epoch={}",
+                self.query,
+                self.results.len(),
+                t0.elapsed().as_micros(),
+                self.epoch
+            )
+        });
     }
 }
 
@@ -591,6 +597,125 @@ mod tests {
         assert!(
             state.app_search_worker.latest_seq() > before,
             "别名变化要与逐键输入走同一条刷新入口（在途请求由此作废）"
+        );
+    }
+
+    /// 关闭查询日志后，`qlog` 必须直接返回：一旦它仍然构造消息，`unreachable!` 就会 panic。
+    /// 不构造消息 ⇒ 不调用 `plog` ⇒ 按键路径上没有同步文件写入。
+    /// 按键频率上的日志（Alt 按下/抬起、IME 组合/提交、查询刷新）共用这一个闸门。
+    #[test]
+    fn query_log_off_never_builds_the_message() {
+        let mut state = test_state("k");
+        state.query_log = false;
+
+        state.qlog(|| unreachable!("关闭查询日志后不得构造日志消息"));
+    }
+
+    /// 开关只影响日志：关掉之后输入事件处理本身照旧。
+    #[test]
+    fn query_log_off_leaves_input_handlers_working() {
+        use crate::ui::interaction::update;
+
+        let mut state = test_state("");
+        state.query_log = false;
+
+        let _ = update(&mut state, crate::ui::Message::Composing(true));
+        assert!(state.ime_composing, "关掉日志不得影响 IME 组合态");
+        let _ = update(&mut state, crate::ui::Message::Composing(false));
+        assert!(!state.ime_composing);
+        let _ = update(&mut state, crate::ui::Message::ImeCommit("你好".into()));
+    }
+
+    /// 默认保留可诊断性：开关开启时查询日志照常构造并写出。
+    #[test]
+    fn query_log_on_still_emits_by_default() {
+        let state = test_state("k");
+        assert!(state.query_log, "查询日志必须默认开启");
+
+        let built = std::cell::Cell::new(0);
+        state.qlog(|| {
+            built.set(built.get() + 1);
+            "app search ready generation=1".to_string()
+        });
+
+        assert_eq!(built.get(), 1, "开启时查询日志必须照常发射");
+    }
+
+    /// 开关只是日志闸门：同一查询在开／关两种状态下，结果顺序、代际与缓存完全一致。
+    #[test]
+    fn query_log_switch_does_not_change_results_or_cache() {
+        let run = |query_log: bool| {
+            let mut state = test_state("k");
+            state.query_log = query_log;
+            // 先让缓存里有内容，确认开关既不写入也不清空缓存。
+            let epoch = state.base_hit_cache.epoch();
+            state
+                .base_hit_cache
+                .insert_if_epoch(epoch, 0, "k", Vec::new());
+
+            state.refresh_results();
+            let generation = state.app_query_generation;
+            let index_generation = state.index_generation;
+            state.apply_app_search_ready(
+                generation,
+                "k".into(),
+                vec![settings_result()],
+                0,
+                index_generation,
+            );
+            state
+        };
+
+        let on = run(true);
+        let off = run(false);
+
+        let ids = |s: &crate::ui::State| {
+            s.results
+                .iter()
+                .map(|r| (r.item.id.clone(), r.score, r.matched_by.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&on), ids(&off), "开关不得改变结果内容与顺序");
+        assert_eq!(
+            on.app_query_generation, off.app_query_generation,
+            "开关不得改变查询代际"
+        );
+        assert_eq!(on.results_stale, off.results_stale);
+        assert_eq!(
+            on.base_hit_cache.epoch(),
+            off.base_hit_cache.epoch(),
+            "开关不得推动缓存代际"
+        );
+        assert_eq!(on.base_hit_cache.is_empty(), off.base_hit_cache.is_empty());
+        assert!(!off.base_hit_cache.is_empty(), "关掉日志不得顺手清空缓存");
+    }
+
+    /// 切换开关的消息只落盘：不重跑搜索、不定代际、不动结果与缓存。
+    #[test]
+    fn set_query_log_toggle_leaves_search_state_untouched() {
+        use crate::ui::interaction::update;
+
+        let mut state = test_state("k");
+        state.refresh_results();
+        let generation = state.app_query_generation;
+        let index_generation = state.index_generation;
+        let submitted = state.app_search_worker.latest_seq();
+        let stale = state.results_stale;
+        let epoch = state.base_hit_cache.epoch();
+        let results = state.results.len();
+
+        let _ = update(&mut state, crate::ui::Message::SetQueryLog(false));
+
+        assert!(!state.query_log, "开关必须真的落到位");
+        assert_eq!(state.app_query_generation, generation);
+        assert_eq!(state.index_generation, index_generation);
+        assert_eq!(state.results_stale, stale);
+        assert_eq!(state.results.len(), results);
+        assert_eq!(state.base_hit_cache.epoch(), epoch, "不得失效缓存");
+        assert_eq!(
+            state.app_search_worker.latest_seq(),
+            submitted,
+            "切换日志开关不得重新提交搜索"
         );
     }
 }

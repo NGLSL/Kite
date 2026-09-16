@@ -164,6 +164,20 @@ mod tests {
     }
 
     #[test]
+    fn compact_hit_position_maps_back_to_display_text() {
+        // 「to do list」的紧凑命中「dolist」：位置必须是原文（含空白）里的真实字符下标，
+        // 而不是紧凑文本 todolist 里的序号（2）。
+        let index = RetrievalIndex::build(&[app("a", "to do list")], &[]);
+        let (_hits, diags) = search_personalized_explained(&index, "dolist", &[], None, 10);
+        let d = diags
+            .iter()
+            .find(|d| d.stable_id == "a")
+            .expect("compact hit");
+        assert_eq!(d.matched_by, "compact-substring");
+        assert_eq!(d.start, 3, "compact 命中位置应映射回原文真实下标: {d:?}");
+    }
+
+    #[test]
     fn diagnostics_record_real_evidence_fields() {
         let index = RetrievalIndex::build(&[app("a", "XcodeX"), app("b", "Abcode")], &[]);
         let (_hits, diags) = search_personalized_explained(&index, "code", &[], None, 10);

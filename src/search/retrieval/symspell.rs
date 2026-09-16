@@ -2,6 +2,12 @@
 
 use std::collections::{HashMap, HashSet};
 
+/// 词元长度上界：超过它不建删除变体——键数与内存随词长增长，长词只值得做一阶。
+pub const MAX_TERM_CHARS: usize = 18;
+
+/// 超过它只做一阶删除：距离 2 会让长词元的键数变成平方级。
+pub const FIRST_ORDER_ONLY_CHARS: usize = 10;
+
 /// 删除变体 → 原词元列表。
 #[derive(Debug, Default)]
 pub struct DeleteIndex {
@@ -54,15 +60,15 @@ impl DeleteIndex {
     }
 }
 
-/// 从词元集合构建删除索引。控制长词成本：词长 > 10 只做距离 1，> 18 不建 deletes。
+/// 从词元集合构建删除索引。长度策略见 [`MAX_TERM_CHARS`] 与 [`FIRST_ORDER_ONLY_CHARS`]。
 pub fn build(terms: &HashSet<String>, max_deletes: usize) -> DeleteIndex {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     for term in terms {
         let len = term.chars().count();
-        if len < 2 || len > 18 {
+        if len < 2 || len > MAX_TERM_CHARS {
             continue;
         }
-        let limit = if len > 10 {
+        let limit = if len > FIRST_ORDER_ONLY_CHARS {
             1
         } else {
             max_deletes

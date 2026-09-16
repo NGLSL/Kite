@@ -97,9 +97,15 @@ impl IndexedDoc {
             if field.is_empty() {
                 continue;
             }
-            push_unique(&mut context_fields, field.clone());
+            // 字段与它的紧凑串严格同序同长（一起去重、一起入列）：紧凑命中要能映射回
+            // 对应的原始字段，而不是把紧凑文本坐标当原文位置。
+            // 纯空白字段会得到空紧凑串，但仍然入列——保持同长优先于省这一格，
+            // 空串永远匹配不上非空 Query，不影响召回。
+            if !context_fields.contains(&field) {
+                context_fields.push(field.clone());
+                context_compacts.push(compact(&field));
+            }
             push_unique(&mut context_terms, field.clone());
-            push_unique_nonempty(&mut context_compacts, compact(&field));
             for token in tokens(&field) {
                 push_unique(&mut context_terms, token.to_string());
             }
@@ -153,6 +159,10 @@ impl IndexedDoc {
     ///
     /// 故意不含 compact、系统词 context、超长拼音全拼：它们已有 term/gram 召回，
     /// 但对距离 2 删除会把 deletes 表撑到数十 MB。
+    ///
+    /// 真实名称／展示名里出现的长词元是例外：13–18 字符的英文词打错一个字母时，
+    /// 纠错通道必须能直接反查回原词，所以放宽到 [`symspell::MAX_TERM_CHARS`]。
+    /// 上界与「长词只做一阶」由 `symspell::build` 统一判定，不在这里再定一套。
     fn deletes_seed_terms(&self) -> impl Iterator<Item = &str> {
         const MAX_FUZZY_CHARS: usize = 12;
         const MAX_INITIALS_CHARS: usize = 8;
@@ -162,6 +172,17 @@ impl IndexedDoc {
             .tokens
             .iter()
             .filter(|t| !t.is_empty() && t.chars().count() <= MAX_FUZZY_CHARS)
+            .map(String::as_str);
+        // 长词元只认「原文里真的有它」，不把派生词、拼音串一并放开。
+        let long_name_tokens = self
+            .tokens
+            .iter()
+            .filter(|t| {
+                let n = t.chars().count();
+                n > MAX_FUZZY_CHARS
+                    && n <= symspell::MAX_TERM_CHARS
+                    && (self.name.contains(t.as_str()) || self.display.contains(t.as_str()))
+            })
             .map(String::as_str);
         let keywords = self
             .keywords
@@ -187,6 +208,7 @@ impl IndexedDoc {
         name.into_iter()
             .chain(display)
             .chain(tokens)
+            .chain(long_name_tokens)
             .chain(keywords)
             .chain(keyword_initials)
             .chain(pinyin)
@@ -1216,5 +1238,30 @@ mod memory_shape_tests {
         assert!(seed.contains("微信开发者工具") || seed.contains("weixinkaifazhegongju"));
         assert!(!seed.iter().any(|t| t.contains("启动任务")), "{seed:?}");
         assert!(seed.contains("wxkfzgj"));
+    }
+
+    #[test]
+    fn long_name_token_gets_first_order_deletes_only() {
+        // 13–18 字符的**真实名称词元**要进删除索引：词内打错一个字母不该只能靠
+        // 别的通道碰巧兜住。距离 2 的派生词不恢复，键数必须随词长线性增长。
+        let long = RetrievalIndex::build(&[app("x", "advancedinstaller")], &[]);
+        assert!(
+            long.deletes()
+                .lookup("advancedinstaler")
+                .is_some_and(|terms| terms.iter().any(|t| t == "advancedinstaller")),
+            "17 字符词元的一阶删除变体应能反查回原词元"
+        );
+        let keys = long.structure_stats().deletes_keys;
+        assert!(
+            keys <= 20,
+            "17 字符词元只该有约 16 个一阶键（距离 2 会到数百）: keys={keys}"
+        );
+
+        // 超过上界的词元仍不进删除索引：内存水位靠这条线守住。
+        let too_long = RetrievalIndex::build(&[app("x", "openhardwaremonitor")], &[]);
+        assert!(
+            too_long.deletes().lookup("openhardwaremonito").is_none(),
+            "19 字符词元不该进删除索引"
+        );
     }
 }

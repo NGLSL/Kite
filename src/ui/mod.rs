@@ -93,6 +93,20 @@ pub(crate) fn plog(msg: &str) {
     log::info(&format!("[{ms}] {msg}"));
 }
 
+impl State {
+    /// 输入与查询级诊断日志：**按按键频率**重复的那些（Alt 按下/抬起、IME 组合/提交、
+    /// 查询刷新与结果落地/过期）。
+    ///
+    /// 开关关闭时直接返回：既不构造消息也不落盘，所以按键路径上不再有同步文件写入。
+    /// 一次性事件日志（激活、显示/隐藏、启动、扫描、图标、更新、托盘）不走这里，
+    /// 因此默认仍保留可诊断性；本方法也不参与结果、顺序或缓存的任何判定。
+    pub(crate) fn qlog(&self, message: impl FnOnce() -> String) {
+        if self.query_log {
+            plog(&message());
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Message {
     /// 全局快捷键触发；携带接收线程的单调时间戳（埋点起点）。
@@ -144,6 +158,8 @@ enum Message {
     SetAutostart(bool),
     SetHideOnBlur(bool),
     SetHistoryRecording(bool),
+    /// 开关查询级诊断日志（结果就绪／过期）。
+    SetQueryLog(bool),
     /// 清空使用历史。
     ClearHistory,
     /// 应用新快捷键（预设 chips / 录制结果，"Alt+Space" 形式）。
@@ -242,6 +258,9 @@ struct State {
     hide_on_blur: bool,
     autostart: bool,
     history_recording: bool,
+    /// 输入与查询级诊断日志开关（Alt/IME 按键日志 + 结果就绪／过期）。保存在内存里，
+    /// 避免按键路径去读 SQLite。只闸住按键频率的日志；关闭后按键路径零同步写入。
+    query_log: bool,
     hotkey: String,
     hotkey_label: String,
     aliases: Vec<UserAlias>,

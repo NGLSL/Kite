@@ -39,7 +39,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.alt_down = true;
                 state.query_at_alt = Some(state.query.clone());
                 state.alt_digit_consumed = false;
-                plog("alt down");
+                state.qlog(|| "alt down".to_string());
             }
             on_key(state, key, physical, mods)
         }
@@ -48,19 +48,19 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.alt_down = false;
                 state.query_at_alt = None;
                 state.alt_digit_consumed = false;
-                plog("alt up");
+                state.qlog(|| "alt up".to_string());
             }
             Task::none()
         }
         Message::Composing(active) => {
             if state.ime_composing != active {
-                plog(&format!("ime composing={active}"));
+                state.qlog(|| format!("ime composing={active}"));
                 state.ime_composing = active;
             }
             Task::none()
         }
         Message::ImeCommit(text) => {
-            plog(&format!("ime commit '{text}'"));
+            state.qlog(|| format!("ime commit '{text}'"));
             Task::none()
         }
         Message::WindowBlur => {
@@ -335,6 +335,15 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             state.history_recording = v;
             if let Some(db) = &mut state.history {
                 let _ = db.save_setting("history_recording", if v { "1" } else { "0" });
+            }
+            flash(state, "设置已保存")
+        }
+        // 只切换日志闸门：不重跑搜索、不动代际、不失效缓存，
+        // 因此开关前后结果、顺序与缓存行为完全一致。
+        Message::SetQueryLog(v) => {
+            state.query_log = v;
+            if let Some(db) = &mut state.history {
+                let _ = db.save_setting("query_log", if v { "1" } else { "0" });
             }
             flash(state, "设置已保存")
         }

@@ -1858,3 +1858,19 @@
             hits.iter().map(|h| (&h.item.id, &h.matched_by, h.score)).collect::<Vec<_>>()
         );
     }
+
+    #[test]
+    fn long_name_token_one_letter_typo_still_recalls() {
+        // 真实名称里 13–18 字符的英文词元打错一个字母，不该静默搜不到。
+        // 这条断言是用户可见症状；「长词元确实进了一阶删除变体（而不是被别的通道
+        // 碰巧兜住）」由 doc.rs::memory_shape_tests 的结构用例固定。
+        let apps = vec![named_item("aip", "advancedinstaller professional")];
+        let hits = search(&apps, "advancedinstalmer", &[], TOP_N);
+        assert!(
+            hits.iter().any(|h| h.item.id == "aip"),
+            "advancedinstalmer 应召回 advancedinstaller: {:?}",
+            hits.iter()
+                .map(|h| (&h.item.id, &h.matched_by, h.score))
+                .collect::<Vec<_>>()
+        );
+    }
