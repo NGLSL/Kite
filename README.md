@@ -38,7 +38,7 @@ Kite 通过全局快捷键呼出搜索窗口，输入应用名称、别名或拼
 
 从 GitHub Releases 下载 `kite-setup.exe`，运行安装程序即可。安装器会自动部署程序和运行资源，创建开始菜单与桌面快捷方式，并注册卸载入口。Kite 当前只发布安装版，避免便携运行时遗漏 DLL、音效或注册信息。
 
-当前发布的安装包尚未由 SignPath Foundation 签名。签名申请状态、发布者身份与隐私说明见下方 [Code signing policy](#code-signing-policy)。
+安装包当前未进行代码签名，Windows 可能提示「未知发布者」；请从本仓库 [Releases](https://github.com/NGLSL/Kite/releases) 下载，并核对发布页上的 SHA-256。
 
 ## 从源码构建
 
@@ -88,11 +88,15 @@ Kite 的产品定位和工程实践参考了以下开源启动器项目：
 
 感谢 [LINUX DO](https://linux.do/) 社区对开源项目的支持。
 
-## Code signing policy
+## 隐私
 
-Kite 正准备申请 SignPath.io 的免费开源项目签名，目前尚未获批，现有发布文件也未使用 SignPath Foundation 证书签名。若申请获批且发布文件实际完成签名，署名将为：**Free code signing provided by SignPath.io, certificate by SignPath Foundation.**
+Kite 的应用索引、设置、启动历史和诊断日志都保存在本机，不含遥测或统计上报。
 
-项目角色、签名审批流程、当前状态与隐私说明见 [完整 Code signing policy](CODE_SIGNING_POLICY.md)。[下载与发布页面](https://github.com/NGLSL/Kite/releases)会标明各版本的实际签名状态。
+- 点击「检查更新」时会请求 GitHub API；选择下载更新时会从 GitHub Releases 下载安装包。
+- 使用网页搜索时，查询会发到本机配置的搜索服务。
+- Everything 搜索走本机 IPC，需已安装并运行 Everything。
+
+Kite 不会把本地索引、启动历史或诊断日志发给维护者。用户主动打开的外部网站与应用各自遵循它们自己的网络与隐私策略。
 
 ## 许可证
 

@@ -77,9 +77,9 @@ $automatic = @(
     ""
     "下载 $(Format-Code 'kite-setup.exe') 后运行安装程序。安装器会结束正在运行的旧版、保留用户选择的安装目录，并创建开始菜单和桌面快捷方式。Kite 本身以普通用户权限运行；安装器需要管理员权限用于写入安装目录和卸载信息。"
     ""
-    "## Code signing policy"
+    "## 隐私"
     ""
-    "Kite 正准备申请 SignPath.io 的免费开源项目签名，目前尚未获批。本版本安装包未进行 Authenticode 数字签名。项目角色、签名政策和隐私说明见 [Kite Code signing policy](https://github.com/$Repository/blob/main/CODE_SIGNING_POLICY.md)。"
+    "Kite 的应用索引、设置、启动历史和诊断日志保存在本机，不含遥测。「检查更新」会请求 GitHub API；下载更新会从 GitHub Releases 拉取安装包。网页搜索查询会发到本机配置的搜索服务。"
 )
 
 $body = ($curated.TrimEnd() + "`n`n" + ($automatic -join "`n")).Trim() + "`n"
