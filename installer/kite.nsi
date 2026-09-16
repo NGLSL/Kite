@@ -4,6 +4,7 @@ Name "Kite"
 OutFile "..\artifacts\kite-setup.exe"
 InstallDir "$PROGRAMFILES64\Kite"
 ; 独立保存安装目录，卸载时保留，便于下一次安装继续使用用户选择的盘符。
+; 覆盖安装依赖这一项：默认目录与上一版一致，新文件就地覆盖旧文件。
 InstallDirRegKey HKLM "Software\Kite" "InstallLocation"
 RequestExecutionLevel admin
 
@@ -23,8 +24,6 @@ RequestExecutionLevel admin
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
-Var OldInstallDir
-
 Function LaunchKiteUnelevated
   ; 安装器以管理员权限运行，但 Kite 本身不需要提权。
   ; ShellExecute 让 Explorer 使用当前用户上下文启动，避免 UIPI 阻断外部快捷键。
@@ -39,30 +38,9 @@ Section "-关闭旧版 Kite" SEC_CLOSE_OLD
   Sleep 300
 SectionEnd
 
-Section "卸载旧版本（推荐）" SEC_REMOVE_OLD
-  SectionIn 1
-  ; 勾选后始终先卸载旧版本，再由后续主程序 section 重新安装。
-  StrCmp $OldInstallDir "" done
-  IfFileExists "$OldInstallDir\uninstall.exe" 0 done
-    ; _?= 阻止 NSIS 卸载器复制到临时目录后提前返回，确保旧版完全卸载后再写入新版。
-    ExecWait '"$OldInstallDir\uninstall.exe" /S _?=$OldInstallDir'
-done:
-SectionEnd
-
-Function .onInit
-  ; 兼容新旧安装器保存的安装位置。
-  ReadRegStr $OldInstallDir HKLM "Software\Kite" "InstallLocation"
-  StrCmp $OldInstallDir "" 0 +2
-    ReadRegStr $OldInstallDir HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Kite" "InstallLocation"
-
-  ; 首次安装或卸载后的残留路径没有可执行的旧卸载器，不向用户展示升级选项。
-  StrCmp $OldInstallDir "" no_old_install
-  IfFileExists "$OldInstallDir\uninstall.exe" old_install_found
-no_old_install:
-  StrCpy $OldInstallDir ""
-  SectionSetText ${SEC_REMOVE_OLD} ""
-old_install_found:
-FunctionEnd
+; 覆盖安装不单独卸载旧版本：InstallDirRegKey 已把默认目录对齐到上一版安装位置，
+; 下面的主程序 section 直接就地覆盖文件、快捷方式和卸载器，设置与历史本来就存在用户目录。
+; 代价是用户换过安装目录时，旧副本会留在原路径，需要手动卸载。
 
 Section "Kite 主程序" SEC_MAIN
   SectionIn RO
