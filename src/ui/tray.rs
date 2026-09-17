@@ -69,12 +69,16 @@ pub fn spawn(tx: UnboundedSender<Message>, icon_png: &'static [u8]) {
             }
             while let Ok(ev) = MenuEvent::receiver().try_recv() {
                 if ev.id == open_item.id() {
+                    plog("tray menu: open");
                     let _ = tx.unbounded_send(Message::Hotkey(std::time::Instant::now()));
                 } else if ev.id == settings_item.id() {
+                    plog("tray menu: open settings");
                     let _ = tx.unbounded_send(Message::OpenSettings);
                 } else if ev.id == rescan_item.id() {
+                    plog("tray menu: rescan");
                     let _ = tx.unbounded_send(Message::Rescan);
                 } else if ev.id == quit_item.id() {
+                    plog("tray menu: quit");
                     let _ = tx.unbounded_send(Message::Quit);
                 }
             }

@@ -382,9 +382,10 @@ pub(super) fn show_launcher(state: &mut State) -> Task<Message> {
     let mut tasks = vec![
         // 搜索窗口只需要前台焦点，不应持续置顶，否则会压住截图层和其它全局快捷键 UI。
         window::set_level(id, window::Level::Normal),
-        window::set_mode(id, window::Mode::Windowed),
-        window::gain_focus(id),
-        iced::widget::operation::focus(state.input_id.clone()),
+        // gain_focus 在窗口不可见时是 no-op：必须先 set_mode 再 focus，不能 batch 并行。
+        window::set_mode(id, window::Mode::Windowed)
+            .chain(window::gain_focus(id))
+            .chain(iced::widget::operation::focus(state.input_id.clone())),
         sync_scroll(state),
     ];
     if let Some((x, y)) = place {
@@ -452,19 +453,23 @@ pub(super) fn open_settings(state: &mut State) -> Task<Message> {
     }
     load_aliases(state);
     state.qlog(|| "settings open".to_owned());
-    state
-        .window_id
-        .map(settings_window_task)
-        .unwrap_or_else(Task::none)
+    let Some(id) = state.window_id else {
+        return Task::none();
+    };
+    let mut tasks = vec![settings_window_task(id)];
+    // 与 show_launcher 一致：按光标所在显示器定位，托盘打开时窗口落在可见工作区。
+    if let Some((x, y)) = system::window_place::position_on_cursor_monitor(720.0, 520.0) {
+        tasks.push(window::move_to(id, iced::Point::new(x, y)));
+    }
+    Task::batch(tasks)
 }
 
 pub(super) fn settings_window_task(id: window::Id) -> Task<Message> {
-    Task::batch([
-        window::set_level(id, window::Level::Normal),
-        window::set_mode(id, window::Mode::Windowed),
-        window::resize(id, iced::Size::new(720.0, 520.0)),
-        window::gain_focus(id),
-    ])
+    // gain_focus 在窗口不可见时是 no-op：必须先 set_mode/resize 再 focus，不能 batch 并行。
+    window::set_level(id, window::Level::Normal)
+        .chain(window::set_mode(id, window::Mode::Windowed))
+        .chain(window::resize(id, iced::Size::new(720.0, 520.0)))
+        .chain(window::gain_focus(id))
 }
 
 /// 关闭设置：窗口切回搜索尺寸并聚焦输入框。

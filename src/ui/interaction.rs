@@ -463,7 +463,12 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             Task::none()
         }
-        Message::MousePressed(_btn) => {
+        Message::MousePressed(btn) => {
+            // 右键交给 ContextMenu 做开关切换；这里只处理左键点菜单外关闭，
+            // 否则第二次右键会先被关掉、又被 ContextMenu 立刻重新打开。
+            if btn != iced::mouse::Button::Left {
+                return Task::none();
+            }
             // 前端行为：菜单开着时点击菜单外任意位置 → 关闭（点在菜单内交给菜单项按钮）
             if let Some((item, x, y)) = &state.menu {
                 let c = state.cursor.get();
@@ -480,6 +485,12 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ContextMenu(i) => {
+            // 第二次右键同一列表：关闭已打开的菜单（toggle）
+            if state.menu.is_some() {
+                state.menu = None;
+                state.qlog(|| "ctx menu closed (re-right-click)".to_owned());
+                return Task::none();
+            }
             let c = state.cursor.get();
             let x = c.x.min(640.0 - 200.0).max(8.0);
             let y = c.y.min(420.0 - 180.0).max(8.0);
@@ -587,6 +598,53 @@ mod context_menu_tests {
 
         assert_eq!(clicked.id, "first");
         assert_eq!(clicked.target, r"C:\Apps\first.exe");
+    }
+
+    #[test]
+    fn second_right_click_closes_context_menu() {
+        use super::super::test_support::test_state;
+        let mut state = test_state("");
+        let _ = update(&mut state, Message::ContextMenu(0));
+        assert!(state.menu.is_some(), "first right-click should open menu");
+
+        let _ = update(&mut state, Message::ContextMenu(0));
+        assert!(
+            state.menu.is_none(),
+            "second right-click should close menu"
+        );
+    }
+
+    #[test]
+    fn right_click_outside_does_not_close_before_context_menu() {
+        use super::super::test_support::test_state;
+        let mut state = test_state("");
+        state.cursor.set(iced::Point::new(20.0, 30.0));
+        let _ = update(&mut state, Message::ContextMenu(0));
+        assert!(state.menu.is_some());
+
+        // 右键不应走「点菜单外关闭」，否则 ContextMenu 会立刻重新打开
+        let _ = update(&mut state, Message::MousePressed(iced::mouse::Button::Right));
+        assert!(
+            state.menu.is_some(),
+            "right-press must not dismiss menu before ContextMenu toggle"
+        );
+
+        let _ = update(&mut state, Message::ContextMenu(0));
+        assert!(state.menu.is_none());
+    }
+
+    #[test]
+    fn left_click_outside_closes_context_menu() {
+        use super::super::test_support::test_state;
+        let mut state = test_state("");
+        state.cursor.set(iced::Point::new(20.0, 30.0));
+        let _ = update(&mut state, Message::ContextMenu(0));
+        assert!(state.menu.is_some());
+
+        // 菜单外左键应关闭
+        state.cursor.set(iced::Point::new(600.0, 400.0));
+        let _ = update(&mut state, Message::MousePressed(iced::mouse::Button::Left));
+        assert!(state.menu.is_none(), "left click outside should close");
     }
 }
 
