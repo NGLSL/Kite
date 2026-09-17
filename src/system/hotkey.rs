@@ -2,6 +2,33 @@
 //! RegisterHotKey（线程绑定 + 消息泵）完成；此处只做纯解析，便于测试复用。
 
 pub const DEFAULT_HOTKEY: &str = "Alt+Space";
+/// 窗口内网页搜索快捷键默认值（非系统 RegisterHotKey）。
+pub const DEFAULT_WEB_SEARCH_HOTKEY: &str = "Ctrl+Enter";
+
+/// 窗口内网页搜索快捷键预设。
+pub const WEB_SEARCH_HOTKEY_PRESETS: &[&str] = &[
+    "Ctrl+Enter",
+    "Alt+Enter",
+    "Shift+Enter",
+    "Ctrl+Shift+Enter",
+];
+
+/// 是否为受支持的窗口内网页搜索快捷键。
+pub fn is_valid_web_search_hotkey(spec: &str) -> bool {
+    WEB_SEARCH_HOTKEY_PRESETS
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case(spec.trim()))
+}
+
+/// 人类可读标签；非法值回落到默认。
+pub fn normalize_web_search_hotkey(spec: &str) -> &'static str {
+    let t = spec.trim();
+    WEB_SEARCH_HOTKEY_PRESETS
+        .iter()
+        .find(|p| p.eq_ignore_ascii_case(t))
+        .copied()
+        .unwrap_or(DEFAULT_WEB_SEARCH_HOTKEY)
+}
 
 /// RegisterHotKey 修饰位。
 pub const MOD_ALT: u32 = 0x1;
@@ -84,6 +111,16 @@ mod tests {
         let (mods, vk) = parse_raw("ctrl+shift+k").expect("parse");
         assert_eq!(mods, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT);
         assert_eq!(vk, 'K' as u32);
+    }
+
+    #[test]
+    fn web_search_hotkey_presets_validate() {
+        assert!(is_valid_web_search_hotkey("Ctrl+Enter"));
+        assert!(is_valid_web_search_hotkey("ctrl+enter"));
+        assert!(is_valid_web_search_hotkey("Alt+Enter"));
+        assert!(!is_valid_web_search_hotkey("Ctrl+K"));
+        assert_eq!(normalize_web_search_hotkey("ctrl+enter"), "Ctrl+Enter");
+        assert_eq!(normalize_web_search_hotkey("nope"), DEFAULT_WEB_SEARCH_HOTKEY);
     }
 
     #[test]

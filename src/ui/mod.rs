@@ -60,6 +60,7 @@ static HOTKEY_CMD: OnceLock<std::sync::mpsc::Sender<String>> = OnceLock::new();
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
     General,
+    SearchEngine,
     Hotkey,
     Alias,
     Index,
@@ -67,8 +68,9 @@ enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 5] = [
+    const ALL: [Section; 6] = [
         Section::General,
+        Section::SearchEngine,
         Section::Hotkey,
         Section::Alias,
         Section::Index,
@@ -77,6 +79,7 @@ impl Section {
     fn label(self) -> &'static str {
         match self {
             Section::General => "通用",
+            Section::SearchEngine => "搜索引擎",
             Section::Hotkey => "热键",
             Section::Alias => "别名",
             Section::Index => "应用索引",
@@ -163,6 +166,12 @@ enum Message {
     SetHistoryRecording(bool),
     /// 开关查询级诊断日志（结果就绪／过期）。
     SetQueryLog(bool),
+    /// 搜索引擎预设：auto / baidu / bing / google / duckduckgo / custom。
+    SetSearchEngine(String),
+    /// 自定义搜索引擎 URL 模板（含 {searchTerms}）。
+    SearchEngineCustomChanged(String),
+    /// 窗口内网页搜索快捷键（Ctrl+Enter 等）。
+    SetWebSearchHotkey(String),
     /// 清空使用历史。
     ClearHistory,
     /// 应用新快捷键（预设 chips / 录制结果，"Alt+Space" 形式）。
@@ -206,6 +215,8 @@ enum Message {
 enum MenuAction {
     OpenFolder,
     CopyPath,
+    /// shell:AppsFolder / ms-settings 等非路径 target 的复制。
+    CopyTarget,
     CopyName,
     TogglePin,
     /// 降低此结果优先级（可恢复）。
@@ -266,6 +277,12 @@ struct State {
     /// 输入与查询级诊断日志开关（Alt/IME 按键日志 + 结果就绪／过期）。保存在内存里，
     /// 避免按键路径去读 SQLite。只闸住按键频率的日志；关闭后按键路径零同步写入。
     query_log: bool,
+    /// 搜索引擎：auto / baidu / bing / google / duckduckgo / custom。
+    search_engine: String,
+    /// 自定义模板编辑框（仅 custom 时写入 DB）。
+    search_engine_custom: String,
+    /// 窗口内网页搜索快捷键，默认 Ctrl+Enter。
+    web_search_hotkey: String,
     hotkey: String,
     hotkey_label: String,
     aliases: Vec<UserAlias>,

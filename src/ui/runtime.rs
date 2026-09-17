@@ -293,6 +293,9 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         autostart: false,
         history_recording: true,
         query_log: true,
+        search_engine: "auto".into(),
+        search_engine_custom: String::new(),
+        web_search_hotkey: system::hotkey::DEFAULT_WEB_SEARCH_HOTKEY.into(),
         hotkey: "Alt+Space".into(),
         hotkey_label: "Alt+Space".into(),
         aliases: Vec::new(),
@@ -316,6 +319,18 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
     state.autostart = saved_settings.autostart;
     state.history_recording = saved_settings.history_recording;
     state.query_log = saved_settings.query_log;
+    state.search_engine = saved_settings.search_engine.clone();
+    state.web_search_hotkey = saved_settings.web_search_hotkey.clone();
+    state.search_engine_custom = state
+        .history
+        .as_ref()
+        .and_then(|db| db.search_url_template())
+        .or_else(|| {
+            system::search_engine::preset_by_id(&state.search_engine)
+                .filter(|p| !p.template.is_empty())
+                .map(|p| p.template.to_string())
+        })
+        .unwrap_or_default();
     state.hotkey = saved_settings.hotkey;
     state.hotkey_label = saved_settings.hotkey_label;
     state.refresh_results();

@@ -208,9 +208,11 @@ fn results_area(state: &State) -> Element<'_, Message> {
     }
     let scroller: Scrollable<'_, Message> = scrollable(list)
         .id(scroll_id())
+        .direction(scrollable::Direction::Vertical(results_scrollbar()))
+        .style(results_scroll_style)
         .width(Length::Fill)
         .height(Length::Fill);
-    // 右侧 gutter：避免 scrollbar 盖住 Alt+N 等行内内容。
+    // 右侧 gutter：细滚动条叠在内容上时仍给 Alt+N 留净空。
     container(scroller)
         .width(Length::Fill)
         .height(Length::Fill)
@@ -350,27 +352,91 @@ fn item_row<'a>(
     area.into()
 }
 
+/// 结果列表滚动条：细圆角拇指、无轨道底，避免盖住右侧 Alt+N。
+pub(crate) fn results_scrollbar() -> scrollable::Scrollbar {
+    scrollable::Scrollbar::new()
+        .width(8.0)
+        .scroller_width(4.0)
+        .margin(2.0)
+}
+
+/// 设置页共用同一套细滚动条外观。
+pub(crate) fn results_scroll_style(
+    _theme: &Theme,
+    status: scrollable::Status,
+) -> scrollable::Style {
+    use iced::widget::scrollable::{AutoScroll, Rail, Scroller, Style};
+    use iced::Vector;
+
+    let hovering = matches!(
+        status,
+        scrollable::Status::Hovered {
+            is_vertical_scrollbar_hovered: true,
+            ..
+        } | scrollable::Status::Dragged {
+            is_vertical_scrollbar_dragged: true,
+            ..
+        }
+    );
+    let thumb = if hovering {
+        Color { a: 0.48, ..TEXT_MUTED }
+    } else {
+        Color { a: 0.22, ..TEXT_MUTED }
+    };
+    let rail = Rail {
+        background: None,
+        border: Border::default(),
+        scroller: Scroller {
+            background: Background::Color(thumb),
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: border::radius(999.0),
+            },
+        },
+    };
+    Style {
+        container: container::Style::default(),
+        vertical_rail: rail,
+        horizontal_rail: rail,
+        gap: None,
+        auto_scroll: AutoScroll {
+            background: Background::Color(Color { a: 0.92, ..BG_ELEVATED }),
+            border: Border {
+                color: BORDER,
+                width: 1.0,
+                radius: border::radius(999.0),
+            },
+            shadow: iced::Shadow {
+                color: Color { a: 0.18, ..TEXT },
+                offset: Vector::ZERO,
+                blur_radius: 6.0,
+            },
+            icon: TEXT_MUTED,
+        },
+    }
+}
+
 /// 底部快捷键条（css .footer-bar）：kbd 胶囊 + 品牌位（快捷键标签）。
 fn footer_bar(state: &State) -> Element<'static, Message> {
-    fn kbd(s: &'static str) -> Element<'static, Message> {
-        container(text(s).size(10.0).color(TEXT))
-            .padding([1.0, 5.0])
-            .style(|_t| container::Style {
-                background: Some(Background::Color(BG_PANEL)),
-                border: Border {
-                    color: BORDER,
-                    width: 1.0,
-                    radius: border::radius(4.0),
-                },
-                ..container::Style::default()
-            })
-            .into()
-    }
-    fn pair(k: &'static str, label: &'static str) -> Element<'static, Message> {
-        row![kbd(k), text(label).size(11.0).color(TEXT_MUTED)]
-            .spacing(5.0)
-            .align_y(alignment::Alignment::Center)
-            .into()
+    fn pair(k: String, label: &'static str) -> Element<'static, Message> {
+        row![
+            container(text(k).size(10.0).color(TEXT))
+                .padding([1.0, 5.0])
+                .style(|_t| container::Style {
+                    background: Some(Background::Color(BG_PANEL)),
+                    border: Border {
+                        color: BORDER,
+                        width: 1.0,
+                        radius: border::radius(4.0),
+                    },
+                    ..container::Style::default()
+                }),
+            text(label).size(11.0).color(TEXT_MUTED)
+        ]
+        .spacing(5.0)
+        .align_y(alignment::Alignment::Center)
+        .into()
     }
     let hotkey_label = if state.hotkey_label.is_empty() {
         "Alt + Space".to_string()
@@ -378,9 +444,13 @@ fn footer_bar(state: &State) -> Element<'static, Message> {
         state.hotkey_label.clone()
     };
     let bar = row![
-        pair("↑↓", "选择"),
-        pair("Enter", "打开"),
-        pair("Esc", "关闭"),
+        pair("↑↓".into(), "选择"),
+        pair("Enter".into(), "打开"),
+        pair(
+            crate::system::hotkey::display_label(&state.web_search_hotkey),
+            "搜索"
+        ),
+        pair("Esc".into(), "关闭"),
         Space::new().width(Length::Fill),
         text(hotkey_label).size(11.0).color(TEXT_MUTED),
     ]
@@ -408,10 +478,19 @@ fn menu_overlay<'a>(
         std::path::Path::new(&item.target).is_file() || std::path::Path::new(&item.target).is_dir();
     let pinned = state.pinned.contains(&item.id);
 
+    let is_shell = item
+        .target
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("shell:appsfolder");
     let mut entries: Vec<(&'static str, MenuAction)> = Vec::new();
     if target_is_fs {
         entries.push(("打开所在文件夹", MenuAction::OpenFolder));
         entries.push(("复制路径", MenuAction::CopyPath));
+    } else if is_shell {
+        entries.push(("复制 AUMID", MenuAction::CopyTarget));
+    } else if !item.target.trim().is_empty() {
+        entries.push(("复制 target", MenuAction::CopyTarget));
     }
     entries.push(("复制名称", MenuAction::CopyName));
     if item.source != "everything-status" {

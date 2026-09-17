@@ -351,6 +351,56 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             flash(state, "设置已保存")
         }
+        Message::SetSearchEngine(id) => {
+            state.search_engine = id.clone();
+            if let Some(preset) = system::search_engine::preset_by_id(&id) {
+                if !preset.template.is_empty() {
+                    state.search_engine_custom = preset.template.to_string();
+                }
+            }
+            if let Some(db) = &mut state.history {
+                let _ = db.set_search_engine(&id);
+                match id.as_str() {
+                    "auto" => {
+                        let _ = db.save_setting("search_url_template", "");
+                    }
+                    "custom" => {
+                        if system::search_engine::is_valid_template(&state.search_engine_custom) {
+                            let _ = db
+                                .set_search_url_template(state.search_engine_custom.trim());
+                        }
+                    }
+                    _ => {
+                        if let Some(t) = system::search_engine::preset_by_id(&id)
+                            .map(|p| p.template)
+                            .filter(|t| !t.is_empty())
+                        {
+                            let _ = db.set_search_url_template(t);
+                        }
+                    }
+                }
+            }
+            flash(state, "搜索引擎已更新")
+        }
+        Message::SearchEngineCustomChanged(template) => {
+            state.search_engine_custom = template.clone();
+            if state.search_engine == "custom"
+                && system::search_engine::is_valid_template(&template)
+            {
+                if let Some(db) = &mut state.history {
+                    let _ = db.set_search_url_template(template.trim());
+                }
+            }
+            Task::none()
+        }
+        Message::SetWebSearchHotkey(spec) => {
+            let normalized = system::hotkey::normalize_web_search_hotkey(&spec).to_string();
+            state.web_search_hotkey = normalized.clone();
+            if let Some(db) = &mut state.history {
+                let _ = db.set_web_search_hotkey(&normalized);
+            }
+            flash(state, "网页搜索快捷键已更新")
+        }
         Message::ClearHistory => {
             if let Some(db) = &mut state.history {
                 let _ = db.clear_history();

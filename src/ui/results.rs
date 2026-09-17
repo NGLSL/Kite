@@ -178,7 +178,20 @@ impl State {
     /// 避免「第 5 位网页搜索」「文件结果过滤」这类规则改一处漏一处。
     fn merge_aux_hits(&mut self, mut hits: Vec<SearchResult>, q_norm: &str) -> Vec<SearchResult> {
         let preferred = self.history.as_ref().and_then(|h| h.preferred_browser());
-        let search_template = self.history.as_ref().and_then(|h| h.search_url_template());
+        let search_template = if self.search_engine == "auto" {
+            self.history.as_ref().and_then(|h| h.search_url_template())
+        } else {
+            crate::system::search_engine::preset_by_id(&self.search_engine)
+                .map(|p| p.template)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    // custom：用编辑框内容
+                    crate::system::search_engine::is_valid_template(&self.search_engine_custom)
+                        .then(|| self.search_engine_custom.trim().to_string())
+                })
+                .or_else(|| self.history.as_ref().and_then(|h| h.search_url_template()))
+        };
         let is_url = search::url::normalize_url(&self.query).is_some();
         if let Some(url) = search::url::normalize_url(&self.query) {
             let mut merged = app::web::build_hits(&url, preferred.as_deref(), &self.icon_dir);
@@ -222,8 +235,9 @@ impl State {
     }
 
     /// 未缓存模板时嗅探一次并写回（副本库），避免每次读浏览器配置。
+    /// 用户已选固定引擎（非 auto）时不覆盖。
     fn cache_detected_search_template(&mut self, missing: bool, preferred: Option<&str>) {
-        if !missing {
+        if !missing || self.search_engine != "auto" {
             return;
         }
         let Some(pref) = preferred else {

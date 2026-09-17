@@ -15,13 +15,29 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use super::super::scanner::util::wide;
 
 /// 启动 shell:AppsFolder / 普通路径 / UWP AUMID。
+///
+/// 包应用（含 `!` 的 Package_AppId）优先 ApplicationActivationManager；
+/// 经典 AppsFolder 项（如 `Microsoft.Windows.RemoteDesktop`）ActivationManager
+/// 常失败，改走 ShellExecute 整条 `shell:AppsFolder\…`，与资源管理器一致。
 pub fn launch_shell_path(target: &str) -> Result<(), String> {
     if let Some(aumid) = target.strip_prefix("shell:AppsFolder\\") {
         if !aumid.is_empty() {
-            return activate_uwp(aumid);
+            if is_package_aumid(aumid) {
+                if activate_uwp(aumid).is_ok() {
+                    return Ok(());
+                }
+            }
+            return shell_execute(target);
         }
     }
+    shell_execute(target)
+}
 
+fn is_package_aumid(aumid: &str) -> bool {
+    aumid.contains('!')
+}
+
+fn shell_execute(target: &str) -> Result<(), String> {
     let file: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
     // 给处理进程明确的 cwd（文件所在目录 / 主目录），避免继承 Kite 安装目录
     let dir = shell_working_dir(target);
@@ -161,6 +177,15 @@ mod tests {
             ""
         );
         assert_eq!(activation_args(""), "");
+    }
+
+    #[test]
+    fn package_aumid_detection() {
+        assert!(is_package_aumid(
+            "Microsoft.WindowsStore_8wekyb3d8bbwe!App"
+        ));
+        assert!(!is_package_aumid("Microsoft.Windows.RemoteDesktop"));
+        assert!(!is_package_aumid("Chrome"));
     }
 
     #[test]

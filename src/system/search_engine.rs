@@ -5,6 +5,57 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+/// 可选搜索引擎预设；`auto` 跟随浏览器默认，`custom` 用用户模板。
+pub struct EnginePreset {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// 空串表示不写固定模板（auto / custom 由其它逻辑处理）。
+    pub template: &'static str,
+}
+
+pub const ENGINE_PRESETS: &[EnginePreset] = &[
+    EnginePreset {
+        id: "auto",
+        label: "自动",
+        template: "",
+    },
+    EnginePreset {
+        id: "baidu",
+        label: "百度",
+        template: "https://www.baidu.com/s?wd={searchTerms}",
+    },
+    EnginePreset {
+        id: "bing",
+        label: "Bing",
+        template: "https://www.bing.com/search?q={searchTerms}",
+    },
+    EnginePreset {
+        id: "google",
+        label: "Google",
+        template: "https://www.google.com/search?q={searchTerms}",
+    },
+    EnginePreset {
+        id: "duckduckgo",
+        label: "DuckDuckGo",
+        template: "https://duckduckgo.com/?q={searchTerms}",
+    },
+    EnginePreset {
+        id: "custom",
+        label: "自定义",
+        template: "",
+    },
+];
+
+pub fn preset_by_id(id: &str) -> Option<&'static EnginePreset> {
+    ENGINE_PRESETS.iter().find(|p| p.id == id)
+}
+
+/// 模板是否可直接用于网页搜索。
+pub fn is_valid_template(template: &str) -> bool {
+    let t = template.trim();
+    !t.is_empty() && (t.contains("{searchTerms}") || t.contains("%s"))
+}
+
 /// 根据浏览器 id 探测搜索 URL 模板（含 `{searchTerms}`）。结果进程内缓存。
 pub fn detect_search_template(browser_id: &str) -> Option<String> {
     use std::collections::HashMap;
@@ -98,6 +149,16 @@ mod tests {
     fn normalize_percent_s() {
         let t = normalize_template("https://duckduckgo.com/?q=%s".into()).unwrap();
         assert_eq!(t, "https://duckduckgo.com/?q={searchTerms}");
+    }
+
+    #[test]
+    fn preset_lookup_and_template_validation() {
+        assert_eq!(preset_by_id("baidu").unwrap().label, "百度");
+        assert!(preset_by_id("nope").is_none());
+        assert!(is_valid_template("https://x.com/?q={searchTerms}"));
+        assert!(is_valid_template("https://x.com/?q=%s"));
+        assert!(!is_valid_template("https://x.com/"));
+        assert!(!is_valid_template(""));
     }
 
     #[test]

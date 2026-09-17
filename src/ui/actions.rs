@@ -11,6 +11,14 @@ pub(super) fn menu_action(state: &mut State, item: AppItem, action: MenuAction) 
             state.qlog(|| format!("ctx open_folder err={r:?}"));
         }
         MenuAction::CopyPath => return iced::clipboard::write(item.target),
+        MenuAction::CopyTarget => {
+            let t = item.target.trim();
+            let body = t
+                .strip_prefix("shell:AppsFolder\\")
+                .or_else(|| t.strip_prefix("shell:appsfolder\\"))
+                .unwrap_or(t);
+            return iced::clipboard::write(body.to_string());
+        }
         MenuAction::CopyName => return iced::clipboard::write(item.display_name),
         MenuAction::TogglePin => {
             if let Some(db) = &mut state.history {
@@ -87,7 +95,13 @@ pub(super) fn on_key(
         }
         Key::Named(Named::ArrowUp) => move_selection(state, -1),
         Key::Named(Named::ArrowDown) => move_selection(state, 1),
-        Key::Named(Named::Enter) if !state.ime_composing => launch_selected(state),
+        Key::Named(Named::Enter) if !state.ime_composing => {
+            if web_search_hotkey_pressed(state, mods) {
+                launch_browser_search(state)
+            } else {
+                launch_selected(state)
+            }
+        }
         Key::Named(Named::Alt) => Task::none(),
         Key::Named(name) => {
             state.qlog(|| format!("key named {name:?} ignored"));
@@ -99,6 +113,62 @@ pub(super) fn on_key(
             Task::none()
         }
         _ => Task::none(),
+    }
+}
+
+/// 窗口内网页搜索快捷键是否按下（默认 Ctrl+Enter；设置可改）。
+fn web_search_hotkey_pressed(state: &State, mods: Modifiers) -> bool {
+    let spec = system::hotkey::normalize_web_search_hotkey(&state.web_search_hotkey);
+    match spec {
+        "Ctrl+Enter" => {
+            mods.control() && !mods.alt() && !mods.shift() && !mods.logo()
+        }
+        "Alt+Enter" => mods.alt() && !mods.control() && !mods.shift() && !mods.logo(),
+        "Shift+Enter" => {
+            mods.shift() && !mods.control() && !mods.alt() && !mods.logo()
+        }
+        "Ctrl+Shift+Enter" => {
+            mods.control() && mods.shift() && !mods.alt() && !mods.logo()
+        }
+        _ => false,
+    }
+}
+
+/// 用当前 Query 直接打开浏览器搜索（不依赖列表选中项）。
+fn launch_browser_search(state: &mut State) -> Task<Message> {
+    let q = state.query.trim().to_string();
+    if q.is_empty() || state.settings_open || state.hidden {
+        return Task::none();
+    }
+    let preferred = state.history.as_ref().and_then(|h| h.preferred_browser());
+    let template = state.history.as_ref().and_then(|h| h.search_url_template());
+    let browser_id = preferred.as_deref().unwrap_or("default");
+    let t0 = Instant::now();
+    system::env::refresh_process_env();
+    let result = app::web::launch_websearch(browser_id, &q, template.as_deref());
+    match result {
+        Ok(preferred_id) => {
+            state.qlog(|| {
+                format!(
+                    "websearch hotkey via {browser_id} in {}us",
+                    t0.elapsed().as_micros()
+                )
+            });
+            if let Some(db) = &mut state.history {
+                let qn = search::normalize_for_index(&q);
+                let id = app::web::make_search_id(browser_id, &q);
+                let _ = db.record_launch(&id, &qn, storage::now_ts());
+                if let Some(pid) = preferred_id {
+                    let _ = db.set_preferred_browser(&pid);
+                }
+            }
+            hide(state);
+            hide_task(state)
+        }
+        Err(e) => {
+            state.qlog(|| format!("websearch hotkey failed: {e}"));
+            Task::none()
+        }
     }
 }
 
@@ -452,6 +522,16 @@ pub(super) fn open_settings(state: &mut State) -> Task<Message> {
         state.autostart = s.autostart;
         state.history_recording = s.history_recording;
         state.query_log = s.query_log;
+        state.search_engine = s.search_engine.clone();
+        state.web_search_hotkey = s.web_search_hotkey.clone();
+        state.search_engine_custom = db
+            .search_url_template()
+            .or_else(|| {
+                system::search_engine::preset_by_id(&state.search_engine)
+                    .filter(|p| !p.template.is_empty())
+                    .map(|p| p.template.to_string())
+            })
+            .unwrap_or_default();
         state.hotkey = s.hotkey.clone();
         state.hotkey_label = s.hotkey_label.clone();
         state.portable_dirs = s.portable_dirs;

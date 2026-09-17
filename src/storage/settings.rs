@@ -21,6 +21,10 @@ pub struct Settings {
     pub query_log: bool,
     /// 用户明确授权扫描的便携软件目录。
     pub portable_dirs: Vec<String>,
+    /// 搜索引擎：auto / baidu / bing / google / duckduckgo / custom。
+    pub search_engine: String,
+    /// 窗口内网页搜索快捷键，默认 Ctrl+Enter。
+    pub web_search_hotkey: String,
 }
 
 impl Default for Settings {
@@ -34,6 +38,8 @@ impl Default for Settings {
             history_recording: true,
             query_log: true,
             portable_dirs: Vec::new(),
+            search_engine: "auto".into(),
+            web_search_hotkey: crate::system::hotkey::DEFAULT_WEB_SEARCH_HOTKEY.into(),
         }
     }
 }
@@ -99,6 +105,16 @@ impl HistoryDb {
                 .map(|path| path.trim().to_string())
                 .filter(|path| !path.is_empty())
                 .collect();
+        }
+        if let Ok(v) = self.get_setting("search_engine") {
+            if !v.is_empty() {
+                s.search_engine = v;
+            }
+        }
+        if let Ok(v) = self.get_setting("web_search_hotkey") {
+            if crate::system::hotkey::is_valid_web_search_hotkey(&v) {
+                s.web_search_hotkey = v;
+            }
         }
         s
     }
@@ -234,6 +250,34 @@ impl HistoryDb {
             return Ok(());
         }
         self.save_setting("search_url_template", template)
+    }
+
+    /// 搜索引擎选择：`auto`（默认，跟随浏览器）/ 预设 id / `custom`。
+    pub fn search_engine(&self) -> String {
+        self.get_setting("search_engine")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "auto".to_string())
+    }
+
+    pub fn set_search_engine(&mut self, engine_id: &str) -> rusqlite::Result<()> {
+        let id = if engine_id.is_empty() { "auto" } else { engine_id };
+        self.save_setting("search_engine", id)
+    }
+
+    /// 网页搜索快捷键（窗口内），默认 Ctrl+Enter。
+    pub fn web_search_hotkey(&self) -> String {
+        self.get_setting("web_search_hotkey")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "Ctrl+Enter".to_string())
+    }
+
+    pub fn set_web_search_hotkey(&mut self, spec: &str) -> rusqlite::Result<()> {
+        if spec.is_empty() {
+            return Ok(());
+        }
+        self.save_setting("web_search_hotkey", spec)
     }
 
     pub(crate) fn conn(&self) -> &Connection {

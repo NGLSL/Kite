@@ -20,8 +20,8 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Variant::{VT_BSTR, VT_EMPTY, VT_LPWSTR};
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, PSGetPropertyKeyFromName};
 use windows::Win32::UI::Shell::{
-    BHID_EnumItems, BHID_PropertyStore, IEnumShellItems, IShellItem, SHCreateItemFromParsingName,
-    SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_NORMALDISPLAY,
+    BHID_EnumItems, BHID_LinkTargetItem, BHID_PropertyStore, IEnumShellItems, IShellItem,
+    SHCreateItemFromParsingName, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_NORMALDISPLAY,
 };
 
 use super::scanner::util::stable_item_id;
@@ -146,12 +146,63 @@ fn classic_shell_target(item: &IShellItem) -> Option<(String, String)> {
     if is_web_identifier(&parsing_name) {
         return None;
     }
-    let target = format!("shell:AppsFolder\\{parsing_name}");
-    let _: IShellItem = unsafe {
-        SHCreateItemFromParsingName(PCWSTR(wide(&target).as_ptr()), None::<&IBindCtx>).ok()?
+
+    // 优先真实 exe：可直接启动，并与开始菜单 .lnk 共享 launch identity。
+    if let Some(exe) = resolve_link_target_exe(item) {
+        let icon_src = classic_icon_source(&exe, &exe);
+        return Some((exe, icon_src));
+    }
+
+    // parsing_name 已是磁盘文件时直接用路径。
+    if Path::new(&parsing_name).is_file() {
+        let icon_src = classic_icon_source(&parsing_name, &parsing_name);
+        return Some((parsing_name, icon_src));
+    }
+
+    // {KnownFolderGUID}\file → 绝对路径；解不出或落盘不存在则不入索引。
+    if let Some(resolved) = resolve_known_folder_relative(&parsing_name) {
+        if Path::new(&resolved).is_file() {
+            let icon_src = classic_icon_source(&resolved, &resolved);
+            return Some((resolved, icon_src));
+        }
+    }
+
+    None
+}
+
+/// `{GUID}\relative` 或 `{GUID}` → 已知文件夹绝对路径。
+fn resolve_known_folder_relative(parsing_name: &str) -> Option<String> {
+    use windows::Win32::System::Com::{CLSIDFromString, CoTaskMemFree};
+    use windows::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+
+    let rest = parsing_name.strip_prefix('{')?;
+    let (guid_str, rel) = rest.split_once('}')?;
+    let guid_wide = wide(&format!("{{{guid_str}}}"));
+    let guid = unsafe { CLSIDFromString(PCWSTR(guid_wide.as_ptr())).ok()? };
+    unsafe {
+        let pwstr = SHGetKnownFolderPath(&guid, KF_FLAG_DEFAULT, None).ok()?;
+        if pwstr.is_null() {
+            return None;
+        }
+        let folder = pwstr.to_string().ok();
+        CoTaskMemFree(Some(pwstr.0.cast()));
+        let folder = folder?;
+        if rel.is_empty() {
+            return Some(folder);
+        }
+        let rel = rel.trim_start_matches('\\');
+        Some(Path::new(&folder).join(rel).to_string_lossy().into_owned())
+    }
+}
+
+/// 通过 BHID_LinkTargetItem 解析 AppsFolder 经典项的真实 exe 路径。
+fn resolve_link_target_exe(item: &IShellItem) -> Option<String> {
+    let target: IShellItem = unsafe {
+        item.BindToHandler(None::<&IBindCtx>, &BHID_LinkTargetItem)
+            .ok()?
     };
-    let icon_src = classic_icon_source(&parsing_name, &target);
-    Some((target, icon_src))
+    let path = display_name_with_flag(&target, SIGDN_DESKTOPABSOLUTEPARSING)?;
+    Path::new(&path).is_file().then_some(path)
 }
 
 fn classic_icon_source(parsing_name: &str, shell_target: &str) -> String {
@@ -382,6 +433,15 @@ mod tests {
         assert!(is_web_identifier(r"D:\Program Files\Tool\ReadMe.pdf"));
         assert!(is_web_identifier(r"D:\Program Files\Tool\uninstall.exe"));
         assert!(is_auxiliary_display_name("英雄联盟卸载"));
+    }
+
+    #[test]
+    fn known_folder_classic_item_resolves_to_real_exe() {
+        // {FOLDERID_System}\MdSched.exe → 真实 System32 路径
+        let parsing = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\MdSched.exe";
+        let resolved = resolve_known_folder_relative(parsing).expect("resolve System32 exe");
+        assert!(Path::new(&resolved).is_file(), "resolved={resolved}");
+        assert!(resolved.to_ascii_lowercase().ends_with("mdsched.exe"));
     }
 
     #[test]
