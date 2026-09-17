@@ -669,6 +669,14 @@ fn alias_card(state: &State) -> Element<'_, Message> {
 
 fn index_card(state: &State) -> Element<'_, Message> {
     let n = state.index.lock().map(|g| g.apps.len()).unwrap_or(0);
+    let health = crate::app::index_health::load();
+    let now = crate::storage::now_ts().max(0) as u64;
+    let health_label = health.summary(now);
+    let health_status = if crate::app::index_health::is_degraded(&health) {
+        "需关注"
+    } else {
+        "正常"
+    };
     let summary = flow_card(vec![
         flow_row(
             "重新扫描应用",
@@ -679,6 +687,11 @@ fn index_card(state: &State) -> Element<'_, Message> {
             "当前索引",
             "快速扫描 + AppsFolder 后台补齐".to_string(),
             text(format!("{n} 条")).size(13.0).color(TEXT).into(),
+        ),
+        flow_row(
+            "索引健康",
+            health_label,
+            text(health_status).size(13.0).color(TEXT_MUTED).into(),
         ),
     ]);
 

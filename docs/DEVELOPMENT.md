@@ -49,6 +49,15 @@ artifacts/kite-setup.exe
 
 ## 正式发布
 
-正式版本只由 `main` 上的 `v*` tag 触发。创建 tag 前，先按 [`docs/releases/README.md`](releases/README.md) 新建对应的详细版本说明，例如 `docs/releases/v0.3.0.md`。GitHub Actions 会把维护者说明和自动构建信息合并到 Release 页面，并上传 `kite-setup.exe`。
+正式版本只由 `main` 上的 `v*` tag 触发。**禁止**在未合入 main 或 main 上 CI 未绿时打 tag。
+
+固定顺序：
+
+1. 合并目标提交到 `main`，等待 `.github/workflows/ci.yml`（push main / PR）成功。
+2. 按 [`docs/releases/README.md`](releases/README.md) 写好 `docs/releases/vX.Y.Z.md`，并更新 `Cargo.toml` 版本。
+3. 在 **已绿的 main 提交** 上创建并推送 `vX.Y.Z` tag。
+4. Release workflow 会校验：tag 提交包含于 origin/main，且该提交的 CI workflow 成功；然后跑 test、NSIS、生成报告并发布。
+
+NSIS 与完整 Release **只在 tag 上跑**，不在每个 PR 上跑。`ci.yml` 是 main/PR 的唯一自动化门禁。
 
 发布报告会记录 tag 提交、提交范围、`cargo test`、release 构建、NSIS 构建、构建环境、安装包大小和 SHA-256。发布完成后应检查报告内容和下载文件，再向用户公布版本。

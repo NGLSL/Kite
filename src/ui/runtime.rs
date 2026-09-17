@@ -26,6 +26,7 @@ pub fn run() -> iced::Result {
 
     let _ = BOOT_DIR.set(data_dir.clone());
     app::snapshot::init(data_dir.clone());
+    app::index_health::init(data_dir.clone());
     iced::application(boot_entry, update, view)
         .title("Kite")
         .window(Settings {

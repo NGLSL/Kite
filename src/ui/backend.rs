@@ -188,8 +188,10 @@ fn queue_full_snapshot(
 
     if let Err(error) = app::snapshot::save(&full) {
         plog(&format!("index snapshot save failed: {error}"));
+        app::index_health::record_full_failure(&format!("snapshot save: {error}"));
     } else {
         plog(&format!("index snapshot saved n={count}"));
+        app::index_health::record_full_success();
     }
 
     let differs = index

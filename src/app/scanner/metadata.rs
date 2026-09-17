@@ -118,12 +118,11 @@ impl MetaCache {
         let Ok(json) = serde_json::to_vec(&file) else {
             return;
         };
-        let tmp = self.file.with_extension("json.tmp");
-        if std::fs::write(&tmp, &json).is_ok() {
-            if self.file.exists() {
-                let _ = std::fs::remove_file(&self.file);
-            }
-            let _ = std::fs::rename(&tmp, &self.file);
+        if let Err(error) = crate::app::atomic_file::write(&self.file, &json) {
+            crate::log::info(&format!(
+                "meta cache write failed path={} err={error}",
+                self.file.display()
+            ));
         }
     }
 }
@@ -327,5 +326,32 @@ mod tests {
     #[test]
     fn shell_paths_are_skipped() {
         assert!(executable_keywords(Path::new("shell:AppsFolder\\Foo")).is_empty());
+    }
+
+    #[test]
+    fn save_overwrites_existing_meta_cache() {
+        let dir = std::env::temp_dir().join(format!("kite-meta-ow-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let windows = std::env::var_os("WINDIR").unwrap();
+        let path = PathBuf::from(&windows).join("System32/notepad.exe");
+
+        let mut first = MetaCache::load(&dir);
+        let _ = executable_keywords_batch(&[path.clone()], &mut first);
+        first.save();
+
+        let mut second = MetaCache::load(&dir);
+        // 模拟本轮未见到旧条目：save 会裁掉 unseen
+        second.seen.clear();
+        second.save();
+        assert!(MetaCache::load(&dir).entries.is_empty());
+
+        let mut third = MetaCache::load(&dir);
+        let _ = executable_keywords_batch(&[path], &mut third);
+        third.save();
+        assert!(
+            !MetaCache::load(&dir).entries.is_empty(),
+            "second write after prune must land"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

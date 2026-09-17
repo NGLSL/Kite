@@ -4,7 +4,7 @@
 
 **Blocked by:** 04 App Paths/Uninstall 归并与兜底
 
-**Status:** implemented
+**Status:** resolved
 
 - [x] 空 Query：未吸收的 app-paths/uninstall/commands/scoop 不进默认补满段
 - [x] 空 Query：Pin 或最近使用的 Tier C 仍显示且可启动
@@ -12,5 +12,5 @@
 - [x] 精确命令 Query（如 `7z`）：命令入口仍召回且可启动
 - [x] `quality_tier <= PROTECTED_TIER_MAX` 不因本层降噪后移
 - [x] 空 Query 与非空排序回归测试通过
-- [ ] Windows 实机：空列表干净；`7` / `7z` 行为符合上文
+- [x] Windows 实机：空列表干净；`7` / `7z` 行为符合上文（stability-v0.2.10 票 04）
 - [x] `cargo check` / `cargo test` 通过

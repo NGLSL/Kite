@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 Portable 升为 Tier A 正式入口
 
-**Status:** implemented
+**Status:** resolved
 
 - [x] Bootstrap 扫描库存：不含 `app-paths` / `uninstall` / `scoop` / `commands`
 - [x] Bootstrap 在已配置 portable_dirs 时索引 portable 正式入口
@@ -13,4 +13,4 @@
 - [x] Full 仍收集 App Paths/Uninstall 等来源（本票不改 Full 的 C 层策略）
 - [x] 相关扫描库存测试通过
 - [x] `cargo check` / `cargo test` 通过
-- [ ] Windows 实机：Cold 有图标、无注册表杂讯
+- [x] Windows 实机：Cold 有图标、无注册表杂讯（用户删 last-good 后冷启动确认正常，stability-v0.2.10 票 04）

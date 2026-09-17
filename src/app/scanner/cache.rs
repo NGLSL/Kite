@@ -123,15 +123,11 @@ impl ScanCache {
         let Ok(json) = serde_json::to_vec(&file) else {
             return;
         };
-        let tmp = self.file.with_extension("json.tmp");
-        if std::fs::write(&tmp, &json).is_ok() {
-            // Windows does not replace an existing destination with rename.
-            // Remove the old snapshot first so subsequent scans can refresh
-            // the cache instead of silently keeping stale entries.
-            if self.file.exists() {
-                let _ = std::fs::remove_file(&self.file);
-            }
-            let _ = std::fs::rename(&tmp, &self.file);
+        if let Err(error) = crate::app::atomic_file::write(&self.file, &json) {
+            crate::log::info(&format!(
+                "lnk cache write failed path={} err={error}",
+                self.file.display()
+            ));
         }
     }
 }
@@ -219,12 +215,11 @@ impl UwpCache {
         let Ok(json) = serde_json::to_vec(&file) else {
             return;
         };
-        let tmp = self.file.with_extension("json.tmp");
-        if std::fs::write(&tmp, &json).is_ok() {
-            if self.file.exists() {
-                let _ = std::fs::remove_file(&self.file);
-            }
-            let _ = std::fs::rename(&tmp, &self.file);
+        if let Err(error) = crate::app::atomic_file::write(&self.file, &json) {
+            crate::log::info(&format!(
+                "uwp cache write failed path={} err={error}",
+                self.file.display()
+            ));
         }
     }
 }

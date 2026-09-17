@@ -38,6 +38,8 @@ docs/releases/v0.3.0.md
 
 1. 更新 `Cargo.toml` 版本号。
 2. 新建 `docs/releases/vX.Y.Z.md`，写清用户可见变化和升级影响。
-3. 合并到 `main`，确认 CI 通过。
-4. 创建并推送 `vX.Y.Z` tag。
+3. 合并到 `main`，**确认 CI（`ci.yml`）成功**。
+4. 在该已绿提交上创建并推送 `vX.Y.Z` tag（Release 会校验 tag ⊆ main 且 CI success）。
 5. 等待 Release workflow 构建并发布安装包，检查报告和 SHA-256。
+
+不要在 CI 未绿或提交尚未进入 `main` 时打 tag；否则 Release 会在校验步骤失败，tag 已公开却没有安装包。

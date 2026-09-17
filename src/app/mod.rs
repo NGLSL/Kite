@@ -1,8 +1,10 @@
 //! 应用目录：扫描 Windows 入口并启动目标。
 
 pub mod actions;
+pub mod atomic_file;
 pub mod builtin;
 mod control_panel;
+pub mod index_health;
 mod launcher;
 pub mod scanner;
 pub mod snapshot;

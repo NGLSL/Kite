@@ -173,61 +173,8 @@ pub fn save(index: &AppIndex) -> std::io::Result<()> {
 pub fn save_to(data_dir: &Path, index: &AppIndex) -> std::io::Result<()> {
     let snapshot = from_index(index);
     let path = snapshot_path(data_dir);
-    let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_vec(&snapshot)?;
-    std::fs::write(&tmp, json)?;
-    atomic_replace(&tmp, &path)
-}
-
-/// 用 `ReplaceFileW` / `MoveFileExW` 把 tmp 换到 dest，避免「先删再 rename」
-/// 中间态窗口里进程被杀或读到空 last-good。失败再退回 remove+rename。
-fn atomic_replace(tmp: &Path, dest: &Path) -> std::io::Result<()> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        use windows::Win32::Storage::FileSystem::{
-            MoveFileExW, ReplaceFileW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-            REPLACEFILE_WRITE_THROUGH,
-        };
-        use windows::core::PCWSTR;
-
-        fn wide(p: &Path) -> Vec<u16> {
-            p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
-        }
-
-        let tmp_w = wide(tmp);
-        let dest_w = wide(dest);
-        let replaced = unsafe {
-            if dest.exists() {
-                // dest 已存在：ReplaceFileW 原子替换，保留 dest 的 ACL/属性。
-                let r = ReplaceFileW(
-                    PCWSTR(dest_w.as_ptr()),
-                    PCWSTR(tmp_w.as_ptr()),
-                    PCWSTR::null(),
-                    REPLACEFILE_WRITE_THROUGH,
-                    None,
-                    None,
-                );
-                if r.is_ok() {
-                    return Ok(());
-                }
-            }
-            // 首次写入或 ReplaceFileW 失败（如 dest 被占用）：MoveFileExW 同卷替换。
-            MoveFileExW(
-                PCWSTR(tmp_w.as_ptr()),
-                PCWSTR(dest_w.as_ptr()),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        };
-        if replaced.is_ok() {
-            return Ok(());
-        }
-    }
-    // 兜底：跨平台路径 / 上述 API 失败
-    if dest.exists() {
-        let _ = std::fs::remove_file(dest);
-    }
-    std::fs::rename(tmp, dest)
+    crate::app::atomic_file::write(&path, &json)
 }
 
 /// Warm Start：版本兼容即可恢复（含很旧的 last-good）；启动后 Full 会刷新。
@@ -249,8 +196,9 @@ pub fn load_from(data_dir: &Path) -> Option<AppIndex> {
     }
     let now = crate::storage::now_ts().max(0) as u64;
     let age = now.saturating_sub(snapshot.saved_at_unix);
+    let aged = age > WARM_SOFT_AGE_SECS;
     let index = into_index(snapshot);
-    if age > WARM_SOFT_AGE_SECS {
+    if aged {
         crate::log::info(&format!(
             "warm start from aged snapshot n={} age_s={} ({})",
             index.apps.len(),
@@ -264,6 +212,7 @@ pub fn load_from(data_dir: &Path) -> Option<AppIndex> {
             path.display()
         ));
     }
+    crate::app::index_health::record_warm_load_to(data_dir, age, aged);
     Some(index)
 }
 
