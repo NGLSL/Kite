@@ -357,6 +357,23 @@ mod interactive_log_gate_tests {
     }
 }
 
+/// 把逻辑尺寸窗口摆到光标所在显示器工作区中部（物理定位 → 按窗口当前 scale 转逻辑）。
+fn place_on_cursor_monitor_task(
+    id: window::Id,
+    window_w: f32,
+    window_h: f32,
+) -> Task<Message> {
+    window::scale_factor(id).then(move |scale| {
+        let Some((px, py)) =
+            system::window_place::physical_position_on_cursor_monitor(window_w, window_h)
+        else {
+            return Task::none();
+        };
+        let (lx, ly) = system::window_place::physical_to_logical_for_window((px, py), scale);
+        window::move_to(id, iced::Point::new(lx, ly))
+    })
+}
+
 /// 显示主窗口（热键/托盘/二次启动共用）。窗口未就绪时忽略。
 pub(super) fn show_launcher(state: &mut State) -> Task<Message> {
     let Some(id) = state.window_id else {
@@ -368,7 +385,7 @@ pub(super) fn show_launcher(state: &mut State) -> Task<Message> {
     state.hidden = false;
     state.epoch += 1;
     // 每次唤起按鼠标所在 monitor 重新定位（uTools 式多显示器跟随）。
-    let place = system::window_place::position_on_cursor_monitor(WINDOW_W, WINDOW_H);
+    let place = system::window_place::physical_position_on_cursor_monitor(WINDOW_W, WINDOW_H);
     if state.files_mode {
         state.request_file_search();
     }
@@ -379,7 +396,7 @@ pub(super) fn show_launcher(state: &mut State) -> Task<Message> {
         "show issued epoch={} place={place:?}",
         state.epoch
     ));
-    let mut tasks = vec![
+    Task::batch([
         // 搜索窗口只需要前台焦点，不应持续置顶，否则会压住截图层和其它全局快捷键 UI。
         window::set_level(id, window::Level::Normal),
         // gain_focus 在窗口不可见时是 no-op：必须先 set_mode 再 focus，不能 batch 并行。
@@ -387,11 +404,8 @@ pub(super) fn show_launcher(state: &mut State) -> Task<Message> {
             .chain(window::gain_focus(id))
             .chain(iced::widget::operation::focus(state.input_id.clone())),
         sync_scroll(state),
-    ];
-    if let Some((x, y)) = place {
-        tasks.push(window::move_to(id, iced::Point::new(x, y)));
-    }
-    Task::batch(tasks)
+        place_on_cursor_monitor_task(id, WINDOW_W, WINDOW_H),
+    ])
 }
 
 pub(super) fn hide(state: &mut State) {
@@ -456,19 +470,24 @@ pub(super) fn open_settings(state: &mut State) -> Task<Message> {
     let Some(id) = state.window_id else {
         return Task::none();
     };
-    let mut tasks = vec![settings_window_task(id)];
-    // 与 show_launcher 一致：按光标所在显示器定位，托盘打开时窗口落在可见工作区。
-    if let Some((x, y)) = system::window_place::position_on_cursor_monitor(720.0, 520.0) {
-        tasks.push(window::move_to(id, iced::Point::new(x, y)));
-    }
-    Task::batch(tasks)
+    Task::batch([
+        settings_window_task(id),
+        // 与 show_launcher 一致：物理定位 + 窗口 scale 转逻辑，避免 2K/1K 缩放偏移。
+        place_on_cursor_monitor_task(id, SETTINGS_W, SETTINGS_H),
+    ])
 }
+
+const SETTINGS_W: f32 = 720.0;
+const SETTINGS_H: f32 = 520.0;
 
 pub(super) fn settings_window_task(id: window::Id) -> Task<Message> {
     // gain_focus 在窗口不可见时是 no-op：必须先 set_mode/resize 再 focus，不能 batch 并行。
     window::set_level(id, window::Level::Normal)
         .chain(window::set_mode(id, window::Mode::Windowed))
-        .chain(window::resize(id, iced::Size::new(720.0, 520.0)))
+        .chain(window::resize(
+            id,
+            iced::Size::new(SETTINGS_W, SETTINGS_H),
+        ))
         .chain(window::gain_focus(id))
 }
 
