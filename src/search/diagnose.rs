@@ -99,12 +99,12 @@ pub fn search_personalized_explained(
                     }
                 }
             }
-            Some(SearchResult {
+            Some(SearchResult::with_quality_tier(
                 item,
-                score: r.score,
-                matched_by: r.matched_by,
-                quality_tier: r.quality_tier,
-            })
+                r.score,
+                r.matched_by,
+                r.quality_tier,
+            ))
         })
         .collect();
     (hits, diags)

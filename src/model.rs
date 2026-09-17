@@ -1,5 +1,120 @@
 use serde::Serialize;
 
+/// Result 的产品来源。管「这条结果从哪来」，不参与 MatchScore / FinalScore。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResultSource {
+    App,
+    File,
+    Web,
+    Builtin,
+    Plugin {
+        plugin_id: String,
+        provider_id: String,
+    },
+}
+
+/// Result 携带的行为。Result 管展示，Action 管行为。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResultAction {
+    LaunchApp {
+        item_id: String,
+    },
+    OpenFile {
+        path: String,
+    },
+    OpenUrl {
+        url: String,
+    },
+    CopyText {
+        text: String,
+    },
+    Plugin {
+        plugin_id: String,
+        action_id: String,
+        #[serde(default)]
+        payload: serde_json::Value,
+    },
+}
+
+fn target_is_http_url(target: &str) -> bool {
+    let t = target.trim();
+    t.starts_with("http://") || t.starts_with("https://")
+}
+
+impl ResultSource {
+    /// 从 AppItem / matched_by 推导展示来源（expand 阶段启发式，不改变启动路径）。
+    pub fn from_item(item: &AppItem, matched_by: &str) -> Self {
+        match matched_by {
+            "file" => return ResultSource::File,
+            "everything-status" => return ResultSource::Builtin,
+            "websearch" | "url" => return ResultSource::Web,
+            "builtin" | "win-settings" | "builtin-system" => return ResultSource::Builtin,
+            _ => {}
+        }
+
+        let id = item.id.as_str();
+        if id.starts_with("file:") {
+            return ResultSource::File;
+        }
+        if id.starts_with("url:") || id.starts_with("websearch:") {
+            return ResultSource::Web;
+        }
+        if id.starts_with("kite:") {
+            return ResultSource::Builtin;
+        }
+
+        match item.source.as_str() {
+            "everything" => return ResultSource::File,
+            "websearch" | "url" | "browser" => return ResultSource::Web,
+            "builtin" | "builtin-system" | "win-settings" | "everything-status" => {
+                return ResultSource::Builtin
+            }
+            _ => {}
+        }
+
+        if target_is_http_url(&item.target) {
+            return ResultSource::Web;
+        }
+        ResultSource::App
+    }
+}
+
+impl ResultAction {
+    /// expand 阶段默认动作推导；复杂内置项仍可走 LaunchApp（item_id 由 UI/启动层解释）。
+    pub fn for_item(item: &AppItem, source: &ResultSource) -> Self {
+        match source {
+            ResultSource::File => ResultAction::OpenFile {
+                path: item.target.clone(),
+            },
+            ResultSource::Web if target_is_http_url(&item.target) => ResultAction::OpenUrl {
+                url: item.target.trim().to_string(),
+            },
+            // 浏览器/网页搜索 id 含 browser 与 payload，启动仍依赖 item_id 解析。
+            ResultSource::Web
+            | ResultSource::App
+            | ResultSource::Builtin
+            | ResultSource::Plugin { .. } => ResultAction::LaunchApp {
+                item_id: item.id.clone(),
+            },
+        }
+    }
+
+    /// Plugin 动作构造（V1 后续票使用；expand 阶段仅保证类型可表达）。
+    pub fn plugin(
+        plugin_id: impl Into<String>,
+        action_id: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> Self {
+        ResultAction::Plugin {
+            plugin_id: plugin_id.into(),
+            action_id: action_id.into(),
+            payload,
+        }
+    }
+}
+
 /// 可启动的 Windows 应用条目（正式入口 / 系统入口 / Tier C 发现与命令）。
 #[derive(Debug, Clone, Serialize)]
 pub struct AppItem {
@@ -82,6 +197,9 @@ impl AppItem {
 }
 
 /// 返回给前端的一条排序后的搜索结果。
+///
+/// expand：在 AppItem 展示模型旁挂上通用 ResultSource / ResultAction，
+/// 供后续插件与统一启动路径使用；本阶段不改变排序与启动行为。
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchResult {
     #[serde(flatten)]
@@ -92,22 +210,54 @@ pub struct SearchResult {
     /// 最终排序以本字段为第一键，禁止用加分后的 score 反推层级。
     #[serde(skip)]
     pub quality_tier: i32,
+    /// Result 来源（App/File/Web/Builtin/Plugin）。
+    ///
+    /// 与 `AppItem.source`（扫描来源字符串）及 `SourceLayer`（索引产品分层）不同：
+    /// 这是结果展示/行为边界。serde 键用 `result_source`，避免与 flatten 的
+    /// `AppItem.source` 冲突。
+    #[serde(rename = "result_source")]
+    pub source: ResultSource,
+    /// Result 动作；启动/打开/复制等行为应逐步迁到此字段。
+    pub action: ResultAction,
 }
 
 impl SearchResult {
-    /// 用基础 MatchScore 构造，并写入显式质量层。
+    /// 用基础 MatchScore 构造，并写入显式质量层；source/action 由 item 推导。
     pub fn scored(item: AppItem, score: i32, matched_by: impl Into<String>) -> Self {
-        Self {
-            quality_tier: crate::history::quality_tier(score),
-            item,
-            score,
-            matched_by: matched_by.into(),
-        }
+        let quality_tier = crate::history::quality_tier(score);
+        Self::with_quality_tier(item, score, matched_by, quality_tier)
     }
 
     /// 未走 MatchScore 通道的结果（文件、网页等）；层按 score 回退。
     pub fn with_score(item: AppItem, score: i32, matched_by: impl Into<String>) -> Self {
         Self::scored(item, score, matched_by)
+    }
+
+    /// 显式质量层 + 推导 source/action（检索物化 / 诊断路径）。
+    pub fn with_quality_tier(
+        item: AppItem,
+        score: i32,
+        matched_by: impl Into<String>,
+        quality_tier: i32,
+    ) -> Self {
+        let matched_by = matched_by.into();
+        let source = ResultSource::from_item(&item, &matched_by);
+        let action = ResultAction::for_item(&item, &source);
+        Self {
+            item,
+            score,
+            matched_by,
+            quality_tier,
+            source,
+            action,
+        }
+    }
+
+    /// 覆盖 expand 字段（构造后微调 source/action）。
+    pub fn with_source_action(mut self, source: ResultSource, action: ResultAction) -> Self {
+        self.source = source;
+        self.action = action;
+        self
     }
 }
 
@@ -205,4 +355,146 @@ pub fn is_system_dir_target(target: &str) -> bool {
 /// 空 Query 默认补满是否隐藏（来源层 + 系统目录噪声）。Pin/最近仍可覆盖。
 pub fn is_hidden_on_empty_fill(source: &str, target: &str) -> bool {
     is_hidden_on_empty_query(source) || is_system_dir_target(target)
+}
+
+#[cfg(test)]
+mod result_expand_tests {
+    use super::*;
+
+    fn app_item(id: &str, target: &str, source: &str) -> AppItem {
+        let mut item = AppItem::scanned(
+            id.into(),
+            format!("name-{id}"),
+            target.into(),
+            None,
+            None,
+            source,
+        );
+        item.attach_search_fields();
+        item
+    }
+
+    #[test]
+    fn app_result_gets_launch_app_action() {
+        let item = app_item("app.chrome", r"C:\Program Files\Chrome\chrome.exe", "start-menu");
+        let hit = SearchResult::scored(item, 1000, "exact");
+        assert_eq!(hit.source, ResultSource::App);
+        assert_eq!(
+            hit.action,
+            ResultAction::LaunchApp {
+                item_id: "app.chrome".into()
+            }
+        );
+        // expand 不得改变展示/排序用字段
+        assert_eq!(hit.item.id, "app.chrome");
+        assert_eq!(hit.score, 1000);
+        assert_eq!(hit.matched_by, "exact");
+    }
+
+    #[test]
+    fn file_result_gets_open_file_action() {
+        let item = app_item("file:c:\\a\\b.txt", r"C:\A\B.txt", "everything");
+        let hit = SearchResult::scored(item, 400, "file");
+        assert_eq!(hit.source, ResultSource::File);
+        assert_eq!(
+            hit.action,
+            ResultAction::OpenFile {
+                path: r"C:\A\B.txt".into()
+            }
+        );
+    }
+
+    #[test]
+    fn websearch_result_maps_to_web_source() {
+        let item = app_item("websearch:default:rust", "https://www.bing.com/search?q=rust", "websearch");
+        let hit = SearchResult::scored(item, 880, "websearch");
+        assert_eq!(hit.source, ResultSource::Web);
+        assert_eq!(
+            hit.action,
+            ResultAction::OpenUrl {
+                url: "https://www.bing.com/search?q=rust".into()
+            }
+        );
+    }
+
+    #[test]
+    fn browser_id_encoded_web_hit_keeps_launch_app_action() {
+        // id 含 browser payload 时，expand 阶段仍用 LaunchApp，启动层继续 parse id。
+        let item = app_item("url:chrome:https://example.com", "C:\\chrome.exe", "browser");
+        let hit = SearchResult::scored(item, 940, "url");
+        assert_eq!(hit.source, ResultSource::Web);
+        assert_eq!(
+            hit.action,
+            ResultAction::LaunchApp {
+                item_id: "url:chrome:https://example.com".into()
+            }
+        );
+    }
+
+    #[test]
+    fn builtin_result_maps_to_builtin_source() {
+        let item = app_item("kite:settings", "kite:settings", "builtin");
+        let hit = SearchResult::scored(item, 930, "builtin");
+        assert_eq!(hit.source, ResultSource::Builtin);
+        assert_eq!(
+            hit.action,
+            ResultAction::LaunchApp {
+                item_id: "kite:settings".into()
+            }
+        );
+    }
+
+    #[test]
+    fn plugin_action_constructor_is_available() {
+        let action = ResultAction::plugin(
+            "com.kite.calculator",
+            "copy",
+            serde_json::json!({"text":"3"}),
+        );
+        match &action {
+            ResultAction::Plugin {
+                plugin_id,
+                action_id,
+                ..
+            } => {
+                assert_eq!(plugin_id, "com.kite.calculator");
+                assert_eq!(action_id, "copy");
+            }
+            other => panic!("expected Plugin action, got {other:?}"),
+        }
+        let source = ResultSource::Plugin {
+            plugin_id: "com.kite.calculator".into(),
+            provider_id: "calculate".into(),
+        };
+        let item = app_item("plugin.calc", "calc", "plugin");
+        let hit = SearchResult::scored(item, 0, "plugin").with_source_action(source, action);
+        assert!(matches!(hit.source, ResultSource::Plugin { .. }));
+        assert!(matches!(hit.action, ResultAction::Plugin { .. }));
+    }
+
+    #[test]
+    fn with_quality_tier_preserves_tier_and_derives_source() {
+        let item = app_item("file:c:\\x.md", r"C:\X.md", "everything");
+        let hit = SearchResult::with_quality_tier(item, 400, "file", 7);
+        assert_eq!(hit.quality_tier, 7);
+        assert_eq!(hit.source, ResultSource::File);
+        assert_eq!(
+            hit.action,
+            ResultAction::OpenFile {
+                path: r"C:\X.md".into()
+            }
+        );
+    }
+
+    #[test]
+    fn serialized_result_keeps_app_item_scan_source_key_distinct() {
+        // flatten 后 AppItem.source 仍表示扫描来源；ResultSource 走 result_source。
+        let item = app_item("app.x", r"C:\x.exe", "start-menu");
+        let hit = SearchResult::scored(item, 1000, "exact");
+        let json = serde_json::to_value(&hit).expect("serialize");
+        assert_eq!(json["source"], "start-menu");
+        assert_eq!(json["result_source"]["kind"], "app");
+        assert_eq!(json["action"]["type"], "launch_app");
+        assert_eq!(json["action"]["item_id"], "app.x");
+    }
 }

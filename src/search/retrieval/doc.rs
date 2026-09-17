@@ -678,12 +678,12 @@ impl RetrievalIndex {
                         }
                     }
                 }
-                Some(crate::model::SearchResult {
+                Some(crate::model::SearchResult::with_quality_tier(
                     item,
-                    score: r.score,
-                    matched_by: r.matched_by,
-                    quality_tier: r.quality_tier,
-                })
+                    r.score,
+                    r.matched_by,
+                    r.quality_tier,
+                ))
             })
             .collect()
     }
