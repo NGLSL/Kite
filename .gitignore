@@ -44,3 +44,6 @@ Thumbs.db
 
 # WorkBuddy local config, project skills and memory
 .workbuddy/
+
+# Claude local config, project skills and memory
+.claude/
