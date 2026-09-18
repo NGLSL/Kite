@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "plugin": {
+    "id": "com.kite.calculator",
+    "name": "计算器",
+    "version": "0.1.0",
+    "description": "在搜索框输入 = 直接计算，支持括号与优先级",
+    "usage": "在搜索框输入 = 加上算式即可计算。\n\n示例\n  =1+1\n  =1+1*(2+1)\n  =1000,000+1\n  =1,000,000+1\n  =2^3\n  =√9+1\n\n支持\n  + - * / %、括号 () []、优先级\n  千分位逗号 / 下划线、全角＋－×÷\n  隐式乘法（如 1+1(1+1)=3）\n  ^ 或 ** 乘方、√ 开方\n\n操作\n  Enter 复制结果\n  也可搜索「计算器」「calc」进入计算模式",
+    "author": "Kite"
+  },
+  "compatibility": {
+    "plugin_api": 1,
+    "minimum_kite_version": "0.3.0"
+  },
+  "runtime": {
+    "command": "kite-plugin-calculator.exe",
+    "args": [],
+    "startup_timeout_ms": 5000,
+    "idle_timeout_ms": 60000
+  },
+  "contributes": {
+    "examples": ["=1+1", "=1+1*(2+1)", "=1000,000+1", "√9+1"],
+    "commands": [
+      {
+        "id": "open",
+        "title": "计算器",
+        "keywords": ["calc", "calculator", "计算器", "计算"],
+        "action": { "type": "enter_provider", "provider": "calculate" }
+      }
+    ],
+    "providers": [
+      {
+        "id": "calculate",
+        "response_mode": "panel",
+        "triggers": [{ "type": "prefix", "value": "=" }]
+      }
+    ]
+  }
+}

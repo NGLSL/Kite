@@ -4,6 +4,9 @@ $root = Split-Path $PSScriptRoot -Parent
 $manifest = Join-Path $root "Cargo.toml"
 $artifacts = Join-Path $root "artifacts"
 New-Item -ItemType Directory -Force $artifacts | Out-Null
+Write-Host "Building official plugins..."
+& (Join-Path $PSScriptRoot "build-official-plugins.ps1")
+if ($LASTEXITCODE -ne 0) { throw "build-official-plugins failed with exit code $LASTEXITCODE" }
 Write-Host "Building Kite (release)..."
 & cargo build --release --manifest-path $manifest
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }

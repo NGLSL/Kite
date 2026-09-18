@@ -149,6 +149,21 @@ impl State {
         }
         let q_norm = search::normalize_for_index(&self.query);
         let mut hits = self.merge_aux_hits(hits, &q_norm);
+        // Command 静态入口：不启动插件进程；按分数插入，不无条件顶掉本机精确命中
+        {
+            let reg = self.plugin_registry.lock().unwrap_or_else(|e| e.into_inner());
+            let commands = plugin::command_hits(&reg, self.query.trim());
+            for cmd in commands.into_iter() {
+                if hits.iter().any(|h| h.item.id == cmd.item.id) {
+                    continue;
+                }
+                let pos = hits
+                    .iter()
+                    .position(|h| h.score < cmd.score)
+                    .unwrap_or(hits.len());
+                hits.insert(pos, cmd);
+            }
+        }
         if self.files_mode {
             prepend_dependency_status(&mut hits, &self.file_results);
         }
@@ -252,25 +267,106 @@ impl State {
     }
 
     /// 结果刷新唯一入口：
-    /// - 空 Query：固定 + 最近（同步；不需要应用召回与链接/文件/网页槽），
-    ///   同时推进请求失效代际，让在途的应用搜索停下（清空输入、隐藏窗口都走这里）；
-    /// - 非空 Query：交给常驻 worker，由 `apply_app_search_ready` → `merge_aux_hits`
-    ///   组装并落地（含合并、选中复位与日志）。
-    ///
-    /// 非空分支不再内联搜索：Pipeline 只此一条，Pin/降权/文件切换等同步动作
-    /// 与逐键输入走同一条路径。
+    /// - Plugin Provider Mode：Trigger 命中时整列表交给插件，不与 Core 混排；
+    /// - 空 Query：固定 + 最近（同步）；
+    /// - 非空 Query：worker + Command 静态入口合并。
     pub(super) fn refresh_results(&mut self) {
         let t0 = Instant::now();
-        let q_norm = search::normalize_for_index(&self.query);
         if let Some(db) = &self.history {
             self.pinned = db.pinned_ids().into_iter().collect();
         }
+
+        // Provider Mode：显式 Trigger，整查询交给插件
+        let activation = {
+            let reg = self.plugin_registry.lock().unwrap_or_else(|e| e.into_inner());
+            plugin::route_query(&self.query, &reg)
+        };
+        if let Some(act) = activation {
+            // 非内联工具（JSON 独立窗）：不进 Provider；由 UI 二次确认后开窗。
+            if act.plugin_id == "com.kite.devtools" && act.provider_id == "json" {
+                if self.provider_mode.is_some() {
+                    self.exit_provider_mode();
+                }
+            } else {
+            self.results_stale = true;
+            self.plugin_panel = None;
+            self.plugin_flash = None;
+            self.provider_mode = Some(act.clone());
+            self.plugin_query_generation = self.plugin_query_generation.wrapping_add(1);
+            let gen = self.plugin_query_generation;
+            let registry = self.plugin_registry.clone();
+            let host = self.plugin_host.clone();
+            let act_for_thread = act.clone();
+            std::thread::spawn(move || {
+                let (payload, host_calls) = {
+                    let reg = registry.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut host = host.lock().unwrap_or_else(|e| e.into_inner());
+                    host.set_generation(gen);
+                    host.idle_sweep();
+                    let payload = match host.query(&reg, &act_for_thread, gen) {
+                        Ok(plugin::QueryOutcome::List { plugin_id, provider_id, items, .. }) => {
+                            let mapped = items
+                                .iter()
+                                .map(|it| plugin::host::list_item_to_search_result(
+                                    &plugin_id,
+                                    &provider_id,
+                                    it,
+                                ))
+                                .collect();
+                            PluginQueryPayload::List {
+                                plugin_id,
+                                provider_id,
+                                items: mapped,
+                            }
+                        }
+                        Ok(plugin::QueryOutcome::Panel { plugin_id, provider_id, panel, .. }) => {
+                            PluginQueryPayload::Panel {
+                                plugin_id,
+                                provider_id,
+                                panel,
+                            }
+                        }
+                        Ok(plugin::QueryOutcome::Empty { plugin_id, provider_id, .. }) => {
+                            PluginQueryPayload::Empty {
+                                plugin_id,
+                                provider_id,
+                            }
+                        }
+                        // 过期代际不是插件故障：静默丢弃，避免 UI 误标「崩溃」。
+                        Err(plugin::HostError::StaleGeneration { .. }) => {
+                            PluginQueryPayload::Empty {
+                                plugin_id: act_for_thread.plugin_id.clone(),
+                                provider_id: act_for_thread.provider_id.clone(),
+                            }
+                        }
+                        Err(e) => PluginQueryPayload::Error(e.to_string()),
+                    };
+                    let host_calls = host.drain_host_calls();
+                    (payload, host_calls)
+                };
+                if let Some(tx) = EVENT_TX.get() {
+                    for (pid, call) in host_calls {
+                        let _ = tx.unbounded_send(Message::PluginHostCall(pid, call));
+                    }
+                    let _ = tx.unbounded_send(Message::PluginQueryReady(gen, payload));
+                }
+            });
+            self.qlog(|| format!("provider mode enter {:?}", act.provider_id));
+            return;
+            }
+        }
+
+        // Trigger 不再命中：退出 Provider Mode，回到 Core Search
+        if self.provider_mode.is_some() {
+            self.exit_provider_mode();
+        }
+
+        let q_norm = search::normalize_for_index(&self.query);
         if !q_norm.is_empty() {
             self.request_app_search();
             return;
         }
 
-        // 界面已经不需要应用结果：推进代际停掉在途任务，不留下白算的 CPU。
         self.app_search_worker.cancel_current();
 
         let (recent, pinned) = self
@@ -292,9 +388,7 @@ impl State {
             prepend_dependency_status(&mut self.results, &self.file_results);
         }
         self.selected = 0;
-        // 列表刷新后回到顶部，避免选中行与滚动位置错位。
         self.hover_suppressed = false;
-        // 空 Query 的同步列表就是当前状态，不经过后台，直接恢复可启动资格。
         self.results_stale = false;
         let top = self
             .results
@@ -310,6 +404,58 @@ impl State {
                 self.epoch
             )
         });
+    }
+
+    pub(super) fn exit_provider_mode(&mut self) {
+        self.provider_mode = None;
+        self.plugin_panel = None;
+        self.plugin_query_generation = self.plugin_query_generation.wrapping_add(1);
+        self.results_stale = false;
+    }
+
+    /// Provider Mode 查询落地。
+    pub(super) fn apply_plugin_query_ready(
+        &mut self,
+        generation: u64,
+        payload: PluginQueryPayload,
+    ) {
+        if generation != self.plugin_query_generation || self.provider_mode.is_none() {
+            return;
+        }
+        match payload {
+            PluginQueryPayload::List { plugin_id, provider_id, items, .. } => {
+                self.qlog(|| format!("plugin list ready {plugin_id}/{provider_id} n={}", items.len()));
+                let mut items = items;
+                // priority 仅影响当前 Provider 内部顺序，不影响 Core Ranking。
+                items.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.item.id.cmp(&b.item.id)));
+                self.results = items;
+                self.selected = 0;
+                self.results_stale = false;
+                self.plugin_panel = None;
+                self.plugin_flash = None;
+            }
+            PluginQueryPayload::Panel { plugin_id, provider_id, panel, .. } => {
+                self.qlog(|| format!("plugin panel ready {plugin_id}/{provider_id}"));
+                self.plugin_panel = Some(panel);
+                self.results = Vec::new();
+                self.selected = 0;
+                self.results_stale = false;
+                self.plugin_flash = None;
+            }
+            PluginQueryPayload::Empty { plugin_id, provider_id, .. } => {
+                self.qlog(|| format!("plugin empty ready {plugin_id}/{provider_id}"));
+                self.results = Vec::new();
+                self.plugin_panel = None;
+                self.results_stale = false;
+                self.plugin_flash = None;
+            }
+            PluginQueryPayload::Error(err) => {
+                self.plugin_flash = Some(err);
+                self.results = Vec::new();
+                self.plugin_panel = None;
+                self.results_stale = false;
+            }
+        }
     }
 }
 

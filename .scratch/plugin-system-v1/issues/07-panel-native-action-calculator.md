@@ -5,15 +5,20 @@
 **Blocked by:** 05 — Plugin Host + JSON-RPC 生命周期  
 （可与 06 并行开发）
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Panel Schema 校验：仅允许 V1 Block 类型；拒绝 HTML/自定义布局类字段
-- [ ] Iced 原生渲染上述 Block；Notice 支持 info/warning/error
-- [ ] default action + Enter → NativeAction（copy_text 等）由 Kite 直接执行
-- [ ] 插件不得重写 Esc 基础语义；Esc 退出 Provider Mode
-- [ ] 结果缝测试：Panel 映射、非法 block、Enter 复制不触发 plugin/execute
-- [ ] Calculator 协议级/官方样例：`=` Trigger + panel 响应端到端（可用测试插件）
-- [ ] `cargo test` 全绿；有条件时真机冒烟计算复制
+- [x] Panel Schema 校验：仅允许 V1 Block 类型；拒绝 HTML/自定义布局类字段
+- [x] Iced 原生渲染上述 Block；Notice 支持 info/warning/error
+- [x] default action + Enter → NativeAction（copy_text 等）由 Kite 直接执行
+- [x] 插件不得重写 Esc 基础语义；Esc 退出 Provider Mode
+- [x] 结果缝测试：Panel 映射、非法 block、Enter 复制不触发 plugin/execute
+- [x] Calculator 协议级/官方插件：`=` Trigger + panel 响应（`official-plugins/calculator`，打包后 `resources/official-plugins/com.kite.calculator`）
+- [ ] `cargo test` 全绿；有条件时真机冒烟计算复制（需本机 Python + GUI）
+
+## Comments
+
+- `panel_default_native_action_bypasses_stale_list_gate` 证明 Panel Native 复制不走 plugin/execute。
+- 搜索结果区 `panel_area` 原生渲染 blocks。
 
 ## Notes
 

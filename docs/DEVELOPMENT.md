@@ -13,11 +13,13 @@ Kite 是 Windows x64 原生桌面应用，使用 Rust 2021、Iced 0.14 和 tiny-
 - `src/storage/`：SQLite 设置、固定项和历史
 - `src/system/`：快捷键、托盘、图标、音效和 Windows API
 - `src/ui/`：Iced 状态、视图、后台任务和交互
+- `src/plugin/`：插件 Registry / Activation / Host / 协议（见 `docs/PLUGIN-DEVELOPMENT.md`）
+- `official-plugins/`：官方插件 Rust workspace（性能考虑；协议语言无关，不编入主 crate）
 - `icons/`：程序及托盘图标
-- `resources/`：Everything DLL、音效等运行资源
+- `resources/`：Everything DLL、音效、官方插件打包目录（`official-plugins/`，构建生成）等运行资源
 - `installer/`：NSIS 安装脚本
 - `scripts/`：构建辅助脚本
-- `docs/`：需求、性能、架构决策和开发说明
+- `docs/`：需求、性能、架构决策、插件开发说明和开发规范
 
 ## 修改规则
 
@@ -35,7 +37,8 @@ Kite 是 Windows x64 原生桌面应用，使用 Rust 2021、Iced 0.14 和 tiny-
 cargo check
 cargo test
 cargo build --release
-.\scripts\build-installer.ps1
+.\scripts\build-official-plugins.ps1   # 打包 resources/official-plugins
+.\scripts\build-installer.ps1          # 会先构建官方插件，再 release + NSIS
 ```
 
 安装器脚本会自动构建 release 版本并生成：

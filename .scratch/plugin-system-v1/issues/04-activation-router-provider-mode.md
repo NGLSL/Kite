@@ -4,16 +4,21 @@
 
 **Blocked by:** 03 — Manifest Registry + Command 静态入口
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] prefix Trigger 命中：得到 plugin_id / provider_id / effective_query，并进入 Provider Mode
-- [ ] keyword Trigger 仅在「keyword 或 keyword+空白」边界匹配；`tree` 不触发 `tr`
-- [ ] Command 的 enter_provider 可进入对应 Provider Mode
-- [ ] 退出：Esc、Trigger 消失、切换 Provider、隐藏 Kite
-- [ ] Provider Mode 下不进行 Core Apps/Everything/其他插件的混排竞争
-- [ ] 无 Trigger 时 Activation Router 对 Core Search 可忽略（热路径仅极轻量判断）
-- [ ] 路由缝单测覆盖命中/边界/退出/无 Global；UI 状态测试覆盖进入与退出 Provider Mode
-- [ ] `cargo test` 全绿
+- [x] prefix Trigger 命中：得到 plugin_id / provider_id / effective_query，并进入 Provider Mode
+- [x] keyword Trigger 仅在「keyword 或 keyword+空白」边界匹配；`tree` 不触发 `tr`
+- [x] Command 的 enter_provider 可进入对应 Provider Mode
+- [x] 退出：Esc、Trigger 消失、切换 Provider、隐藏 Kite
+- [x] Provider Mode 下不进行 Core Apps/Everything/其他插件的混排竞争
+- [x] 无 Trigger 时 Activation Router 对 Core Search 可忽略（热路径仅极轻量判断）
+- [x] 路由缝单测覆盖命中/边界/退出/无 Global；UI 状态测试覆盖进入与退出 Provider Mode
+- [x] `cargo test` 全绿
+
+## Comments
+
+- `route_query` 纯函数；`keyword_requires_boundary` / `provider_mode_enters_on_trigger_and_esc_exits`。
+- Esc 先退出 Provider Mode，不直接隐藏启动器。
 
 ## Notes
 

@@ -27,37 +27,26 @@ pub fn run() -> iced::Result {
     let _ = BOOT_DIR.set(data_dir.clone());
     app::snapshot::init(data_dir.clone());
     app::index_health::init(data_dir.clone());
-    iced::application(boot_entry, update, view)
-        .title("Kite")
-        .window(Settings {
-            size: iced::Size::new(WINDOW_W, WINDOW_H),
-            // 对齐 Kite：水平居中、y = 屏高 1/3（system/window.rs place_on_current_monitor）
-            position: Position::SpecificWith(|win, monitor| {
-                iced::Point::new((monitor.width - win.width) / 2.0, monitor.height / 3.0)
-            }),
-            visible: false,
-            resizable: false,
-            decorations: false,
-            level: window::Level::AlwaysOnTop,
-            exit_on_close_request: false,
-            platform_specific: PlatformSpecific {
-                skip_taskbar: true,
-                // 无边框窗口保留系统投影（对齐 tauri shadow:true，白底不至于融入桌面）
-                undecorated_shadow: false,
-                corner_preference: iced::window::settings::platform::CornerPreference::Round,
-                ..PlatformSpecific::default()
-            },
-            ..Settings::default()
-        })
+    // Daemon 多窗口：boot 里 window::open 主启动器；JSON 工具为独立第二窗。
+    iced::daemon(boot_entry, update, view)
+        .title(poc_title)
         .theme(poc_theme)
         .default_font(font::ui_font())
         .subscription(subscription)
         .run()
 }
 
-/// BootFn 需要 `Fn`；fn 指针比闭包省去生命周期推断问题，目录经 BOOT_DIR 传递。
-fn poc_theme(_state: &State) -> Theme {
-    Theme::Light
+/// 窗口标题：工具窗「JSON 工具」，主窗「Kite」。
+fn poc_title(state: &State, window: window::Id) -> String {
+    if state.json_tool_window == Some(window) {
+        "JSON 工具".to_string()
+    } else {
+        "Kite".to_string()
+    }
+}
+
+fn poc_theme(_state: &State, _window: window::Id) -> Option<Theme> {
+    Some(Theme::Light)
 }
 
 /// 定位 resources（含 Everything64.dll / open.wav）。
@@ -313,7 +302,40 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         epoch: 0,
         hover_suppressed: false,
         last_hover_pt: None,
+        plugin_registry: std::sync::Arc::new(Mutex::new({
+            let plugins_dir = plugin::default_plugins_dir(&data_dir);
+            // 官方插件随安装包提供；首次启动补进用户目录（已存在的 id 不覆盖）。
+            let _ = plugin::seed_official_plugins_if_missing(&plugins_dir);
+            plugin::load_registry_from_dir(&plugins_dir)
+        })),
+        plugin_host: std::sync::Arc::new(Mutex::new(PluginHost::new(
+            Box::new(plugin::process::StdioBackend::new(data_dir.clone())),
+            data_dir.clone(),
+            env!("CARGO_PKG_VERSION"),
+        ))),
+        provider_mode: None,
+        plugin_panel: None,
+        plugin_query_generation: 0,
+        plugin_flash: None,
+        plugin_import_path: String::new(),
+        plugin_docs_open: None,
+        json_tool_window: None,
+        plugin_tool_open: false,
+        pending_tool_confirm: None,
+        json_editor: iced::widget::text_editor::Content::default(),
+        json_result: String::new(),
+        json_tool_note: None,
     };
+    // Idle Shutdown：定时清扫，不依赖下一次 Provider 触发。
+    {
+        let host = state.plugin_host.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            if let Ok(mut h) = host.lock() {
+                h.idle_sweep();
+            }
+        });
+    }
     // 启动时载入设置（副本库）
     state.hide_on_blur = saved_settings.hide_on_blur;
     state.autostart = saved_settings.autostart;
@@ -334,8 +356,30 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
     state.hotkey = saved_settings.hotkey;
     state.hotkey_label = saved_settings.hotkey_label;
     state.refresh_results();
-    // 窗口 open 完成后 boot task 才执行，此时 latest() 拿到主窗口 id
-    (state, window::latest().map(Message::WindowReady))
+    // 主启动器窗口：hidden 启动；JSON 工具窗口在触发时另行 window::open。
+    let launcher_settings = Settings {
+        size: iced::Size::new(WINDOW_W, WINDOW_H),
+        // 对齐 Kite：水平居中、y = 屏高 1/3（system/window.rs place_on_current_monitor）
+        position: Position::SpecificWith(|win, monitor| {
+            iced::Point::new((monitor.width - win.width) / 2.0, monitor.height / 3.0)
+        }),
+        visible: false,
+        resizable: false,
+        decorations: false,
+        level: window::Level::AlwaysOnTop,
+        exit_on_close_request: false,
+        platform_specific: PlatformSpecific {
+            skip_taskbar: true,
+            // 无边框窗口保留系统投影（对齐 tauri shadow:true，白底不至于融入桌面）
+            undecorated_shadow: false,
+            corner_preference: iced::window::settings::platform::CornerPreference::Round,
+            ..PlatformSpecific::default()
+        },
+        ..Settings::default()
+    };
+    let (main_id, open_main) = window::open(launcher_settings);
+    state.window_id = Some(main_id);
+    (state, open_main.map(|id| Message::WindowReady(Some(id))))
 }
 
 fn subscription(state: &State) -> Subscription<Message> {
@@ -344,6 +388,8 @@ fn subscription(state: &State) -> Subscription<Message> {
         Subscription::run(events_worker),
         // 键盘 + IME + 窗口焦点事件
         keyboard::keyboard_events(state),
+        // 工具窗被系统关闭时清理 json_tool_window
+        window::close_events().map(Message::JsonToolWindowClosed),
     ])
 }
 

@@ -86,8 +86,24 @@ pub(super) fn on_key(
                 state.qlog(|| "ctx menu closed (esc)".to_owned());
                 return Task::none();
             }
+            // JSON 工具窗：Esc 关闭工具窗，主窗不动。
+            if state.plugin_tool_open {
+                return close_json_tool_panel(state);
+            }
+            // 二次确认：Esc 取消，不开工具窗。
+            if state.pending_tool_confirm.is_some() {
+                return cancel_json_tool_confirm(state);
+            }
             if state.settings_open {
                 return close_settings(state);
+            }
+            // Provider Mode：Esc 先退出到 Core Search，不直接隐藏启动器。
+            if state.provider_mode.is_some() {
+                state.qlog(|| "provider mode exit (esc)".to_owned());
+                state.query.clear();
+                state.exit_provider_mode();
+                state.refresh_results();
+                return Task::none();
             }
             state.qlog(|| "hide issued (esc)".to_owned());
             hide(state);
@@ -215,96 +231,294 @@ pub(super) fn move_selection(state: &mut State, delta: i32) -> Task<Message> {
 }
 
 pub(super) fn launch_selected(state: &mut State) -> Task<Message> {
-    // 启动动作只对「当前查询的结果」生效。新查询提交后旧列表仍在屏幕上
-    // （避免闪空），但此时启动它就会打开上一次搜索的应用。Enter / Alt+数字 /
-    // 鼠标点击都汇到这里，有效性判定因此只有一处。
+    // Enter / Alt+数字 / 鼠标点击共用入口。
+    // Provider Mode 下 Panel 的 default action 优先（NativeAction 由 Kite 执行）。
+    if state.provider_mode.is_some() {
+        if let Some(panel) = state.plugin_panel.clone() {
+            if let Some(native) = panel.default_native_action() {
+                return exec_native_panel_action(state, native);
+            }
+            if let Some(act) = panel.default_plugin_action() {
+                return exec_result_action(state, act);
+            }
+        }
+    }
     if !state.results_are_launchable() {
         state.qlog(|| "launch ignored: results belong to a previous query".to_owned());
         return Task::none();
     }
-    let Some(item) = state.results.get(state.selected).map(|r| r.item.clone()) else {
+    let Some(result) = state.results.get(state.selected).cloned() else {
         state.qlog(|| "enter with empty results; ignored".to_owned());
         return Task::none();
     };
     state.menu = None;
+    exec_result_action(state, result.action.clone())
+}
 
-    // 内置：打开 Kite 设置
-    if item.id == "kite:settings" {
-        return open_settings(state);
-    }
-
-    if let Some(url) = everything_download_url(&item.id) {
-        let result = app::uwp::launch_shell_path(url);
-        state.qlog(|| format!("open Everything download err={result:?}"));
-        return if result.is_ok() {
-            hide(state);
-            hide_task(state)
-        } else {
-            flash(state, "无法打开 Everything 官方下载页")
-        };
-    }
-    if item.id == system::everything::NOT_RUNNING_RESULT_ID {
-        return flash(state, "请先启动 Everything，再使用文件搜索");
-    }
-
-    // 浏览器打开网址 / 网页搜索（id 由 app::web 生成，对齐 commands::launch_app）
-    if let Some((kind, browser_id, payload)) = app::web::parse_id(&item.id) {
-        let t0 = Instant::now();
-        system::env::refresh_process_env();
-        let cached = state.history.as_ref().and_then(|h| h.search_url_template());
-        let result = if kind == "websearch" {
-            app::web::launch_websearch(&browser_id, &payload, cached.as_deref())
-        } else {
-            app::web::launch_url(&browser_id, &payload)
-        };
-        return match result {
-            Ok(preferred) => {
-                let elapsed_us = t0.elapsed().as_micros();
-                state.qlog(|| format!("launch web {kind} via {browser_id} in {elapsed_us}us"));
-                if let Some(db) = &mut state.history {
-                    let q = search::normalize_for_index(&state.query);
-                    let _ = db.record_launch(&item.id, &q, storage::now_ts());
-                    if let Some(pid) = preferred {
-                        let _ = db.set_preferred_browser(&pid);
-                    }
+/// 统一执行 ResultAction：Result 管展示，Action 管行为。
+pub(super) fn exec_result_action(state: &mut State, action: crate::model::ResultAction) -> Task<Message> {
+    use crate::model::ResultAction;
+    match action {
+        ResultAction::CopyText { text } => {
+            state.qlog(|| format!("native copy_text len={}", text.len()));
+            iced::clipboard::write(text)
+        }
+        ResultAction::OpenFile { path } => {
+            if !plugin::plugin_path_allowed(&path) {
+                state.qlog(|| format!("open_file rejected unsafe path len={}", path.len()));
+                return flash(state, "路径无效");
+            }
+            let t0 = Instant::now();
+            system::env::refresh_process_env();
+            match app::uwp::launch_shell_path(&path) {
+                Ok(()) => {
+                    state.qlog(|| {
+                        format!(
+                            "open_file {path} in {}us",
+                            t0.elapsed().as_micros()
+                        )
+                    });
+                    hide(state);
+                    hide_task(state)
                 }
-                state.qlog(|| "hide issued (launch)".to_owned());
+                Err(e) => {
+                    state.qlog(|| format!("open_file failed: {e}"));
+                    flash(state, "无法打开该路径")
+                }
+            }
+        }
+        ResultAction::OpenUrl { url } => {
+            if !plugin::plugin_url_allowed(&url) {
+                state.qlog(|| "open_url rejected non-http(s)".to_owned());
+                return flash(state, "链接无效");
+            }
+            let t0 = Instant::now();
+            system::env::refresh_process_env();
+            match app::uwp::launch_shell_path(&url) {
+                Ok(()) => {
+                    state.qlog(|| format!("open_url in {}us", t0.elapsed().as_micros()));
+                    hide(state);
+                    hide_task(state)
+                }
+                Err(e) => {
+                    state.qlog(|| format!("open_url failed: {e}"));
+                    flash(state, "无法打开链接")
+                }
+            }
+        }
+        ResultAction::Plugin {
+            plugin_id,
+            action_id,
+            payload,
+        } => exec_plugin_action(state, &plugin_id, &action_id, payload),
+        ResultAction::LaunchApp { item_id } => {
+            // 只允许当前结果中已验证的 item_id，禁止回退到选中行造成误启动。
+            let Some(item) = state
+                .results
+                .iter()
+                .find(|r| r.item.id == item_id)
+                .map(|r| r.item.clone())
+            else {
+                state.qlog(|| format!("launch skipped: item_id not in results {item_id}"));
+                return Task::none();
+            };
+            // 内置：打开 Kite 设置
+            if item.id == "kite:settings" {
+                return open_settings(state);
+            }
+            // 非内联工具：选中「JSON 工具」后 Enter 打开（列表无取消行）。
+            if item.id == super::json_tool::CONFIRM_RESULT_ID {
+                return confirm_json_tool_open(state);
+            }
+            if let Some(url) = everything_download_url(&item.id) {
+                let result = app::uwp::launch_shell_path(url);
+                state.qlog(|| format!("open Everything download err={result:?}"));
+                return if result.is_ok() {
+                    hide(state);
+                    hide_task(state)
+                } else {
+                    flash(state, "无法打开 Everything 官方下载页")
+                };
+            }
+            if item.id == system::everything::NOT_RUNNING_RESULT_ID {
+                return flash(state, "请先启动 Everything，再使用文件搜索");
+            }
+            if let Some((kind, browser_id, payload)) = app::web::parse_id(&item.id) {
+                let t0 = Instant::now();
+                system::env::refresh_process_env();
+                let cached = state.history.as_ref().and_then(|h| h.search_url_template());
+                let result = if kind == "websearch" {
+                    app::web::launch_websearch(&browser_id, &payload, cached.as_deref())
+                } else {
+                    app::web::launch_url(&browser_id, &payload)
+                };
+                return match result {
+                    Ok(preferred) => {
+                        let elapsed_us = t0.elapsed().as_micros();
+                        state.qlog(|| {
+                            format!("launch web {kind} via {browser_id} in {elapsed_us}us")
+                        });
+                        if let Some(db) = &mut state.history {
+                            let q = search::normalize_for_index(&state.query);
+                            let _ = db.record_launch(&item.id, &q, storage::now_ts());
+                            if let Some(pid) = preferred {
+                                let _ = db.set_preferred_browser(&pid);
+                            }
+                        }
+                        state.qlog(|| "hide issued (launch)".to_owned());
+                        hide(state);
+                        hide_task(state)
+                    }
+                    Err(e) => {
+                        state.qlog(|| format!("launch web {kind} failed: {e}"));
+                        Task::none()
+                    }
+                };
+            }
+            let t0 = Instant::now();
+            system::env::refresh_process_env();
+            match app::launch(&item) {
+                Ok(()) => {
+                    let elapsed_us = t0.elapsed().as_micros();
+                    let (name, target) = (item.display_name.clone(), item.target.clone());
+                    state.qlog(|| {
+                        format!("launch '{name}' target={target} in {elapsed_us}us ok")
+                    });
+                    if let Some(db) = &mut state.history {
+                        let q = search::normalize_for_index(&state.query);
+                        let _ = db.record_launch(&item.id, &q, storage::now_ts());
+                    }
+                    state.qlog(|| "hide issued (launch)".to_owned());
+                    hide(state);
+                    hide_task(state)
+                }
+                Err(e) => {
+                    state.qlog(|| {
+                        format!(
+                            "launch '{}' target={} failed: {e}",
+                            item.display_name, item.target
+                        )
+                    });
+                    Task::none()
+                }
+            }
+        }
+    }
+}
+
+pub(super) fn exec_native_panel_action(state: &mut State, native: plugin::panel::NativeAction) -> Task<Message> {
+    use plugin::panel::NativeAction;
+    match native {
+        NativeAction::CopyText(text) => {
+            state.qlog(|| "panel native copy_text".to_owned());
+            iced::clipboard::write(text)
+        }
+        NativeAction::OpenUrl(url) => {
+            if !plugin::plugin_url_allowed(&url) {
+                state.qlog(|| "panel open_url rejected non-http(s)".to_owned());
+                return flash(state, "链接无效");
+            }
+            system::env::refresh_process_env();
+            let r = app::uwp::launch_shell_path(&url);
+            if r.is_ok() {
                 hide(state);
                 hide_task(state)
+            } else {
+                flash(state, "无法打开链接")
             }
-            Err(e) => {
-                state.qlog(|| format!("launch web {kind} failed: {e}"));
-                Task::none()
+        }
+        NativeAction::OpenPath(path) => {
+            if !plugin::plugin_path_allowed(&path) {
+                state.qlog(|| "panel open_path rejected".to_owned());
+                return flash(state, "路径无效");
             }
+            system::env::refresh_process_env();
+            let r = app::uwp::launch_shell_path(&path);
+            if r.is_ok() {
+                hide(state);
+                hide_task(state)
+            } else {
+                flash(state, "无法打开该路径")
+            }
+        }
+    }
+}
+
+fn exec_plugin_action(
+    state: &mut State,
+    plugin_id: &str,
+    action_id: &str,
+    payload: serde_json::Value,
+) -> Task<Message> {
+    // Command → enter_provider（List/Panel 共用：写入 Trigger 前缀后 refresh 路由）
+    if action_id == "enter_provider" {
+        let resolved = {
+            let reg = state.plugin_registry.lock().unwrap_or_else(|e| e.into_inner());
+            let command_id = payload
+                .get("command_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let provider = payload
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            plugin::activation::resolve_command_entry(
+                &reg,
+                plugin_id,
+                &command_id,
+                provider.as_deref(),
+            )
         };
+        if let Some((act, initial_query)) = resolved {
+            // 非内联 json 工具：二次确认，不直接开窗；内联 Provider 照旧。
+            if super::json_tool::is_native_json_activation(&act) {
+                state.query = initial_query;
+                state.results.clear();
+                state.results_stale = false;
+                state.selected = 0;
+                state.provider_mode = None;
+                state.plugin_panel = None;
+                let payload = act.effective_query.trim().to_string();
+                return arm_json_tool_confirm(
+                    state,
+                    if payload.is_empty() {
+                        None
+                    } else {
+                        Some(payload)
+                    },
+                    false,
+                );
+            }
+            state.provider_mode = Some(act.clone());
+            state.plugin_panel = None;
+            state.plugin_query_generation = state.plugin_query_generation.wrapping_add(1);
+            state.query = initial_query;
+            state.qlog(|| format!("command enter_provider {:?} q={:?}", act.provider_id, state.query));
+            state.refresh_results();
+        }
+        return Task::none();
     }
 
-    let t0 = Instant::now();
-    // 对齐 commands::launch_app：先刷新进程环境再拉起
-    system::env::refresh_process_env();
-    match app::launch(&item) {
-        Ok(()) => {
-            let elapsed_us = t0.elapsed().as_micros();
-            let (name, target) = (item.display_name.clone(), item.target.clone());
-            state.qlog(|| format!("launch '{name}' target={target} in {elapsed_us}us ok"));
-            if let Some(db) = &mut state.history {
-                let q = search::normalize_for_index(&state.query);
-                let _ = db.record_launch(&item.id, &q, storage::now_ts());
+    // 其它 PluginAction → plugin/execute（异步，不阻塞 UI 线程）
+    let registry = state.plugin_registry.clone();
+    let host = state.plugin_host.clone();
+    let pid = plugin_id.to_string();
+    let aid = action_id.to_string();
+    std::thread::spawn(move || {
+        let host_calls = {
+            let reg = registry.lock().unwrap_or_else(|e| e.into_inner());
+            let mut host = host.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = host.execute(&reg, &pid, &aid, payload);
+            host.drain_host_calls()
+        };
+        if let Some(tx) = super::EVENT_TX.get() {
+            for (pid, call) in host_calls {
+                let _ = tx.unbounded_send(Message::PluginHostCall(pid, call));
             }
-            state.qlog(|| "hide issued (launch)".to_owned());
-            hide(state);
-            hide_task(state)
         }
-        Err(e) => {
-            state.qlog(|| {
-                format!(
-                    "launch '{}' target={} failed: {e}",
-                    item.display_name, item.target
-                )
-            });
-            Task::none()
-        }
-    }
+    });
+    Task::none()
 }
 
 fn everything_download_url(item_id: &str) -> Option<&'static str> {
@@ -427,7 +641,7 @@ mod interactive_log_gate_tests {
     }
 }
 
-/// 把逻辑尺寸窗口摆到光标所在显示器工作区中部（物理定位 → 按窗口当前 scale 转逻辑）。
+/// 把逻辑尺寸窗口摆到光标所在显示器工作区中心（物理定位 → 按窗口当前 scale 转逻辑）。
 fn place_on_cursor_monitor_task(
     id: window::Id,
     window_w: f32,
@@ -452,6 +666,9 @@ pub(super) fn show_launcher(state: &mut State) -> Task<Message> {
     };
     // 下次打开时采用挂起的 Full，避免可见期间打断列表。
     super::interaction::apply_pending_full(state);
+    // 热键/托盘唤起只还原主启动器搜索；JSON 工具窗独立，不随唤起关闭。
+    state.settings_open = false;
+    state.plugin_docs_open = None;
     state.hidden = false;
     state.epoch += 1;
     // 每次唤起按鼠标所在 monitor 重新定位（uTools 式多显示器跟随）。
@@ -513,6 +730,7 @@ pub(super) fn flash(state: &mut State, msg: &str) -> Task<Message> {
 /// 打开设置：载入设置与别名，窗口切到 720×520（对齐 set_settings_mode）。
 pub(super) fn open_settings(state: &mut State) -> Task<Message> {
     state.settings_open = true;
+    // 设置在主窗口打开；JSON 工具窗独立，不在此关闭。
     state.hidden = false;
     state.settings_section = Section::General;
     state.menu = None;
@@ -571,10 +789,208 @@ pub(super) fn settings_window_task(id: window::Id) -> Task<Message> {
         .chain(window::gain_focus(id))
 }
 
+/// 进入打开 JSON 工具的二次确认（不直接开窗）。
+pub(super) fn open_json_tool_panel(state: &mut State) -> Task<Message> {
+    arm_json_tool_confirm(state, None, true)
+}
+
+/// 非内联工具（JSON 独立窗）打开前二次确认。内联插件不走这里。
+pub(super) fn arm_json_tool_confirm(
+    state: &mut State,
+    payload: Option<String>,
+    from_settings: bool,
+) -> Task<Message> {
+    state.pending_tool_confirm = Some(PendingJsonToolConfirm {
+        payload: payload.filter(|p| !p.trim().is_empty()),
+        from_settings,
+    });
+    state.qlog(|| "json tool confirm armed".to_owned());
+    if from_settings {
+        // 设置页内联确认条，不改主窗。
+        return Task::none();
+    }
+    // 搜索列表：只展示一条「JSON 工具」，Enter 打开；Esc 取消，不另出取消行。
+    state.results = json_tool_confirm_results(state.pending_tool_confirm.as_ref());
+    state.results_stale = false;
+    state.selected = 0;
+    state.hover_suppressed = false;
+    state.provider_mode = None;
+    state.plugin_panel = None;
+    sync_scroll(state)
+}
+
+/// 确认后真正打开 JSON 独立工具窗。
+pub(super) fn confirm_json_tool_open(state: &mut State) -> Task<Message> {
+    let Some(pending) = state.pending_tool_confirm.take() else {
+        return Task::none();
+    };
+    open_json_tool_panel_with_payload(state, pending.payload, !pending.from_settings)
+}
+
+/// 取消二次确认：不开工具窗；搜索态恢复当前查询结果。
+pub(super) fn cancel_json_tool_confirm(state: &mut State) -> Task<Message> {
+    let from_settings = state
+        .pending_tool_confirm
+        .as_ref()
+        .map(|p| p.from_settings)
+        .unwrap_or(true);
+    state.pending_tool_confirm = None;
+    state.qlog(|| "json tool confirm cancelled".to_owned());
+    if from_settings {
+        return Task::none();
+    }
+    state.refresh_results();
+    sync_scroll(state)
+}
+
+/// 搜索列表结果：只展示「JSON 工具」一条；Enter 打开，Esc 取消（无取消行）。
+fn json_tool_confirm_results(pending: Option<&PendingJsonToolConfirm>) -> Vec<SearchResult> {
+    let has_payload = pending
+        .and_then(|p| p.payload.as_deref())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let sub = if has_payload {
+        "独立工具窗 · 预填格式化 · Enter 打开"
+    } else {
+        "独立工具窗 · Enter 打开"
+    };
+    vec![SearchResult::scored(
+        AppItem::scanned(
+            super::json_tool::CONFIRM_RESULT_ID.into(),
+            "JSON 工具".into(),
+            sub.into(),
+            None,
+            None,
+            "builtin",
+        ),
+        980,
+        "builtin",
+    )]
+}
+
+/// 打开 JSON 工具窗；`payload` 非空时预填左侧并自动格式化。
+/// `from_search`：从搜索确认打开时隐藏主窗（内容/尺寸不变）；设置确认则主窗保持原样。
+pub(super) fn open_json_tool_panel_with_payload(
+    state: &mut State,
+    payload: Option<String>,
+    from_search: bool,
+) -> Task<Message> {
+    match payload {
+        Some(raw) if !raw.trim().is_empty() => {
+            state.json_editor = iced::widget::text_editor::Content::with_text(&raw);
+            match super::json_tool::transform_json(&raw, false) {
+                Ok(out) => {
+                    state.json_result = out;
+                    state.json_tool_note = Some((false, "已格式化".into()));
+                }
+                Err(msg) => {
+                    state.json_result.clear();
+                    state.json_tool_note = Some((true, msg));
+                }
+            }
+        }
+        Some(_) | None => {
+            // 空 payload / 直接打开：保留用户上次编辑，不强行清空。
+        }
+    }
+
+    // 工具窗已存在：只更新内容并抢焦点，不重复开窗。
+    if let Some(tid) = state.json_tool_window {
+        state.qlog(|| "json tool focus".to_owned());
+        return window::gain_focus(tid);
+    }
+
+    let (w, h) = (super::json_tool::TOOL_W, super::json_tool::TOOL_H);
+    let (tool_id, open_task) = window::open(Settings {
+        size: iced::Size::new(w, h),
+        position: Position::SpecificWith(|win, monitor| {
+            iced::Point::new(
+                (monitor.width - win.width) / 2.0,
+                (monitor.height - win.height) / 2.0,
+            )
+        }),
+        visible: true,
+        resizable: false,
+        decorations: false,
+        level: window::Level::Normal,
+        exit_on_close_request: false,
+        platform_specific: PlatformSpecific {
+            skip_taskbar: false,
+            undecorated_shadow: false,
+            corner_preference: iced::window::settings::platform::CornerPreference::Round,
+            ..PlatformSpecific::default()
+        },
+        ..Settings::default()
+    });
+    state.json_tool_window = Some(tool_id);
+    state.plugin_tool_open = true;
+    state.qlog(|| "json tool open".to_owned());
+
+    let mut tasks = vec![open_task.then(move |_opened| {
+        Task::batch([
+            window::gain_focus(tool_id),
+            place_on_cursor_monitor_task(tool_id, w, h),
+        ])
+    })];
+    if from_search {
+        // 搜索触发：主启动器仅隐藏，不切换视图、不改尺寸。
+        if let Some(main) = state.window_id {
+            state.hidden = true;
+            tasks.push(window::set_mode(main, window::Mode::Hidden));
+        }
+    }
+    Task::batch(tasks)
+}
+
+/// 搜索框 `json` / `json {...}`：不直接开窗，进入二次确认。
+/// 返回 Some(Task) 表示本次查询已接管。
+pub(super) fn try_open_json_tool_from_query(state: &mut State) -> Option<Task<Message>> {
+    let activation = {
+        let reg = state
+            .plugin_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::plugin::route_query(&state.query, &reg)?
+    };
+    if !super::json_tool::is_native_json_activation(&activation) {
+        return None;
+    }
+    let payload = activation.effective_query.trim().to_string();
+    // 保留查询文本，便于 Esc 取消后仍看到 json 关键词；清掉 Provider 残留。
+    state.results.clear();
+    state.results_stale = false;
+    state.selected = 0;
+    state.provider_mode = None;
+    state.plugin_panel = None;
+    Some(arm_json_tool_confirm(
+        state,
+        if payload.is_empty() {
+            None
+        } else {
+            Some(payload)
+        },
+        false,
+    ))
+}
+
+/// 关闭 JSON 工具窗：只销毁工具窗，主启动器窗口尺寸/内容不动。
+pub(super) fn close_json_tool_panel(state: &mut State) -> Task<Message> {
+    let Some(tid) = state.json_tool_window else {
+        state.plugin_tool_open = false;
+        return Task::none();
+    };
+    state.json_tool_window = None;
+    state.plugin_tool_open = false;
+    state.qlog(|| "json tool close".to_owned());
+    window::close(tid)
+}
+
 /// 关闭设置：窗口切回搜索尺寸并聚焦输入框。
 pub(super) fn close_settings(state: &mut State) -> Task<Message> {
     state.settings_open = false;
     state.flash = None;
+    state.plugin_docs_open = None;
+    // 工具面板是独立形态，不随设置关闭而打开。
     state.qlog(|| "settings close".to_owned());
     Task::batch([
         state

@@ -1,0 +1,15 @@
+[package]
+name = "kite-plugin-devtools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Official Kite plugin: uuid/hash/ts/json (one process, multi provider)"
+
+[[bin]]
+name = "kite-plugin-devtools"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { workspace = true }
+kite-plugin-sdk = { workspace = true }

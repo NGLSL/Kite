@@ -4,19 +4,25 @@
 
 **Blocked by:** 04 — Activation Router + Provider Mode
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Runtime 状态机：Dormant → Starting → Ready；Faulted / Incompatible / Disabled 可观测
-- [ ] 懒启动：未触发前 0 进程；首次触发 spawn；同一插件多 Provider 共用一个进程
-- [ ] 禁止每次按键 spawn；后续 Query 走 RPC 复用
-- [ ] Initialize/Query 硬超时（对齐规格：init 目标 <500ms/硬 2000ms；query 硬 800ms）；超时只丢弃本次结果
-- [ ] Hang：插件 sleep 时调用方不阻塞 UI 线程；用户仍可搜索并启动应用
-- [ ] Crash：进程退出 → Faulted，Kite 继续运行；不自动后台重启；crash loop（短时间多次）抑制自动拉起
-- [ ] Idle Shutdown：达到 clamp 后的 timeout 进程退出
-- [ ] generation 过期响应丢弃；cancellation 可选，不作为正确性前提
-- [ ] Content-Length 帧与 plugin/initialize、plugin/query（及 execute 签名）消息形状可测
-- [ ] 运行时缝（可注入 ProcessBackend / mock stdio）覆盖上述生命周期；不依赖真实第三方 exe 作为唯一手段
-- [ ] `cargo test` 全绿
+- [x] Runtime 状态机：Dormant → Starting → Ready；Faulted / Incompatible / Disabled 可观测
+- [x] 懒启动：未触发前 0 进程；首次触发 spawn；同一插件多 Provider 共用一个进程
+- [x] 禁止每次按键 spawn；后续 Query 走 RPC 复用
+- [x] Initialize/Query 硬超时（init 硬 2000ms；query 硬 800ms）；超时只丢弃本次结果
+- [x] Hang：插件 sleep 时调用方不阻塞 UI 线程；用户仍可搜索并启动应用
+- [x] Crash：进程退出 → Faulted，Kite 继续运行；不自动后台重启；crash loop 抑制自动拉起
+- [x] Idle Shutdown：达到 clamp 后的 timeout 进程退出
+- [x] generation 过期响应丢弃；cancellation 可选，不作为正确性前提
+- [x] Content-Length 帧与 plugin/initialize、plugin/query（及 execute 签名）消息形状可测
+- [x] 运行时缝（可注入 ProcessBackend / mock stdio）覆盖上述生命周期；不依赖真实第三方 exe 作为唯一手段
+- [x] `cargo test` 全绿
+
+## Comments
+
+- RPC 在 `std::thread` 中执行，不进 Iced UI 线程。
+- 生产后端 `StdioBackend` 使用读线程 + stderr 日志轮转（256KB）。
+- 真机强杀/hang 冒烟由用户环境验收。
 
 ## Notes
 

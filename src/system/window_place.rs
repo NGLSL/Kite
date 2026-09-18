@@ -12,7 +12,7 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 /// 光标所在 monitor 上，逻辑窗口 `window_w × window_h` 居中后的**物理**左上角。
-/// 垂直约在工作区 1/3 处（对齐 uTools/Kite 习惯）。失败返回 None，调用方保持原位置。
+/// 水平、垂直均按工作区居中。失败返回 None，调用方保持原位置。
 pub fn physical_position_on_cursor_monitor(
     window_w_logical: f32,
     window_h_logical: f32,
@@ -64,7 +64,7 @@ fn center_physical(
     let window_w = window_w_logical * scale;
     let window_h = window_h_logical * scale;
     let x = work_left + ((work_w - window_w) / 2.0).max(0.0);
-    let y = work_top + ((work_h - window_h) / 3.0).max(0.0);
+    let y = work_top + ((work_h - window_h) / 2.0).max(0.0);
     (x, y)
 }
 
@@ -82,18 +82,18 @@ mod tests {
 
     #[test]
     fn centers_on_100_percent_monitor() {
-        // 1920×1080 工作区，640×420 逻辑窗，scale 1.0
+        // 1920×1080 工作区，640×420 逻辑窗，scale 1.0 → 水平垂直居中
         let (x, y) = center_physical(0.0, 0.0, 1920.0, 1080.0, 640.0, 420.0, 1.0);
         assert_eq!(x, 640.0);
-        assert_eq!(y, 220.0);
+        assert_eq!(y, 330.0);
     }
 
     #[test]
     fn centers_on_150_percent_monitor_using_physical_work_area() {
-        // 2K 2560×1440 @150%：逻辑窗 640×420 → 物理 960×630
+        // 2K 2560×1440 @150%：逻辑窗 640×420 → 物理 960×630，垂直居中
         let (x, y) = center_physical(0.0, 0.0, 2560.0, 1440.0, 640.0, 420.0, 1.5);
         assert_eq!(x, 800.0);
-        assert_eq!(y, 270.0);
+        assert_eq!(y, 405.0);
     }
 
     #[test]
@@ -101,7 +101,7 @@ mod tests {
         // 副屏物理原点在 x=1920，不得再被 scale 除到主屏
         let (x, y) = center_physical(1920.0, 0.0, 4480.0, 1440.0, 640.0, 420.0, 1.5);
         assert_eq!(x, 1920.0 + 800.0);
-        assert_eq!(y, 270.0);
+        assert_eq!(y, 405.0);
     }
 
     #[test]

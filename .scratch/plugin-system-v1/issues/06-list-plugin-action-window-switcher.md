@@ -4,15 +4,20 @@
 
 **Blocked by:** 05 — Plugin Host + JSON-RPC 生命周期
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] List 响应映射为通用 Result（source=Plugin，携带 plugin_id/provider_id）
-- [ ] priority 仅影响当前 Provider 内部顺序，不影响 Core Ranking
-- [ ] Enter → ResultAction::Plugin → plugin/execute(action_id, payload)
-- [ ] Native 与 Plugin 动作分离：List 场景走 PluginAction；不把 Window 当成特殊 QueryResponse
-- [ ] 结果代际失效时不可对过期插件行执行动作
-- [ ] 结果缝测试：List 映射与 execute 参数；可选 dummy/官方 Window Switcher 协议级验证
-- [ ] `cargo test` 全绿；有条件时真机冒烟 `win` 流程
+- [x] List 响应映射为通用 Result（source=Plugin，携带 plugin_id/provider_id）
+- [x] priority 仅影响当前 Provider 内部顺序，不影响 Core Ranking
+- [x] Enter → ResultAction::Plugin → plugin/execute(action_id, payload)
+- [x] Native 与 Plugin 动作分离：List 场景走 PluginAction；不把 Window 当成特殊 QueryResponse
+- [x] 结果代际失效时不可对过期插件行执行动作
+- [x] 结果缝测试：List 映射与 execute 参数；官方 Window Switcher 在 `official-plugins/window-switcher`
+- [ ] `cargo test` 全绿；有条件时真机冒烟 `win` 流程（需用户本机窗口环境）
+
+## Comments
+
+- 协议层 `ListItemAction::PluginAction`；宿主回填 plugin_id。
+- `window_list_provider_maps_plugin_actions` 覆盖结果缝。
 
 ## Notes
 

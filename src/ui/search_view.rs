@@ -10,6 +10,7 @@ use iced::{alignment, border, color, Background, Border, Color, Element, Length,
 
 use super::font::name_font;
 use super::{MenuAction, Message, State};
+use crate::plugin::{PanelBlock, PanelData};
 
 // ── 设计 token（global.css）──
 pub(crate) const BG_PANEL: Color = color!(0xFF_FF_FF);
@@ -86,7 +87,8 @@ fn divider() -> Element<'static, Message> {
 fn search_row(state: &State) -> Element<'_, Message> {
     let magnifier =
         mouse_area(canvas(Magnifier).width(20.0).height(20.0)).on_press(Message::DragWindow);
-    let input = text_input("搜索应用、网址，或直接输入关键词", &state.query)
+    let placeholder = search_placeholder(state);
+    let input = text_input(&placeholder, &state.query)
         .id(input_id())
         .on_input(Message::QueryChanged)
         .size(17.0)
@@ -173,15 +175,45 @@ fn search_row(state: &State) -> Element<'_, Message> {
 }
 
 /// 结果区（css .results）：padding 8、行间 2；空 query 列默认列表，
-/// 有 query 无结果时显示空态（css .empty-state）。
+/// 有 query 无结果时显示空态（css .empty-state）。Provider Panel 时原生渲染声明式块。
 fn results_area(state: &State) -> Element<'_, Message> {
+    if let Some(panel) = &state.plugin_panel {
+        return panel_area(state, panel);
+    }
+
     if state.results.is_empty() {
+        if state.provider_mode.is_some() {
+            let (title, sub) = if let Some(err) = &state.plugin_flash {
+                ("插件暂时不可用", err.as_str())
+            } else {
+                ("插件查询中…", "结果将显示在此处")
+            };
+            let empty = column![
+                text(title).size(14.0).color(TEXT).font(name_font()),
+                text(sub).size(12.0).color(TEXT_MUTED),
+            ]
+            .spacing(6.0)
+            .align_x(alignment::Alignment::Center);
+            return container(empty)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(alignment::Alignment::Center)
+                .align_y(alignment::Alignment::Center)
+                .padding(40.0)
+                .into();
+        }
+        let samples = enabled_plugin_samples(state);
         let (title, sub) = if !state.query.trim().is_empty() {
-            ("没有找到相关结果", "试试其他关键词")
+            let sub = if samples.is_empty() {
+                "试试其他关键词".to_string()
+            } else {
+                format!("也可试试：{}", samples.join(" · "))
+            };
+            ("没有找到相关结果", sub)
         } else if !state.index_ready {
-            ("正在构建索引…", "很快就好，通常不到一秒")
+            ("正在构建索引…", "很快就好，通常不到一秒".to_string())
         } else {
-            ("", "")
+            ("", String::new())
         };
         if title.is_empty() {
             return Space::new().width(Length::Fill).height(Length::Fill).into();
@@ -221,6 +253,118 @@ fn results_area(state: &State) -> Element<'_, Message> {
             right: 14.0,
             bottom: 8.0,
             left: 8.0,
+        })
+        .into()
+}
+
+/// Provider Mode 声明式 Panel：text/value/key_value/notice/divider，Iced 原生渲染。
+fn panel_area<'a>(state: &State, panel: &PanelData) -> Element<'a, Message> {
+    let mut col = column![].spacing(8.0);
+
+    if let Some(act) = &state.provider_mode {
+        let plugin_label = {
+            let reg = state
+                .plugin_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            reg.get(&act.plugin_id)
+                .map(|p| p.manifest.plugin.name.clone())
+                .unwrap_or_else(|| act.plugin_id.clone())
+        };
+        col = col.push(
+            row![
+                text(format!("{} · {}", plugin_label, act.provider_id))
+                    .size(11.0)
+                    .color(TEXT_MUTED),
+                text("Esc 退出 Provider").size(11.0).color(TEXT_MUTED),
+            ]
+            .spacing(8.0)
+            .width(Length::Fill),
+        );
+    }
+    if let Some(err) = &state.plugin_flash {
+        col = col.push(text(err.clone()).size(12.0).color(color!(0xDC_26_26)));
+    }
+
+    for block in &panel.blocks {
+        match block {
+            PanelBlock::Text { text: t, style } => {
+                let c = match style.as_str() {
+                    "secondary" | "muted" => TEXT_MUTED,
+                    "error" => color!(0xDC_26_26),
+                    _ => TEXT,
+                };
+                col = col.push(text(t.clone()).size(14.0).color(c).width(Length::Fill));
+            }
+            PanelBlock::Value {
+                label,
+                value,
+                selectable: _,
+            } => {
+                if let Some(l) = label {
+                    col = col.push(text(l.clone()).size(12.0).color(TEXT_MUTED));
+                }
+                col = col.push(
+                    text(value.clone())
+                        .size(28.0)
+                        .font(name_font())
+                        .color(TEXT)
+                        .width(Length::Fill),
+                );
+            }
+            PanelBlock::KeyValue { items } => {
+                let mut kv = column![].spacing(4.0);
+                for it in items {
+                    kv = kv.push(
+                        row![
+                            text(it.key.clone())
+                                .size(12.0)
+                                .color(TEXT_MUTED)
+                                .width(Length::Fill),
+                            text(it.value.clone()).size(12.0).color(TEXT),
+                        ]
+                        .spacing(12.0),
+                    );
+                }
+                col = col.push(kv.width(Length::Fill));
+            }
+            PanelBlock::Notice { level, text: t } => {
+                let (bg, fg) = match level.as_str() {
+                    "error" => (color!(0xFE_F2_F2), color!(0xDC_26_26)),
+                    "warning" => (color!(0xFF_F7_ED), color!(0xC2_41_0C)),
+                    _ => (ACCENT_BG, MARK),
+                };
+                col = col.push(
+                    container(text(t.clone()).size(13.0).color(fg).width(Length::Fill))
+                        .width(Length::Fill)
+                        .padding([8.0, 12.0])
+                        .style(move |_t| container::Style {
+                            background: Some(Background::Color(bg)),
+                            border: Border::default().rounded(8.0),
+                            ..container::Style::default()
+                        }),
+                );
+            }
+            PanelBlock::Divider => col = col.push(divider()),
+        }
+    }
+
+    if let Some(action) = panel.actions.iter().find(|a| a.default) {
+        col = col.push(
+            text(format!("Enter · {}", action.label))
+                .size(12.0)
+                .color(TEXT_MUTED),
+        );
+    }
+
+    container(col)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(Padding {
+            top: 12.0,
+            right: 18.0,
+            bottom: 12.0,
+            left: 18.0,
         })
         .into()
 }
@@ -414,6 +558,24 @@ pub(crate) fn results_scroll_style(
             },
             icon: TEXT_MUTED,
         },
+    }
+}
+
+/// 启用插件的短示例，用于占位/空态提示。
+fn enabled_plugin_samples(state: &State) -> Vec<String> {
+    let reg = state
+        .plugin_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::plugin::short_try_samples(&reg, 3)
+}
+
+fn search_placeholder(state: &State) -> String {
+    let samples = enabled_plugin_samples(state);
+    if samples.is_empty() {
+        "搜索应用、网址，或直接输入关键词".to_string()
+    } else {
+        format!("搜索应用；或 {}", samples.join(" · "))
     }
 }
 

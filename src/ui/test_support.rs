@@ -78,5 +78,23 @@ pub(super) fn test_state(query: &str) -> State {
         epoch: 0,
         hover_suppressed: false,
         last_hover_pt: None,
+        plugin_registry: std::sync::Arc::new(Mutex::new(PluginRegistry::new())),
+        plugin_host: std::sync::Arc::new(Mutex::new(PluginHost::new(
+            Box::new(plugin::process::MemProcessBackend::new()),
+            std::env::temp_dir(),
+            env!("CARGO_PKG_VERSION"),
+        ))),
+        provider_mode: None,
+        plugin_panel: None,
+        plugin_query_generation: 0,
+        plugin_flash: None,
+        plugin_import_path: String::new(),
+        plugin_docs_open: None,
+        json_tool_window: None,
+        plugin_tool_open: false,
+        pending_tool_confirm: None,
+        json_editor: iced::widget::text_editor::Content::default(),
+        json_result: String::new(),
+        json_tool_note: None,
     }
 }

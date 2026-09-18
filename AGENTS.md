@@ -11,11 +11,12 @@ Kite 是面向 Windows 的轻量应用启动器，使用 Rust 2021、Iced 0.14 �
 - `src/storage/`：SQLite 设置、固定项和历史
 - `src/system/`：Windows 快捷键、托盘、图标和系统集成
 - `src/ui/`：Iced 窗口、设置页和交互
-- `resources/`：Everything DLL 和音效等运行资源
+- `resources/`：Everything DLL、音效、官方插件打包目录（`official-plugins/`，构建生成）等运行资源
+- `official-plugins/`：官方插件 Rust workspace（性能考虑；协议语言无关，见 `docs/PLUGIN-DEVELOPMENT.md`）
 - `icons/`：应用图标
 - `installer/`：NSIS 安装脚本
 - `scripts/`：构建辅助脚本
-- `docs/`：需求、架构决策和开发文档
+- `docs/`：需求、架构决策、插件开发说明（`PLUGIN-DEVELOPMENT.md`）和开发文档
 
 ## 开发规则
 

@@ -4,14 +4,20 @@
 
 **Blocked by:** 01 — Prefactor Expand — ResultSource + ResultAction
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Enter / Alt+数字 / 行点击三条启动入口共用同一 ResultAction 判定，不再各自硬编码 AppItem 启动
-- [ ] 应用结果 LaunchApp 行为与现状一致（只能使用索引中已验证 target，不拼 shell）
-- [ ] 文件类结果可打开/定位，Web 结果可打开 URL
-- [ ] 结果代际失效时，上述入口拒绝启动旧列表
-- [ ] 真机冒烟：搜应用启动、文件模式打开、网页结果打开各一次
-- [ ] `cargo test` 全绿；UI/键盘相关回归不回退
+- [x] Enter / Alt+数字 / 行点击三条启动入口共用同一 ResultAction 判定，不再各自硬编码 AppItem 启动
+- [x] 应用结果 LaunchApp 行为与现状一致（只能使用索引中已验证 target，不拼 shell）
+- [x] 文件类结果可打开/定位，Web 结果可打开 URL
+- [x] 结果代际失效时，上述入口拒绝启动旧列表
+- [ ] 真机冒烟：搜应用启动、文件模式打开、网页结果打开各一次（本机由用户验收）
+- [x] `cargo test` 全绿；UI/键盘相关回归不回退
+
+## Comments
+
+- `launch_selected` → `exec_result_action` 统一消费 `SearchResult.action`。
+- `results_stale` 闸门保留；`ui::interaction::plugin_ui_tests::stale_list_blocks_enter_launch` 覆盖。
+- 真机冒烟未在本 agent 环境执行 GUI 操作。
 
 ## Notes
 

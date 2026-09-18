@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "plugin": {
+    "id": "com.kite.window-switcher",
+    "name": "窗口切换",
+    "version": "0.1.0",
+    "description": "输入 win 搜索并切换打开的窗口",
+    "usage": "在搜索框输入 win，列出当前打开的窗口。\n\n用法\n  win          列出全部窗口\n  win 关键字   按标题过滤（如 win code）\n\n操作\n  ↑↓ 选择窗口\n  Enter 激活选中窗口\n\n命令入口\n  窗口切换（win / window / 窗口）",
+    "author": "Kite"
+  },
+  "compatibility": {
+    "plugin_api": 1,
+    "minimum_kite_version": "0.3.0"
+  },
+  "runtime": {
+    "command": "kite-plugin-window-switcher.exe",
+    "args": [],
+    "startup_timeout_ms": 5000,
+    "idle_timeout_ms": 60000
+  },
+  "contributes": {
+    "examples": ["win"],
+    "commands": [
+      {
+        "id": "open",
+        "title": "窗口切换",
+        "keywords": ["win", "window", "窗口"],
+        "action": { "type": "enter_provider", "provider": "switch" }
+      }
+    ],
+    "providers": [
+      {
+        "id": "switch",
+        "response_mode": "list",
+        "triggers": [{ "type": "keyword", "value": "win" }]
+      }
+    ]
+  }
+}

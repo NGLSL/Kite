@@ -4,6 +4,7 @@ pub mod app;
 pub mod history;
 pub mod log;
 pub mod model;
+pub mod plugin;
 pub mod search;
 pub mod storage;
 pub mod system;

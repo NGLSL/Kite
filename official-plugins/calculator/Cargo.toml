@@ -1,0 +1,15 @@
+[package]
+name = "kite-plugin-calculator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Official Kite plugin: calculator panel"
+
+[[bin]]
+name = "kite-plugin-calculator"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { workspace = true }
+kite-plugin-sdk = { workspace = true }

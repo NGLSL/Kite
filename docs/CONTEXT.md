@@ -21,3 +21,10 @@
 | **SourceLayer / Tier** | 索引来源的产品分层，用于空 Query 可见性与弱匹配降噪，**不是**用户 Demote/Alias。**Tier A Formal（白名单）**：Start Menu/Desktop/UWP/apps-folder/用户 Portable。**Tier B System**：Kite curated 系统入口（`system_entries`），不扫 System32。**Tier C Discovery/Command**：App Paths/Uninstall/Scoop/WinGet/WindowsApps/Chocolatey——可作 alias/元数据/精确命令或兜底，**默认不当正式应用刷屏**。未知 source 默认 Supplemental（不当正式应用） |
 | **ResultSource** | 单条 **Result** 的展示/行为来源：App / File / Web / Builtin / Plugin。与 SourceLayer（索引分层）、AppItem.source（扫描来源字符串）不是同一概念；插件结果用 Plugin { plugin_id, provider_id } |
 | **ResultAction** | Result 携带的行为：Result 管展示，Action 管行为（LaunchApp / OpenFile / OpenUrl / CopyText / Plugin）。启动入口逐步改为执行该字段，而不是在 UI 里硬编码 AppItem |
+| **Plugin** | 外部能力包（manifest + runtime）；能力可插拔，体验留在 Kite |
+| **Provider / Trigger** | 插件查询能力与触发条件（prefix/keyword） |
+| **Provider Mode** | Trigger 命中后的独占查询态；搜索框保留，不与 Core 混排 |
+| **Panel Schema** | 声明式面板块（text/value/key_value/notice/divider），无 HTML/WebView |
+| **NativeAction / PluginAction** | Kite 直接执行 vs 回调 plugin/execute；V1 NativeAction 仅 copy_text / open_url / open_path |
+| **Host API** | 插件→宿主极少量能力：`host/clipboard.write` / `host/open_url` / `host/open_path` / `host/hide_kite`；能用 NativeAction 就不要走 Host API |
+| **Plugin Runtime State** | Dormant/Starting/Ready/Faulted/Disabled/Incompatible |

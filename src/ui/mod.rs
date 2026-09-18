@@ -18,6 +18,7 @@ use iced::window::{self, Position, Settings};
 use iced::{stream, Subscription, Task, Theme};
 
 use crate::model::{AppIndex, AppItem, SearchResult};
+use crate::plugin::{self, Activation, PanelData, PluginHost, PluginRegistry};
 use crate::storage::settings::UserAlias;
 use crate::storage::HistoryDb;
 use crate::system::hotkey::parse_raw;
@@ -27,11 +28,12 @@ mod actions;
 mod backend;
 mod font;
 mod interaction;
+mod json_tool;
 mod keyboard;
 mod results;
 mod runtime;
 mod search_view;
-mod settings_view;
+mod settings;
 #[cfg(test)]
 mod test_support;
 mod tray;
@@ -64,16 +66,18 @@ enum Section {
     Hotkey,
     Alias,
     Index,
+    Plugins,
     About,
 }
 
 impl Section {
-    const ALL: [Section; 6] = [
+    const ALL: [Section; 7] = [
         Section::General,
         Section::SearchEngine,
         Section::Hotkey,
         Section::Alias,
         Section::Index,
+        Section::Plugins,
         Section::About,
     ];
     fn label(self) -> &'static str {
@@ -83,6 +87,7 @@ impl Section {
             Section::Hotkey => "热键",
             Section::Alias => "别名",
             Section::Index => "应用索引",
+            Section::Plugins => "插件",
             Section::About => "关于",
         }
     }
@@ -209,6 +214,81 @@ enum Message {
     BootstrapReady(usize),
     /// 二次启动：请求主实例显示窗口（已显示则只抢焦点，不切换隐藏）。
     EnsureVisible,
+    // ── Plugin System ──
+    /// Provider Mode 下插件查询结果落地。
+    PluginQueryReady(u64, PluginQueryPayload),
+    /// 插件→宿主 host/* 调用（clipboard/open_url/open_path/hide_kite）。
+    PluginHostCall(String, plugin::HostCall),
+    /// 设置页：启用/禁用插件。
+    PluginSetEnabled(String, bool),
+    /// 设置页：重新加载插件进程。
+    PluginReload(String),
+    /// 设置页：打开插件目录。
+    PluginOpenDir(String),
+    /// 设置页：打开插件 stderr 日志。
+    PluginOpenLog(String),
+    /// 设置页：卸载插件（删除插件根目录 + 移出 Registry）。
+    PluginUninstall(String),
+    /// 设置页：导入路径输入。
+    PluginImportPathChanged(String),
+    /// 设置页：从路径导入插件文件夹。
+    PluginImportFromPath,
+    /// 设置页：安装捆绑的官方示例插件。
+    PluginInstallOfficial,
+    /// 设置页：打开全局插件目录。
+    PluginOpenPluginsDir,
+    /// 设置页：重新扫描插件目录。
+    PluginRescanPlugins,
+    /// 设置页/试用：把示例查询填入搜索框并回到主界面。
+    PluginTryExample(String),
+    /// 设置页：展开/收起某个插件的详细使用说明。
+    PluginToggleDocs(String),
+    /// 进入「打开 JSON 工具」二次确认（不直接开窗）。
+    PluginOpenJsonTool,
+    /// 确认打开 JSON 独立工具窗。
+    PluginConfirmJsonTool,
+    /// 取消打开 JSON 工具的二次确认。
+    PluginCancelJsonToolConfirm,
+    /// 关闭 JSON 独立工具窗。
+    PluginCloseJsonTool,
+    /// 拖拽 JSON 工具窗标题栏。
+    JsonToolDrag,
+    /// 某窗口已销毁；工具窗关闭时清理状态。
+    JsonToolWindowClosed(window::Id),
+    /// JSON 工具左侧编辑器动作。
+    JsonToolEdit(iced::widget::text_editor::Action),
+    /// 左侧原文 → 右侧格式化（缩进）。
+    JsonToolFormat,
+    /// 左侧原文 → 右侧压缩（单行）。
+    JsonToolMinify,
+    /// 从系统剪贴板粘贴到左侧。
+    JsonToolPaste,
+    /// 剪贴板读取结果落地。
+    JsonToolPasteReady(Option<String>),
+    /// 复制右侧结果到剪贴板。
+    JsonToolCopyResult,
+    /// 清空左右两侧。
+    JsonToolClear,
+}
+
+/// 插件查询落地载荷（代际 + 结果）。
+#[derive(Debug, Clone)]
+pub(crate) enum PluginQueryPayload {
+    List {
+        plugin_id: String,
+        provider_id: String,
+        items: Vec<SearchResult>,
+    },
+    Panel {
+        plugin_id: String,
+        provider_id: String,
+        panel: PanelData,
+    },
+    Empty {
+        plugin_id: String,
+        provider_id: String,
+    },
+    Error(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,12 +386,47 @@ struct State {
     hover_suppressed: bool,
     /// 上次用于悬停判定的鼠标位置（有位移才恢复悬停选中）。
     last_hover_pt: Option<iced::Point>,
+    // ── Plugin System ──
+    plugin_registry: std::sync::Arc<Mutex<PluginRegistry>>,
+    plugin_host: std::sync::Arc<Mutex<PluginHost>>,
+    provider_mode: Option<Activation>,
+    plugin_panel: Option<PanelData>,
+    plugin_query_generation: u64,
+    plugin_flash: Option<String>,
+    /// 插件导入：设置页粘贴的本地文件夹路径。
+    plugin_import_path: String,
+    /// 设置页：当前展开详细说明的插件 id。
+    plugin_docs_open: Option<String>,
+    /// JSON 独立工具窗的窗口 id；None = 未打开。主启动器窗口永不承载工具 UI。
+    json_tool_window: Option<window::Id>,
+    /// JSON 工具是否打开（与 json_tool_window 同步，供逻辑/测试读取）。
+    plugin_tool_open: bool,
+    /// 非内联工具打开前的二次确认（JSON）。内联插件（计算器等）不进此状态。
+    pending_tool_confirm: Option<PendingJsonToolConfirm>,
+    /// JSON 工具左侧原文。
+    json_editor: iced::widget::text_editor::Content,
+    /// JSON 工具右侧结果。
+    json_result: String,
+    /// JSON 工具状态提示（错误/成功）。
+    json_tool_note: Option<(bool, String)>,
 }
 
-/// 视图层：设置页 / 搜索页。
-fn view(state: &State) -> iced::Element<'_, Message> {
+/// 非内联工具（独立窗）打开前的二次确认载荷。
+#[derive(Debug, Clone)]
+pub(crate) struct PendingJsonToolConfirm {
+    /// 搜索 `json <payload>` 时的预填内容；空工具为 None。
+    pub payload: Option<String>,
+    /// true = 从设置页进入；false = 从搜索结果确认。
+    pub from_settings: bool,
+}
+
+/// 按窗口路由视图：工具窗 → JSON 工具；主窗 → 设置/搜索。主窗内容不因工具而切换。
+fn view(state: &State, window: window::Id) -> iced::Element<'_, Message> {
+    if state.json_tool_window == Some(window) {
+        return json_tool::view(state);
+    }
     if state.settings_open {
-        settings_view::settings_view(state)
+        settings::settings_view(state)
     } else {
         search_view::view(state)
     }
