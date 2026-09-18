@@ -19,12 +19,15 @@ Push-Location $ws
 try {
     if ($Release) {
         cargo build --release
+        if ($LASTEXITCODE -ne 0) { throw "official plugins cargo build failed with exit code $LASTEXITCODE" }
         $outDir = Join-Path $ws "target\release"
     } else {
         cargo build
+        if ($LASTEXITCODE -ne 0) { throw "official plugins cargo build failed with exit code $LASTEXITCODE" }
         $outDir = Join-Path $ws "target\debug"
     }
     cargo test
+    if ($LASTEXITCODE -ne 0) { throw "official plugins cargo test failed with exit code $LASTEXITCODE" }
 } finally {
     Pop-Location
 }

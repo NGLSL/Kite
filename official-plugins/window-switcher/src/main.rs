@@ -138,7 +138,8 @@ mod tests {
 
     #[test]
     fn list_has_plugin_action() {
-        let v = list_result("kite");
+        // 空 query 列出全部（真实窗口或 mock），避免依赖本机标题是否含特定关键字
+        let v = list_result("");
         assert_eq!(v["type"], "list");
         let items = v["items"].as_array().unwrap();
         assert!(!items.is_empty());
