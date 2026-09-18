@@ -5,7 +5,7 @@
     "name": "开发者工具",
     "version": "0.1.0",
     "description": "uuid / hash / 时间戳 / json 等常用开发查询",
-    "usage": "在搜索框输入关键词，触发对应开发工具。\n\n工具\n  uuid\n    生成一条 UUID，Enter 复制。\n\n  hash <文本>\n    计算哈希（如 hash abc）。\n\n  ts\n    时间戳相关查询。\n\n  json\n    独立面板：设置 → 插件 → 打开 JSON 面板。\n    左原始、右结果；格式化 / 压缩 / 剪贴板。\n    Esc 或 × 关闭面板。\n\n  json <JSON>\n    搜索框快速格式化（适合短内容）。\n    示例：json {\"name\":\"kite\",\"n\":1}\n\n通用\n  关键词需整词匹配。\n  命令入口：搜索「生成 UUID」。",
+    "usage": "在搜索框输入关键词，触发对应开发工具。\n\n工具\n  uuid\n    生成一条 UUID，Enter 复制。\n\n  hash <文本>\n    计算哈希（如 hash abc）。\n\n  ts\n    时间戳相关查询。\n\n  json\n    搜索 json，列表只显示「JSON 工具」，Enter 打开独立窗。\n    也可在本插件说明页点「打开 JSON 工具」（需确认）。\n    左原始、右结果：格式化 / 压缩 / 复制。\n    不改动启动器主窗口；Esc 或 × 只关工具窗。\n\n  json <JSON>\n    搜索后 Enter 打开工具窗，并自动格式化预填。\n    示例：json {\"name\":\"kite\",\"n\":1}\n\n说明\n  uuid / hash / ts 为内联结果，无需二次确认。\n  JSON 工具为独立窗口，打开前需确认。\n  命令入口：搜索「生成 UUID」。",
     "author": "Kite"
   },
   "compatibility": {

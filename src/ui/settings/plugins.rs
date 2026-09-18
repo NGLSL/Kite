@@ -1,10 +1,9 @@
-//! 插件管理：设置内列表 + 说明详情；工具（JSON）走独立面板。
+//! 插件管理：设置内列表 + 说明详情。JSON 工具不在列表单独成卡，从搜索 json 或开发者工具说明打开。
 
-use iced::font::{Font, Weight};
 use iced::widget::{button, column, container, row, space::Space, text, text_input};
 use iced::{alignment, border, color, Background, Border, Color, Element, Length};
 
-use super::super::font::{name_font, ui_font};
+use super::super::font::name_font;
 use super::super::search_view::{BG_PANEL, BORDER, MARK, TEXT, TEXT_MUTED};
 use super::super::{Message, State};
 use super::widgets::{divider, elevated_card, ghost_button, primary_button, status_pill, toggle};
@@ -28,51 +27,6 @@ fn plugins_list_page(state: &State) -> Element<'_, Message> {
 
     // 产品区：先能力，后维护。导入/维护沉底，不再压住插件列表。
     let mut sections: Vec<Element<'_, Message>> = Vec::new();
-
-    // 非内联工具：二次确认后才开独立窗；内联插件无此步。
-    let json_tool_action: Element<'_, Message> = if state
-        .pending_tool_confirm
-        .as_ref()
-        .is_some_and(|p| p.from_settings)
-    {
-        row![
-            text("确认打开独立 JSON 工具窗？")
-                .size(12.0)
-                .color(TEXT)
-                .width(Length::Fill),
-            primary_button("确认打开".into(), Message::PluginConfirmJsonTool),
-            ghost_button("取消".into(), Message::PluginCancelJsonToolConfirm, false),
-        ]
-        .spacing(8.0)
-        .align_y(alignment::Alignment::Center)
-        .into()
-    } else {
-        primary_button("打开面板".into(), Message::PluginOpenJsonTool).into()
-    };
-
-    sections.push(elevated_card(
-        column![
-            row![
-                tool_glyph("{}"),
-                column![
-                    text("JSON 工具")
-                        .size(15.0)
-                        .color(TEXT)
-                        .font(name_font()),
-                    text("独立面板：左原始 · 右格式化/压缩 · 打开前需确认")
-                        .size(12.0)
-                        .color(TEXT_MUTED),
-                ]
-                .spacing(2.0)
-                .width(Length::Fill),
-            ]
-            .spacing(12.0)
-            .align_y(alignment::Alignment::Center),
-            json_tool_action,
-        ]
-        .spacing(10.0)
-        .into(),
-    ));
 
     if reg.is_empty() {
         sections.push(elevated_card(
@@ -188,28 +142,6 @@ fn list_status(phase: crate::plugin::RuntimePhase, enabled: bool, last_error: Op
     } else {
         ("可用".into(), false)
     }
-}
-
-fn tool_glyph(label: &'static str) -> Element<'static, Message> {
-    container(
-        text(label)
-            .size(13.0)
-            .font(Font {
-                weight: Weight::Semibold,
-                ..ui_font()
-            })
-            .color(MARK),
-    )
-    .width(36.0)
-    .height(36.0)
-    .align_x(alignment::Alignment::Center)
-    .align_y(alignment::Alignment::Center)
-    .style(|_t| container::Style {
-        background: Some(Background::Color(color!(0xEF_F6_FF))),
-        border: Border::default().rounded(9.0),
-        ..container::Style::default()
-    })
-    .into()
 }
 
 fn plugin_card(
@@ -402,7 +334,7 @@ fn plugin_detail_page(state: &State, plugin_id: &str) -> Element<'static, Messag
                 ));
             } else {
                 title_extra = title_extra.push(primary_button(
-                    "打开 JSON 面板".into(),
+                    "打开 JSON 工具".into(),
                     Message::PluginOpenJsonTool,
                 ));
             }

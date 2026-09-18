@@ -219,8 +219,8 @@ pub fn official_display_meta(id: &str) -> Option<(&'static str, &'static str, &'
         )),
         "com.kite.devtools" => Some((
             "开发者工具",
-            "uuid / hash / 时间戳 / json 等常用开发查询",
-            "在搜索框输入关键词，触发对应开发工具。\n\n工具\n  uuid\n    生成一条 UUID，Enter 复制。\n\n  hash <文本>\n    计算哈希（如 hash abc）。\n\n  ts\n    时间戳相关查询。\n\n  json\n    独立面板：设置 → 插件 → 打开 JSON 面板。\n    左原始、右结果；格式化 / 压缩 / 剪贴板。\n    Esc 或 × 关闭面板。\n\n  json <JSON>\n    搜索框快速格式化（适合短内容）。\n    示例：json {\"name\":\"kite\",\"n\":1}\n\n通用\n  关键词需整词匹配。\n  命令入口：搜索「生成 UUID」。",
+            "uuid / hash / 时间戳 / JSON 工具等常用开发查询",
+            "在搜索框输入关键词，触发对应开发工具。\n\n工具\n  uuid\n    生成一条 UUID，Enter 复制。\n\n  hash <文本>\n    计算哈希（如 hash abc）。\n\n  ts\n    时间戳相关查询。\n\n  json\n    搜索 json，列表只显示「JSON 工具」，Enter 打开独立窗。\n    也可在本插件说明页点「打开 JSON 工具」（需确认）。\n    左原始、右结果：格式化 / 压缩 / 复制。\n    不改动启动器主窗口；Esc 或 × 只关工具窗。\n\n  json <JSON>\n    搜索后 Enter 打开工具窗，并自动格式化预填。\n    示例：json {\"name\":\"kite\",\"n\":1}\n\n说明\n  uuid / hash / ts 为内联结果，无需二次确认。\n  JSON 工具为独立窗口，打开前需确认。\n  命令入口：搜索「生成 UUID」。",
         )),
         _ => None,
     }
@@ -258,22 +258,18 @@ pub fn display_plugin_name(manifest: &PluginManifest) -> String {
     }
 }
 
-/// 设置页一句话说明。
+/// 设置页一句话说明。官方插件以宿主文案为准，避免 AppData 旧包继续展示过时用法。
 pub fn display_plugin_blurb(manifest: &PluginManifest) -> String {
     if let Some((_, blurb, _)) = official_display_meta(&manifest.plugin.id) {
-        if looks_untranslated(&manifest.plugin.description) {
-            return blurb.to_string();
-        }
+        return blurb.to_string();
     }
     capability_blurb(manifest)
 }
 
-/// 设置页详细用法正文。
+/// 设置页详细用法正文。官方插件以宿主文案为准。
 pub fn display_plugin_usage(manifest: &PluginManifest) -> String {
     if let Some((_, _, usage)) = official_display_meta(&manifest.plugin.id) {
-        if manifest.plugin.usage.trim().is_empty() || looks_untranslated(&manifest.plugin.description) {
-            return usage.to_string();
-        }
+        return usage.to_string();
     }
     usage_doc(manifest)
 }
@@ -376,6 +372,14 @@ mod discover_tests {
         assert_eq!(display_plugin_name(&m), "计算器");
         assert!(display_plugin_blurb(&m).contains("计算"));
         assert!(display_plugin_usage(&m).contains("Enter"));
+
+        // AppData 里仍是旧中文包时，说明也必须跟宿主产品文案。
+        let mut dt = manifest("旧说明", &[]);
+        dt.plugin.id = "com.kite.devtools".into();
+        dt.plugin.usage = "独立面板：设置 → 插件 → 打开 JSON 面板。".into();
+        let usage = display_plugin_usage(&dt);
+        assert!(usage.contains("JSON 工具"), "官方用法不得沿用旧「面板」文案");
+        assert!(!usage.contains("打开 JSON 面板"), "旧入口名应被宿主文案覆盖");
     }
 
     #[test]

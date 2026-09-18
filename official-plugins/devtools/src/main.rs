@@ -80,7 +80,7 @@ fn provider_panel(provider: &str, query: &str) -> Value {
             let raw = query.trim();
             if raw.is_empty() {
                 return kite_plugin_sdk::panel_response(json!({
-                    "blocks": [{ "type": "notice", "level": "info", "text": "独立面板：设置 → 插件 → 打开 JSON 面板。也可 json {...} 快速格式化。" }],
+                    "blocks": [{ "type": "notice", "level": "info", "text": "宿主 JSON 工具：搜索 json 后 Enter 打开独立窗；也可在设置 → 插件 → 开发者工具说明里点「打开 JSON 工具」。" }],
                     "actions": []
                 }));
             }
