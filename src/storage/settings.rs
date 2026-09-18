@@ -25,6 +25,8 @@ pub struct Settings {
     pub search_engine: String,
     /// 窗口内网页搜索快捷键，默认 Ctrl+Enter。
     pub web_search_hotkey: String,
+    /// 外观主题：system / dark / light
+    pub theme_mode: String,
 }
 
 impl Default for Settings {
@@ -40,6 +42,7 @@ impl Default for Settings {
             portable_dirs: Vec::new(),
             search_engine: "auto".into(),
             web_search_hotkey: crate::system::hotkey::DEFAULT_WEB_SEARCH_HOTKEY.into(),
+            theme_mode: "dark".into(),
         }
     }
 }
@@ -116,7 +119,16 @@ impl HistoryDb {
                 s.web_search_hotkey = v;
             }
         }
+        if let Ok(v) = self.get_setting("theme_mode") {
+            if !v.is_empty() {
+                s.theme_mode = v;
+            }
+        }
         s
+    }
+
+    pub fn save_theme_mode(&mut self, mode: &str) -> rusqlite::Result<()> {
+        self.save_setting("theme_mode", mode)
     }
 
     pub fn save_setting(&mut self, key: &str, value: &str) -> rusqlite::Result<()> {
@@ -261,7 +273,11 @@ impl HistoryDb {
     }
 
     pub fn set_search_engine(&mut self, engine_id: &str) -> rusqlite::Result<()> {
-        let id = if engine_id.is_empty() { "auto" } else { engine_id };
+        let id = if engine_id.is_empty() {
+            "auto"
+        } else {
+            engine_id
+        };
         self.save_setting("search_engine", id)
     }
 
@@ -422,5 +438,18 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].alias, "old");
         assert_eq!(rows[0].target_id, None);
+    }
+
+    #[test]
+    fn settings_theme_mode_round_trip() {
+        let mut db = temp_db();
+        let default_settings = db.load_settings();
+        assert_eq!(default_settings.theme_mode, "dark");
+
+        db.save_theme_mode("light").unwrap();
+        assert_eq!(db.load_settings().theme_mode, "light");
+
+        db.save_theme_mode("system").unwrap();
+        assert_eq!(db.load_settings().theme_mode, "system");
     }
 }

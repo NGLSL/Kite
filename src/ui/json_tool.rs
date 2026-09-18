@@ -10,10 +10,8 @@ use iced::widget::{
 use iced::{alignment, border, color, Background, Border, Color, Element, Length, Padding, Theme};
 
 use super::font::{name_font, ui_font};
-use super::search_view::{
-    results_scroll_style, results_scrollbar, BG_ELEVATED, BG_PANEL, BORDER, WINDOW_BORDER, MARK,
-    TEXT, TEXT_MUTED,
-};
+use super::search_view::{results_scroll_style_tokens, results_scrollbar};
+use super::theme::ThemeTokens;
 use super::{Message, State};
 
 /// 工具窗逻辑尺寸（独立于启动器 640×420 / 设置 720×520）。
@@ -43,25 +41,41 @@ pub(super) fn transform_json(raw: &str, minify: bool) -> Result<String, String> 
     }
 }
 
-pub(super) fn view(state: &State) -> Element<'_, Message> {
+pub fn view(state: &State) -> Element<'_, Message> {
+    let tokens = state.theme_tokens();
     let title_bar = mouse_area(
         container(
             row![
-                text("JSON 工具")
+                text("{ }")
                     .size(14.0)
-                    .color(TEXT)
-                    .font(name_font()),
-                text("左原始 · 右格式化/压缩")
-                    .size(11.5)
-                    .color(TEXT_MUTED),
+                    .color(tokens.accent)
+                    .font(Font {
+                        family: Family::Monospace,
+                        ..ui_font()
+                    }),
+                text("JSON 工具")
+                    .size(13.5)
+                    .font(name_font())
+                    .color(tokens.text_primary),
+                text("开发者工具 · 原生独立窗")
+                    .size(11.0)
+                    .color(tokens.text_muted),
                 Space::new().width(Length::Fill),
-                button(text("×").size(16.0).color(TEXT_MUTED))
-                    .padding([4.0, 10.0])
+                button(text("×").size(16.0).color(tokens.text_muted))
+                    .padding([4.0, 8.0])
                     .on_press(Message::PluginCloseJsonTool)
-                    .style(|_t, _s| button::Style {
-                        background: None,
-                        text_color: TEXT_MUTED,
-                        border: Border::default().rounded(8.0),
+                    .style(move |_t, status| button::Style {
+                        background: if status == button::Status::Hovered {
+                            Some(Background::Color(tokens.active_bg))
+                        } else {
+                            None
+                        },
+                        text_color: if status == button::Status::Hovered {
+                            tokens.text_primary
+                        } else {
+                            tokens.text_muted
+                        },
+                        border: Border::default().rounded(6.0),
                         ..button::Style::default()
                     }),
             ]
@@ -82,11 +96,11 @@ pub(super) fn view(state: &State) -> Element<'_, Message> {
     .on_press(Message::JsonToolDrag);
 
     let toolbar = row![
-        tool_btn("从剪贴板粘贴", Message::JsonToolPaste, false),
-        tool_btn("格式化", Message::JsonToolFormat, true),
-        tool_btn("压缩", Message::JsonToolMinify, false),
-        tool_btn("复制结果", Message::JsonToolCopyResult, false),
-        tool_btn("清空", Message::JsonToolClear, false),
+        tool_btn("从剪贴板粘贴", Message::JsonToolPaste, false, tokens),
+        tool_btn("格式化", Message::JsonToolFormat, true, tokens),
+        tool_btn("压缩", Message::JsonToolMinify, false, tokens),
+        tool_btn("复制结果", Message::JsonToolCopyResult, false, tokens),
+        tool_btn("清空", Message::JsonToolClear, false, tokens),
     ]
     .spacing(8.0)
     .align_y(alignment::Alignment::Center);
@@ -94,7 +108,13 @@ pub(super) fn view(state: &State) -> Element<'_, Message> {
     let note: Element<'_, Message> = match &state.json_tool_note {
         Some((is_err, msg)) => {
             let (bg, fg) = if *is_err {
-                (color!(0xFE_F2_F2), color!(0xDC_26_26))
+                if tokens.is_dark {
+                    (Color::from_rgba(0.9, 0.2, 0.2, 0.15), color!(0xEF_44_44))
+                } else {
+                    (color!(0xFE_F2_F2), color!(0xDC_26_26))
+                }
+            } else if tokens.is_dark {
+                (Color::from_rgba(0.1, 0.6, 0.6, 0.15), color!(0x14_B8_A6))
             } else {
                 (color!(0xEC_FC_FF), color!(0x0F_76_6E))
             };
@@ -117,7 +137,7 @@ pub(super) fn view(state: &State) -> Element<'_, Message> {
     };
 
     let left = column![
-        text("原始 JSON").size(12.0).color(TEXT_MUTED),
+        text("原始 JSON").size(12.0).color(tokens.text_muted),
         text_editor(&state.json_editor)
             .placeholder("粘贴或输入 JSON…")
             .on_action(Message::JsonToolEdit)
@@ -126,20 +146,23 @@ pub(super) fn view(state: &State) -> Element<'_, Message> {
             .size(13.0)
             .font(mono)
             .padding(12.0)
-            .style(|_t, status| text_editor::Style {
-                background: Background::Color(BG_PANEL),
+            .style(move |_t, status| text_editor::Style {
+                background: Background::Color(tokens.bg_input),
                 border: Border {
                     color: if matches!(status, text_editor::Status::Focused { .. }) {
-                        MARK
+                        tokens.accent
                     } else {
-                        BORDER
+                        tokens.border_window
                     },
                     width: 1.0,
                     radius: border::radius(8.0),
                 },
-                placeholder: TEXT_MUTED,
-                value: TEXT,
-                selection: Color { a: 0.25, ..MARK },
+                placeholder: tokens.text_muted,
+                value: tokens.text_primary,
+                selection: Color {
+                    a: 0.25,
+                    ..tokens.accent
+                },
             }),
     ]
     .spacing(6.0)
@@ -149,32 +172,32 @@ pub(super) fn view(state: &State) -> Element<'_, Message> {
     let result_text = if state.json_result.is_empty() {
         text("结果会显示在这里")
             .size(12.0)
-            .color(TEXT_MUTED)
+            .color(tokens.text_muted)
             .width(Length::Fill)
     } else {
         text(state.json_result.clone())
             .size(13.0)
             .font(mono)
-            .color(TEXT)
+            .color(tokens.text_primary)
             .width(Length::Fill)
     };
 
     let right = column![
-        text("结果").size(12.0).color(TEXT_MUTED),
+        text("结果").size(12.0).color(tokens.text_muted),
         container(
             scrollable(result_text)
                 .direction(scrollable::Direction::Vertical(results_scrollbar()))
-                .style(results_scroll_style)
+                .style(results_scroll_style_tokens(tokens))
                 .height(Length::Fill)
                 .width(Length::Fill),
         )
         .width(Length::Fill)
         .height(Length::Fill)
         .padding(12.0)
-        .style(|_t| container::Style {
-            background: Some(Background::Color(BG_ELEVATED)),
+        .style(move |_t| container::Style {
+            background: Some(Background::Color(tokens.bg_elevated)),
             border: Border {
-                color: BORDER,
+                color: tokens.border_window,
                 width: 1.0,
                 radius: border::radius(8.0),
             },
@@ -197,7 +220,7 @@ pub(super) fn view(state: &State) -> Element<'_, Message> {
 
     let shell = column![
         title_bar,
-        hdivider(),
+        hdivider(tokens),
         container(body).width(Length::Fill).height(Length::Fill).padding(
             Padding {
                 top: 12.0,
@@ -213,10 +236,10 @@ pub(super) fn view(state: &State) -> Element<'_, Message> {
     container(shell)
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(|_t| container::Style {
-            background: Some(Background::Color(BG_PANEL)),
+        .style(move |_t| container::Style {
+            background: Some(Background::Color(tokens.bg_window)),
             border: Border {
-                color: WINDOW_BORDER,
+                color: tokens.border_window,
                 width: 1.0,
                 radius: border::radius(0.0),
             },
@@ -225,35 +248,46 @@ pub(super) fn view(state: &State) -> Element<'_, Message> {
         .into()
 }
 
-fn hdivider() -> Element<'static, Message> {
+fn hdivider(tokens: ThemeTokens) -> Element<'static, Message> {
     container(Space::new().height(1.0))
         .width(Length::Fill)
         .height(1.0)
-        .style(|_t| container::Style {
-            background: Some(Background::Color(BORDER)),
+        .style(move |_t| container::Style {
+            background: Some(Background::Color(tokens.border_window)),
             ..container::Style::default()
         })
         .into()
 }
 
-fn tool_btn(label: &'static str, msg: Message, primary: bool) -> Element<'static, Message> {
+fn tool_btn(
+    label: &'static str,
+    msg: Message,
+    primary: bool,
+    tokens: ThemeTokens,
+) -> Element<'static, Message> {
     let text_color = if primary {
         color!(0xFF_FF_FF)
     } else {
-        TEXT
+        tokens.text_primary
     };
     button(text(label).size(12.5).color(text_color))
         .padding([7.0, 12.0])
         .on_press(msg)
-        .style(move |_t, _s| button::Style {
+        .style(move |_t, status| button::Style {
             background: Some(Background::Color(if primary {
-                MARK
+                tokens.accent
+            } else if status == button::Status::Hovered {
+                tokens.active_bg
             } else {
-                BG_ELEVATED
+                tokens.bg_elevated
             })),
             text_color,
             border: Border {
-                color: if primary { MARK } else { BORDER },
+                color: if primary {
+                    tokens.accent
+                } else {
+                    tokens.border_window
+                },
                 width: 1.0,
                 radius: border::radius(8.0),
             },

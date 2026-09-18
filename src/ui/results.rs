@@ -114,11 +114,7 @@ impl State {
                     .get()
                     .expect("event tx")
                     .unbounded_send(Message::AppSearchReady(
-                        generation,
-                        query,
-                        hits,
-                        elapsed_us,
-                        index_gen,
+                        generation, query, hits, elapsed_us, index_gen,
                     ));
             }),
         };
@@ -151,7 +147,10 @@ impl State {
         let mut hits = self.merge_aux_hits(hits, &q_norm);
         // Command 静态入口：不启动插件进程；按分数插入，不无条件顶掉本机精确命中
         {
-            let reg = self.plugin_registry.lock().unwrap_or_else(|e| e.into_inner());
+            let reg = self
+                .plugin_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let commands = plugin::command_hits(&reg, self.query.trim());
             for cmd in commands.into_iter() {
                 if hits.iter().any(|h| h.item.id == cmd.item.id) {
@@ -169,6 +168,7 @@ impl State {
         }
         self.results = hits;
         self.selected = 0;
+        self.navigation_mode = NavigationMode::Input;
         self.hover_suppressed = false;
         // 结果落地才恢复「可启动」资格：Enter / Alt+数字 / 点击共用这一个判定。
         self.results_stale = false;
@@ -278,7 +278,10 @@ impl State {
 
         // Provider Mode：显式 Trigger，整查询交给插件
         let activation = {
-            let reg = self.plugin_registry.lock().unwrap_or_else(|e| e.into_inner());
+            let reg = self
+                .plugin_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             plugin::route_query(&self.query, &reg)
         };
         if let Some(act) = activation {
@@ -288,71 +291,83 @@ impl State {
                     self.exit_provider_mode();
                 }
             } else {
-            self.results_stale = true;
-            self.plugin_panel = None;
-            self.plugin_flash = None;
-            self.provider_mode = Some(act.clone());
-            self.plugin_query_generation = self.plugin_query_generation.wrapping_add(1);
-            let gen = self.plugin_query_generation;
-            let registry = self.plugin_registry.clone();
-            let host = self.plugin_host.clone();
-            let act_for_thread = act.clone();
-            std::thread::spawn(move || {
-                let (payload, host_calls) = {
-                    let reg = registry.lock().unwrap_or_else(|e| e.into_inner());
-                    let mut host = host.lock().unwrap_or_else(|e| e.into_inner());
-                    host.set_generation(gen);
-                    host.idle_sweep();
-                    let payload = match host.query(&reg, &act_for_thread, gen) {
-                        Ok(plugin::QueryOutcome::List { plugin_id, provider_id, items, .. }) => {
-                            let mapped = items
-                                .iter()
-                                .map(|it| plugin::host::list_item_to_search_result(
-                                    &plugin_id,
-                                    &provider_id,
-                                    it,
-                                ))
-                                .collect();
-                            PluginQueryPayload::List {
+                self.results_stale = true;
+                self.plugin_panel = None;
+                self.plugin_flash = None;
+                self.provider_mode = Some(act.clone());
+                self.plugin_query_generation = self.plugin_query_generation.wrapping_add(1);
+                let gen = self.plugin_query_generation;
+                let registry = self.plugin_registry.clone();
+                let host = self.plugin_host.clone();
+                let act_for_thread = act.clone();
+                std::thread::spawn(move || {
+                    let (payload, host_calls) = {
+                        let reg = registry.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut host = host.lock().unwrap_or_else(|e| e.into_inner());
+                        host.set_generation(gen);
+                        host.idle_sweep();
+                        let payload = match host.query(&reg, &act_for_thread, gen) {
+                            Ok(plugin::QueryOutcome::List {
                                 plugin_id,
                                 provider_id,
-                                items: mapped,
+                                items,
+                                ..
+                            }) => {
+                                let mapped = items
+                                    .iter()
+                                    .map(|it| {
+                                        plugin::host::list_item_to_search_result(
+                                            &plugin_id,
+                                            &provider_id,
+                                            it,
+                                        )
+                                    })
+                                    .collect();
+                                PluginQueryPayload::List {
+                                    plugin_id,
+                                    provider_id,
+                                    items: mapped,
+                                }
                             }
-                        }
-                        Ok(plugin::QueryOutcome::Panel { plugin_id, provider_id, panel, .. }) => {
-                            PluginQueryPayload::Panel {
+                            Ok(plugin::QueryOutcome::Panel {
                                 plugin_id,
                                 provider_id,
                                 panel,
-                            }
-                        }
-                        Ok(plugin::QueryOutcome::Empty { plugin_id, provider_id, .. }) => {
-                            PluginQueryPayload::Empty {
+                                ..
+                            }) => PluginQueryPayload::Panel {
                                 plugin_id,
                                 provider_id,
+                                panel,
+                            },
+                            Ok(plugin::QueryOutcome::Empty {
+                                plugin_id,
+                                provider_id,
+                                ..
+                            }) => PluginQueryPayload::Empty {
+                                plugin_id,
+                                provider_id,
+                            },
+                            // 过期代际不是插件故障：静默丢弃，避免 UI 误标「崩溃」。
+                            Err(plugin::HostError::StaleGeneration { .. }) => {
+                                PluginQueryPayload::Empty {
+                                    plugin_id: act_for_thread.plugin_id.clone(),
+                                    provider_id: act_for_thread.provider_id.clone(),
+                                }
                             }
-                        }
-                        // 过期代际不是插件故障：静默丢弃，避免 UI 误标「崩溃」。
-                        Err(plugin::HostError::StaleGeneration { .. }) => {
-                            PluginQueryPayload::Empty {
-                                plugin_id: act_for_thread.plugin_id.clone(),
-                                provider_id: act_for_thread.provider_id.clone(),
-                            }
-                        }
-                        Err(e) => PluginQueryPayload::Error(e.to_string()),
+                            Err(e) => PluginQueryPayload::Error(e.to_string()),
+                        };
+                        let host_calls = host.drain_host_calls();
+                        (payload, host_calls)
                     };
-                    let host_calls = host.drain_host_calls();
-                    (payload, host_calls)
-                };
-                if let Some(tx) = EVENT_TX.get() {
-                    for (pid, call) in host_calls {
-                        let _ = tx.unbounded_send(Message::PluginHostCall(pid, call));
+                    if let Some(tx) = EVENT_TX.get() {
+                        for (pid, call) in host_calls {
+                            let _ = tx.unbounded_send(Message::PluginHostCall(pid, call));
+                        }
+                        let _ = tx.unbounded_send(Message::PluginQueryReady(gen, payload));
                     }
-                    let _ = tx.unbounded_send(Message::PluginQueryReady(gen, payload));
-                }
-            });
-            self.qlog(|| format!("provider mode enter {:?}", act.provider_id));
-            return;
+                });
+                self.qlog(|| format!("provider mode enter {:?}", act.provider_id));
+                return;
             }
         }
 
@@ -369,7 +384,7 @@ impl State {
 
         self.app_search_worker.cancel_current();
 
-        let (recent, pinned) = self
+        let (recent_ids, pinned_ids) = self
             .history
             .as_ref()
             .map(|h| {
@@ -379,15 +394,63 @@ impl State {
                 )
             })
             .unwrap_or_default();
-        let default_list = {
+
+        let index_apps = {
             let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
-            search::order_by_recent(&index.apps, &recent, &pinned, search::MAX_RESULTS)
+            index.apps.clone()
         };
-        self.results = default_list;
+
+        // 1. 最近使用应用（真实启动历史，排除已固定的）
+        let mut recent_items: Vec<SearchResult> = Vec::new();
+        for id in &recent_ids {
+            if pinned_ids.contains(id) {
+                continue;
+            }
+            if recent_items.iter().any(|h| &h.item.id == id) {
+                continue;
+            }
+            if let Some(app) = index_apps.iter().find(|a| &a.id == id) {
+                recent_items.push(SearchResult::scored(app.clone(), 1, "recent"));
+            }
+            if recent_items.len() >= 16 {
+                break;
+            }
+        }
+
+        // 2. 补满至 16 项（排除已固定、已在列表中与隐藏项）
+        for app in &index_apps {
+            if recent_items.len() >= 16 {
+                break;
+            }
+            if pinned_ids.contains(&app.id) || recent_items.iter().any(|h| h.item.id == app.id) {
+                continue;
+            }
+            if crate::model::is_hidden_on_empty_fill(&app.source, &app.target) {
+                continue;
+            }
+            recent_items.push(SearchResult::scored(app.clone(), 0, "default"));
+        }
+
+        // 3. 已固定项目（最多 8 项）
+        let mut pinned_items: Vec<SearchResult> = Vec::new();
+        for id in &pinned_ids {
+            if let Some(app) = index_apps.iter().find(|a| &a.id == id) {
+                pinned_items.push(SearchResult::scored(app.clone(), 2, "pinned"));
+            }
+            if pinned_items.len() >= 8 {
+                break;
+            }
+        }
+
+        self.grid_recent_count = recent_items.len();
+        let mut results = recent_items;
+        results.extend(pinned_items);
+        self.results = results;
         if self.files_mode {
             prepend_dependency_status(&mut self.results, &self.file_results);
         }
         self.selected = 0;
+        self.navigation_mode = NavigationMode::Input;
         self.hover_suppressed = false;
         self.results_stale = false;
         let top = self
@@ -423,26 +486,51 @@ impl State {
             return;
         }
         match payload {
-            PluginQueryPayload::List { plugin_id, provider_id, items, .. } => {
-                self.qlog(|| format!("plugin list ready {plugin_id}/{provider_id} n={}", items.len()));
+            PluginQueryPayload::List {
+                plugin_id,
+                provider_id,
+                items,
+                ..
+            } => {
+                self.qlog(|| {
+                    format!(
+                        "plugin list ready {plugin_id}/{provider_id} n={}",
+                        items.len()
+                    )
+                });
                 let mut items = items;
                 // priority 仅影响当前 Provider 内部顺序，不影响 Core Ranking。
-                items.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.item.id.cmp(&b.item.id)));
+                items.sort_by(|a, b| {
+                    b.score
+                        .cmp(&a.score)
+                        .then_with(|| a.item.id.cmp(&b.item.id))
+                });
                 self.results = items;
                 self.selected = 0;
+                self.navigation_mode = NavigationMode::Input;
                 self.results_stale = false;
                 self.plugin_panel = None;
                 self.plugin_flash = None;
             }
-            PluginQueryPayload::Panel { plugin_id, provider_id, panel, .. } => {
+            PluginQueryPayload::Panel {
+                plugin_id,
+                provider_id,
+                panel,
+                ..
+            } => {
                 self.qlog(|| format!("plugin panel ready {plugin_id}/{provider_id}"));
                 self.plugin_panel = Some(panel);
                 self.results = Vec::new();
                 self.selected = 0;
+                self.navigation_mode = NavigationMode::Input;
                 self.results_stale = false;
                 self.plugin_flash = None;
             }
-            PluginQueryPayload::Empty { plugin_id, provider_id, .. } => {
+            PluginQueryPayload::Empty {
+                plugin_id,
+                provider_id,
+                ..
+            } => {
                 self.qlog(|| format!("plugin empty ready {plugin_id}/{provider_id}"));
                 self.results = Vec::new();
                 self.plugin_panel = None;
@@ -785,7 +873,9 @@ mod tests {
 
         let mut state = test_state("k");
         let epoch = state.base_hit_cache.epoch();
-        state.base_hit_cache.insert_if_epoch(epoch, 0, "k", Vec::new());
+        state
+            .base_hit_cache
+            .insert_if_epoch(epoch, 0, "k", Vec::new());
         assert!(!state.base_hit_cache.is_empty(), "先让缓存里有一条");
 
         let before = state.app_search_worker.latest_seq();

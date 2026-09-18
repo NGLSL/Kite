@@ -4,11 +4,11 @@ use iced::widget::{button, column, container, row, text, text_input};
 use iced::{border, color, Background, Border, Color, Element, Length};
 
 use super::super::font::name_font;
-use super::super::search_view::{BG_ELEVATED, BG_PANEL, BORDER, MARK, TEXT, TEXT_MUTED};
+use super::super::theme::ThemeTokens;
 use super::super::{Message, State};
 use super::widgets::{flow_card, flow_row, std_button};
 
-pub(super) fn index_card(state: &State) -> Element<'_, Message> {
+pub(super) fn index_card<'a>(state: &'a State, tokens: ThemeTokens) -> Element<'a, Message> {
     let n = state.index.lock().map(|g| g.apps.len()).unwrap_or(0);
     let health = crate::app::index_health::load();
     let now = crate::storage::now_ts().max(0) as u64;
@@ -18,46 +18,61 @@ pub(super) fn index_card(state: &State) -> Element<'_, Message> {
     } else {
         "正常"
     };
-    let summary = flow_card(vec![
-        flow_row(
-            "重新扫描应用",
-            "更新系统入口、软件注册信息和便携目录".to_string(),
-            std_button("重新扫描", Message::Rescan),
-        ),
-        flow_row(
-            "当前索引",
-            "快速扫描 + AppsFolder 后台补齐".to_string(),
-            text(format!("{n} 条")).size(13.0).color(TEXT).into(),
-        ),
-        flow_row(
-            "索引健康",
-            health_label,
-            text(health_status).size(13.0).color(TEXT_MUTED).into(),
-        ),
-    ]);
+    let summary = flow_card(
+        vec![
+            flow_row(
+                "重新扫描应用",
+                "更新系统入口、软件注册信息和便携目录".to_string(),
+                std_button("重新扫描", Message::Rescan, tokens),
+                tokens,
+            ),
+            flow_row(
+                "当前索引",
+                "快速扫描 + AppsFolder 后台补齐".to_string(),
+                text(format!("{n} 条"))
+                    .size(13.0)
+                    .color(tokens.text_primary)
+                    .into(),
+                tokens,
+            ),
+            flow_row(
+                "索引健康",
+                health_label,
+                text(health_status)
+                    .size(13.0)
+                    .color(tokens.text_muted)
+                    .into(),
+                tokens,
+            ),
+        ],
+        tokens,
+    );
 
     let input = text_input(r"D:\Portable Apps", &state.portable_dir_input)
         .on_input(Message::PortableDirInputChanged)
         .on_submit(Message::AddPortableDir)
         .padding([7.0, 10.0])
         .width(Length::Fill)
-        .style(|_t, _s| text_input::Style {
-            background: Background::Color(BG_PANEL),
+        .style(move |_t, _s| text_input::Style {
+            background: Background::Color(tokens.bg_input),
             border: Border {
-                color: BORDER,
+                color: tokens.border_window,
                 width: 1.0,
                 radius: border::radius(8.0),
             },
-            icon: TEXT_MUTED,
-            placeholder: TEXT_MUTED,
-            value: TEXT,
-            selection: Color { a: 0.25, ..MARK },
+            icon: tokens.text_muted,
+            placeholder: tokens.text_muted,
+            value: tokens.text_primary,
+            selection: Color {
+                a: 0.25,
+                ..tokens.accent
+            },
         });
     let add = button(text("添加").size(13.0).color(color!(0xFF_FF_FF)))
         .padding([7.0, 12.0])
         .on_press(Message::AddPortableDir)
-        .style(|_t, _s| button::Style {
-            background: Some(Background::Color(MARK)),
+        .style(move |_t, _s| button::Style {
+            background: Some(Background::Color(tokens.accent)),
             text_color: color!(0xFF_FF_FF),
             border: Border::default().rounded(8.0),
             ..button::Style::default()
@@ -65,11 +80,11 @@ pub(super) fn index_card(state: &State) -> Element<'_, Message> {
     let mut directories = column![
         text("便携软件目录")
             .size(13.0)
-            .color(TEXT)
+            .color(tokens.text_primary)
             .font(name_font()),
         text("加入后扫描目录内的应用入口；修改会自动重建索引。")
             .size(12.0)
-            .color(TEXT_MUTED),
+            .color(tokens.text_muted),
         row![input, add].spacing(8.0),
     ]
     .spacing(8.0);
@@ -78,14 +93,22 @@ pub(super) fn index_card(state: &State) -> Element<'_, Message> {
             row![
                 text(path.clone())
                     .size(12.0)
-                    .color(TEXT)
+                    .color(tokens.text_primary)
                     .width(Length::Fill),
-                button(text("移除").size(12.0).color(TEXT_MUTED))
+                button(text("移除").size(12.0).color(tokens.text_muted))
                     .padding([4.0, 7.0])
                     .on_press(Message::RemovePortableDir(index))
-                    .style(|_t, _s| button::Style {
-                        background: None,
-                        text_color: TEXT_MUTED,
+                    .style(move |_t, status| button::Style {
+                        background: if status == button::Status::Hovered {
+                            Some(Background::Color(tokens.active_bg))
+                        } else {
+                            None
+                        },
+                        text_color: if status == button::Status::Hovered {
+                            tokens.text_primary
+                        } else {
+                            tokens.text_muted
+                        },
                         border: Border::default().rounded(6.0),
                         ..button::Style::default()
                     }),
@@ -97,10 +120,10 @@ pub(super) fn index_card(state: &State) -> Element<'_, Message> {
     let directory_card = container(directories)
         .width(Length::Fill)
         .padding([12.0, 14.0])
-        .style(|_t| container::Style {
-            background: Some(Background::Color(BG_ELEVATED)),
+        .style(move |_t| container::Style {
+            background: Some(Background::Color(tokens.bg_elevated)),
             border: Border {
-                color: BORDER,
+                color: tokens.border_window,
                 width: 1.0,
                 radius: border::radius(10.0),
             },

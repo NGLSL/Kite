@@ -12,5 +12,6 @@ pub mod resources;
 pub mod search_engine;
 pub mod singleton;
 pub mod sound;
+pub mod theme;
 pub mod update;
 pub mod window_place;

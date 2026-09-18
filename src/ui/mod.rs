@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use iced::keyboard::key::Physical;
 use iced::keyboard::{key::Named, Key, Modifiers};
-use iced::widget::operation::scroll_to;
+use iced::widget::operation::{focus, scroll_to};
 use iced::widget::scrollable::AbsoluteOffset;
 use iced::widget::Id as WidgetId;
 use iced::window::settings::PlatformSpecific;
@@ -36,12 +36,14 @@ mod search_view;
 mod settings;
 #[cfg(test)]
 mod test_support;
+pub mod theme;
 mod tray;
 
 use actions::*;
 use interaction::update;
 use keyboard::{alt_digit_from_query_change, alt_digit_index};
 pub use runtime::run;
+pub use theme::{ThemeMode, ThemeTokens};
 
 const WINDOW_W: f32 = 640.0;
 const WINDOW_H: f32 = 420.0;
@@ -68,6 +70,14 @@ enum Section {
     Index,
     Plugins,
     About,
+}
+
+/// 键盘交互的逻辑焦点。实际的 Iced widget focus 始终留在搜索框，
+/// 这里仅决定方向键是在编辑 Query 还是漫游结果列表。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NavigationMode {
+    Input,
+    Results,
 }
 
 impl Section {
@@ -115,6 +125,10 @@ impl State {
         if self.query_log {
             plog(&message());
         }
+    }
+
+    pub(crate) fn theme_tokens(&self) -> ThemeTokens {
+        self.theme_mode.tokens()
     }
 }
 
@@ -169,6 +183,7 @@ enum Message {
     SetAutostart(bool),
     SetHideOnBlur(bool),
     SetHistoryRecording(bool),
+    SetThemeMode(ThemeMode),
     /// 开关查询级诊断日志（结果就绪／过期）。
     SetQueryLog(bool),
     /// 搜索引擎预设：auto / baidu / bing / google / duckduckgo / custom。
@@ -318,6 +333,7 @@ struct State {
     query: String,
     results: Vec<SearchResult>,
     selected: usize,
+    navigation_mode: NavigationMode,
     hidden: bool,
     ime_composing: bool,
     /// 本地跟踪的 Alt 按下态（Windows SYSKEY 下 modifiers.alt() 可能不可靠）。
@@ -354,6 +370,9 @@ struct State {
     hide_on_blur: bool,
     autostart: bool,
     history_recording: bool,
+    pub theme_mode: ThemeMode,
+    /// 空 Query 网格仪表盘中“最近使用”条目数（用于精确分区与键盘漫游）
+    pub(crate) grid_recent_count: usize,
     /// 输入与查询级诊断日志开关（Alt/IME 按键日志 + 结果就绪／过期）。保存在内存里，
     /// 避免按键路径去读 SQLite。只闸住按键频率的日志；关闭后按键路径零同步写入。
     query_log: bool,

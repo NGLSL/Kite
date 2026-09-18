@@ -288,6 +288,21 @@ impl PanelData {
         let act = self.actions.iter().find(|a| a.default)?;
         act.action.as_ref().and_then(|dto| dto.to_model(None))
     }
+
+    /// 提取主值（优先 default copy_text，其次首个 Value 块），便于快捷复制
+    pub fn primary_value(&self) -> Option<String> {
+        self.default_native_action()
+            .and_then(|a| match a {
+                NativeAction::CopyText(t) => Some(t),
+                _ => None,
+            })
+            .or_else(|| {
+                self.blocks.iter().find_map(|b| match b {
+                    PanelBlock::Value { value, .. } => Some(value.clone()),
+                    _ => None,
+                })
+            })
+    }
 }
 
 #[cfg(test)]

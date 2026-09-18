@@ -45,8 +45,12 @@ fn poc_title(state: &State, window: window::Id) -> String {
     }
 }
 
-fn poc_theme(_state: &State, _window: window::Id) -> Option<Theme> {
-    Some(Theme::Light)
+fn poc_theme(state: &State, _window: window::Id) -> Option<Theme> {
+    if state.theme_mode.is_dark() {
+        Some(Theme::Dark)
+    } else {
+        Some(Theme::Light)
+    }
 }
 
 /// 定位 resources（含 Everything64.dll / open.wav）。
@@ -90,9 +94,7 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
     let mut index_ready = false;
     if let Some(loaded) = app::snapshot::load() {
         let n = loaded.apps.len();
-        *index
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = loaded;
+        *index.lock().unwrap_or_else(|error| error.into_inner()) = loaded;
         // 已有可搜索 RetrievalIndex：语义上应视为 ready，不必等 FullIndexReady。
         index_ready = true;
         plog(&format!("boot restored last-good snapshot n={n}"));
@@ -258,6 +260,7 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         query: String::new(),
         results: Vec::new(),
         selected: 0,
+        navigation_mode: NavigationMode::Input,
         hidden: true,
         ime_composing: false,
         alt_down: false,
@@ -281,6 +284,8 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         hide_on_blur: true,
         autostart: false,
         history_recording: true,
+        theme_mode: ThemeMode::parse(&saved_settings.theme_mode),
+        grid_recent_count: 0,
         query_log: true,
         search_engine: "auto".into(),
         search_engine_custom: String::new(),

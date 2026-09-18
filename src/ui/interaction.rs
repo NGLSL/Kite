@@ -119,21 +119,31 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 }
             }
             state.query = q;
+            // 任何新输入都回到编辑模式；方向键重新从输入框进入结果导航。
+            state.navigation_mode = NavigationMode::Input;
             // `json` / `json {...}`：非内联工具，只进二次确认，不直接开窗。
             if let Some(task) = try_open_json_tool_from_query(state) {
                 return task;
             }
             // 查询不再命中 json 时，丢掉搜索态待确认。
-            if state.pending_tool_confirm.as_ref().is_some_and(|p| !p.from_settings) {
+            if state
+                .pending_tool_confirm
+                .as_ref()
+                .is_some_and(|p| !p.from_settings)
+            {
                 state.pending_tool_confirm = None;
             }
             state.request_file_search();
             state.refresh_results();
             state.hover_suppressed = false;
-            sync_scroll(state)
+            Task::batch([
+                sync_scroll(state),
+                iced::widget::operation::focus(state.input_id.clone()),
+            ])
         }
         Message::ClearQuery => {
             state.query.clear();
+            state.navigation_mode = NavigationMode::Input;
             state.request_file_search();
             state.refresh_results();
             // × 按钮会抢走键盘焦点，清空后还给输入框
@@ -151,15 +161,18 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             if state.selected != i {
                 state.selected = i;
             }
+            state.navigation_mode = NavigationMode::Results;
             Task::none()
         }
         Message::LaunchIndex(i) => {
             state.menu = None;
             state.selected = i;
+            state.navigation_mode = NavigationMode::Results;
             launch_selected(state)
         }
         Message::ToggleFiles => {
             state.files_mode = !state.files_mode;
+            state.navigation_mode = NavigationMode::Input;
             state.qlog(|| format!("files toggle -> {}", state.files_mode));
             state.request_file_search();
             state.refresh_results();
@@ -377,6 +390,13 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             flash(state, "设置已保存")
         }
+        Message::SetThemeMode(mode) => {
+            state.theme_mode = mode;
+            if let Some(db) = &mut state.history {
+                let _ = db.save_theme_mode(mode.as_str());
+            }
+            flash(state, "外观模式已切换")
+        }
         Message::SetSearchEngine(id) => {
             state.search_engine = id.clone();
             if let Some(preset) = system::search_engine::preset_by_id(&id) {
@@ -392,8 +412,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                     }
                     "custom" => {
                         if system::search_engine::is_valid_template(&state.search_engine_custom) {
-                            let _ = db
-                                .set_search_url_template(state.search_engine_custom.trim());
+                            let _ = db.set_search_url_template(state.search_engine_custom.trim());
                         }
                     }
                     _ => {
@@ -645,7 +664,10 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::PluginSetEnabled(id, enabled) => {
             {
-                let mut reg = state.plugin_registry.lock().unwrap_or_else(|e| e.into_inner());
+                let mut reg = state
+                    .plugin_registry
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 reg.set_enabled(&id, enabled);
             }
             if !enabled {
@@ -654,11 +676,21 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             state.qlog(|| format!("plugin set_enabled id={id} enabled={enabled}"));
             state.refresh_results();
-            flash(state, if enabled { "插件已启用" } else { "插件已禁用" })
+            flash(
+                state,
+                if enabled {
+                    "插件已启用"
+                } else {
+                    "插件已禁用"
+                },
+            )
         }
         Message::PluginReload(id) => {
             {
-                let mut reg = state.plugin_registry.lock().unwrap_or_else(|e| e.into_inner());
+                let mut reg = state
+                    .plugin_registry
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 let result = reg.reload_from_disk(&id);
                 state.qlog(|| format!("plugin reload id={id} err={result:?}"));
             }
@@ -670,7 +702,10 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::PluginOpenDir(id) => {
             let root = {
-                let reg = state.plugin_registry.lock().unwrap_or_else(|e| e.into_inner());
+                let reg = state
+                    .plugin_registry
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 reg.get(&id).map(|p| p.root.clone())
             };
             if let Some(root) = root {
@@ -698,7 +733,10 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 host.reload(&id);
             }
             {
-                let mut reg = state.plugin_registry.lock().unwrap_or_else(|e| e.into_inner());
+                let mut reg = state
+                    .plugin_registry
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 let r = reg.uninstall(&id, &plugins_dir);
                 state.qlog(|| format!("plugin uninstall id={id} err={r:?}"));
             }
@@ -734,7 +772,10 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::PluginRescanPlugins => {
             let plugins_dir = plugin::default_plugins_dir(&state.data_dir);
             {
-                let mut reg = state.plugin_registry.lock().unwrap_or_else(|e| e.into_inner());
+                let mut reg = state
+                    .plugin_registry
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 reg.scan_dir(&plugins_dir);
             }
             state.refresh_results();
@@ -855,7 +896,10 @@ fn apply_plugin_import_results(
                     host.reload(&out.plugin_id);
                 }
                 {
-                    let mut reg = state.plugin_registry.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut reg = state
+                        .plugin_registry
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
                     match plugin::apply_import_to_registry(&mut reg, &out.dest) {
                         Ok(id) => {
                             state.qlog(|| {
@@ -886,15 +930,15 @@ fn apply_plugin_import_results(
     let _ = &plugins_dir;
     state.refresh_results();
     if ok == 0 {
-        let msg = errs
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "导入失败".into());
+        let msg = errs.first().cloned().unwrap_or_else(|| "导入失败".into());
         flash(state, &msg)
     } else if errs.is_empty() {
         flash(
             state,
-            &format!("已导入 {ok} 个插件{}", if replaced > 0 { "（含覆盖）" } else { "" }),
+            &format!(
+                "已导入 {ok} 个插件{}",
+                if replaced > 0 { "（含覆盖）" } else { "" }
+            ),
         )
     } else {
         flash(state, &format!("导入 {ok} 个成功，{} 个失败", errs.len()))
@@ -1223,10 +1267,7 @@ mod plugin_ui_tests {
         // 过期代际不覆盖
         let _ = update(
             &mut state,
-            Message::PluginQueryReady(
-                2,
-                PluginQueryPayload::Error("stale".into()),
-            ),
+            Message::PluginQueryReady(2, PluginQueryPayload::Error("stale".into())),
         );
         assert_eq!(state.results.len(), 1);
         assert!(state.plugin_flash.is_none());
@@ -1268,7 +1309,9 @@ mod plugin_ui_tests {
                         providers: vec![PluginProvider {
                             id: "json".into(),
                             response_mode: "panel".into(),
-                            triggers: vec![Trigger::Keyword { value: "json".into() }],
+                            triggers: vec![Trigger::Keyword {
+                                value: "json".into(),
+                            }],
                         }],
                     },
                 },
@@ -1290,13 +1333,13 @@ mod plugin_ui_tests {
             "搜索 json 不得直接打开工具窗，须二次确认"
         );
         assert!(state.provider_mode.is_none(), "不得进入 Provider");
-        assert!(
-            state.pending_tool_confirm.is_some(),
-            "应进入二次确认"
-        );
+        assert!(state.pending_tool_confirm.is_some(), "应进入二次确认");
         assert!(state.results_stale == false);
         assert_eq!(state.results.len(), 1, "搜索 json 只展示 JSON 工具一条");
-        assert_eq!(state.results[0].item.id, super::json_tool::CONFIRM_RESULT_ID);
+        assert_eq!(
+            state.results[0].item.id,
+            super::json_tool::CONFIRM_RESULT_ID
+        );
         assert_eq!(state.results[0].item.name, "JSON 工具");
         // Enter = 打开
         let _ = launch_selected(&mut state);
@@ -1328,17 +1371,14 @@ mod plugin_ui_tests {
             let mut reg = state.plugin_registry.lock().unwrap();
             reg.insert_loaded(devtools_plugin());
         }
-        let _ = update(
-            &mut state,
-            Message::QueryChanged(r#"json {"a":1}"#.into()),
-        );
-        assert!(
-            !state.plugin_tool_open,
-            "带 payload 也不得直接开窗"
-        );
+        let _ = update(&mut state, Message::QueryChanged(r#"json {"a":1}"#.into()));
+        assert!(!state.plugin_tool_open, "带 payload 也不得直接开窗");
         assert!(state.pending_tool_confirm.is_some());
         assert_eq!(
-            state.pending_tool_confirm.as_ref().and_then(|p| p.payload.as_deref()),
+            state
+                .pending_tool_confirm
+                .as_ref()
+                .and_then(|p| p.payload.as_deref()),
             Some(r#"{"a":1}"#)
         );
         let _ = update(&mut state, Message::PluginConfirmJsonTool);
@@ -1357,7 +1397,10 @@ mod plugin_ui_tests {
             !state.plugin_tool_open && state.json_tool_window.is_none(),
             "设置页打开面板也须二次确认"
         );
-        assert!(state.pending_tool_confirm.as_ref().is_some_and(|p| p.from_settings));
+        assert!(state
+            .pending_tool_confirm
+            .as_ref()
+            .is_some_and(|p| p.from_settings));
         assert!(state.settings_open, "确认态不改主窗设置页");
 
         let _ = update(&mut state, Message::PluginConfirmJsonTool);
@@ -1381,10 +1424,7 @@ mod plugin_ui_tests {
         let _ = update(&mut state, Message::PluginCloseJsonTool);
         assert!(!state.plugin_tool_open);
         assert!(state.json_tool_window.is_none());
-        assert!(
-            state.settings_open,
-            "关闭工具窗后主窗设置页仍应保持打开"
-        );
+        assert!(state.settings_open, "关闭工具窗后主窗设置页仍应保持打开");
     }
 
     #[test]
@@ -1424,13 +1464,19 @@ mod plugin_ui_tests {
         let _ = update(&mut state, Message::PluginOpenJsonTool);
         let _ = update(&mut state, Message::PluginConfirmJsonTool);
         assert!(state.plugin_tool_open);
-        let _ = update(&mut state, Message::PluginToggleDocs("com.kite.calculator".into()));
+        let _ = update(
+            &mut state,
+            Message::PluginToggleDocs("com.kite.calculator".into()),
+        );
         assert!(
             state.plugin_tool_open && state.json_tool_window.is_some(),
             "打开说明不得关闭独立工具窗"
         );
         assert!(state.settings_open);
-        assert_eq!(state.plugin_docs_open.as_deref(), Some("com.kite.calculator"));
+        assert_eq!(
+            state.plugin_docs_open.as_deref(),
+            Some("com.kite.calculator")
+        );
     }
 
     #[test]
@@ -1457,7 +1503,10 @@ mod plugin_ui_tests {
         }
         let _ = update(&mut state, Message::QueryChanged("=1+2".into()));
         assert!(
-            state.provider_mode.as_ref().is_some_and(|a| a.provider_id == "calculate"),
+            state
+                .provider_mode
+                .as_ref()
+                .is_some_and(|a| a.provider_id == "calculate"),
             "内联插件直接进 Provider，无需二次确认"
         );
         assert!(state.pending_tool_confirm.is_none());
@@ -1548,10 +1597,7 @@ mod context_menu_tests {
         assert!(state.menu.is_some(), "first right-click should open menu");
 
         let _ = update(&mut state, Message::ContextMenu(0));
-        assert!(
-            state.menu.is_none(),
-            "second right-click should close menu"
-        );
+        assert!(state.menu.is_none(), "second right-click should close menu");
     }
 
     #[test]
@@ -1563,7 +1609,10 @@ mod context_menu_tests {
         assert!(state.menu.is_some());
 
         // 右键不应走「点菜单外关闭」，否则 ContextMenu 会立刻重新打开
-        let _ = update(&mut state, Message::MousePressed(iced::mouse::Button::Right));
+        let _ = update(
+            &mut state,
+            Message::MousePressed(iced::mouse::Button::Right),
+        );
         assert!(
             state.menu.is_some(),
             "right-press must not dismiss menu before ContextMenu toggle"

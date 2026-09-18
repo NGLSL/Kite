@@ -12,18 +12,49 @@ pub(super) fn keyboard_events(state: &State) -> Subscription<Message> {
     // 正常运行时只订阅 Kite 自己使用的按键；否则外部截图、录屏和辅助工具的
     // 单键快捷键会先进入 Iced 窗口。录制快捷键时才临时接收完整按键流。
     if state.hotkey_recording {
-        iced::event::listen().filter_map(keyboard_message_recording)
+        iced::event::listen_with(keyboard_message_recording)
     } else {
-        iced::event::listen().filter_map(keyboard_message_app)
+        iced::event::listen_with(keyboard_message_app)
     }
 }
 
-fn keyboard_message_recording(event: iced::event::Event) -> Option<Message> {
-    keyboard_message(event, true)
+fn keyboard_message_recording(
+    event: iced::event::Event,
+    status: iced_core::event::Status,
+    _window: iced::window::Id,
+) -> Option<Message> {
+    keyboard_message_with_status(event, true, status)
 }
 
-fn keyboard_message_app(event: iced::event::Event) -> Option<Message> {
-    keyboard_message(event, false)
+fn keyboard_message_app(
+    event: iced::event::Event,
+    status: iced_core::event::Status,
+    _window: iced::window::Id,
+) -> Option<Message> {
+    keyboard_message_with_status(event, false, status)
+}
+
+fn keyboard_message_with_status(
+    event: iced::event::Event,
+    recording: bool,
+    status: iced_core::event::Status,
+) -> Option<Message> {
+    if should_route_event(&event, status) {
+        keyboard_message(event, recording)
+    } else {
+        None
+    }
+}
+
+fn should_route_event(event: &iced::event::Event, status: iced_core::event::Status) -> bool {
+    // `iced::event::listen()` only exposes events that no widget captured.
+    // Horizontal arrows are captured by text_input for caret movement, but
+    // the launcher must also receive them so its navigation mode can decide
+    // between caret movement and result-grid movement.
+    matches!(
+        event,
+        iced::event::Event::Keyboard(_) | iced::event::Event::InputMethod(_)
+    ) || status == iced_core::event::Status::Ignored
 }
 
 fn keyboard_message(event: iced::event::Event, recording: bool) -> Option<Message> {
@@ -63,7 +94,14 @@ fn keyboard_message(event: iced::event::Event, recording: bool) -> Option<Messag
 fn app_key(key: &Key, physical: Physical, mods: Modifiers) -> bool {
     match key {
         Key::Named(
-            Named::Escape | Named::ArrowUp | Named::ArrowDown | Named::Enter | Named::Alt,
+            Named::Escape
+            | Named::ArrowUp
+            | Named::ArrowDown
+            | Named::ArrowLeft
+            | Named::ArrowRight
+            | Named::Enter
+            | Named::Alt
+            | Named::Backspace,
         ) => true,
         Key::Character(c) => {
             // 字符路径：带 Alt 的数字，或任意字符（后续再判，避免 SYSKEY 下 modifiers 丢 Alt）
@@ -261,5 +299,27 @@ mod alt_digit_tests {
             alt_digit_index(&key, Physical::Code(Code::Digit1), mods, false),
             None
         );
+    }
+
+    #[test]
+    fn captured_keyboard_events_are_routed_to_app() {
+        let event = iced::event::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: Key::Named(Named::ArrowLeft),
+            modified_key: Key::Named(Named::ArrowLeft),
+            physical_key: Physical::Code(Code::ArrowLeft),
+            location: iced::keyboard::Location::Standard,
+            modifiers: Modifiers::empty(),
+            text: None,
+            repeat: false,
+        });
+
+        assert!(
+            should_route_event(&event, iced_core::event::Status::Captured),
+            "text_input captures ArrowLeft/ArrowRight, but the launcher still needs the event to apply its navigation-mode rule"
+        );
+        assert!(matches!(
+            keyboard_message_with_status(event, false, iced_core::event::Status::Captured,),
+            Some(Message::KeyPressed(Key::Named(Named::ArrowLeft), ..))
+        ));
     }
 }

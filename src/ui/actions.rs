@@ -53,8 +53,9 @@ pub(super) fn menu_action(state: &mut State, item: AppItem, action: MenuAction) 
     Task::none()
 }
 
-/// 键盘：↑↓ 选择、Enter 启动（组合态禁止，见 ime_composing）、Esc 关菜单/隐藏、
-/// Alt+1..9 启动对应行（对齐前端 index<9 提示）；热键录制态优先捕获。
+/// 键盘：输入模式下 ↑↓ 进入结果导航，结果导航模式下 ↑↓←→ 选择，
+/// Enter 启动（组合态禁止，见 ime_composing），Esc 返回输入框或隐藏窗口；
+/// Alt+1..9 启动对应项；热键录制态优先捕获。
 pub(super) fn on_key(
     state: &mut State,
     key: Key,
@@ -66,6 +67,14 @@ pub(super) fn on_key(
     }
     if state.hotkey_recording {
         return hotkey_record_key(state, key, mods);
+    }
+    // Settings and the standalone JSON tool own their text/button keyboard
+    // interaction. Keep only Escape global so captured widget events cannot
+    // move or launch a result in the hidden/secondary UI.
+    if (state.settings_open || state.plugin_tool_open)
+        && !matches!(key, Key::Named(Named::Escape))
+    {
+        return Task::none();
     }
 
     // Alt+1..9：兼容 modifiers.alt() / 本地 alt_down / 逻辑字符 / 物理 Digit|Numpad
@@ -97,21 +106,101 @@ pub(super) fn on_key(
             if state.settings_open {
                 return close_settings(state);
             }
+            if state.navigation_mode == NavigationMode::Results {
+                state.navigation_mode = NavigationMode::Input;
+                state.hover_suppressed = false;
+                return focus(search_view::input_id());
+            }
             // Provider Mode：Esc 先退出到 Core Search，不直接隐藏启动器。
             if state.provider_mode.is_some() {
                 state.qlog(|| "provider mode exit (esc)".to_owned());
                 state.query.clear();
                 state.exit_provider_mode();
                 state.refresh_results();
-                return Task::none();
+                return focus(search_view::input_id());
             }
             state.qlog(|| "hide issued (esc)".to_owned());
             hide(state);
             hide_task(state)
         }
-        Key::Named(Named::ArrowUp) => move_selection(state, -1),
-        Key::Named(Named::ArrowDown) => move_selection(state, 1),
+        Key::Named(Named::ArrowUp) => {
+            if state.navigation_mode == NavigationMode::Input {
+                begin_result_navigation(state, true)
+            } else if state.query.trim().is_empty() {
+                move_selection(state, -8)
+            } else {
+                move_selection_query(state, &Named::ArrowUp)
+            }
+        }
+        Key::Named(Named::ArrowDown) => {
+            if state.navigation_mode == NavigationMode::Input {
+                begin_result_navigation(state, false)
+            } else if state.query.trim().is_empty() {
+                move_selection(state, 8)
+            } else {
+                move_selection_query(state, &Named::ArrowDown)
+            }
+        }
+        Key::Named(Named::ArrowLeft) => {
+            if state.navigation_mode != NavigationMode::Results {
+                Task::none()
+            } else if state.query.trim().is_empty() {
+                move_selection(state, -1)
+            } else {
+                move_selection_query(state, &Named::ArrowLeft)
+            }
+        }
+        Key::Named(Named::ArrowRight) => {
+            if state.navigation_mode != NavigationMode::Results {
+                Task::none()
+            } else if state.query.trim().is_empty() {
+                move_selection(state, 1)
+            } else {
+                move_selection_query(state, &Named::ArrowRight)
+            }
+        }
+        Key::Named(Named::Backspace) if !state.ime_composing => {
+            if state.query.is_empty() {
+                if state.provider_mode.is_some() {
+                    state.exit_provider_mode();
+                    state.refresh_results();
+                    return focus(search_view::input_id());
+                } else if state.files_mode {
+                    state.files_mode = false;
+                    state.request_file_search();
+                    state.refresh_results();
+                    return Task::batch([sync_scroll(state), focus(search_view::input_id())]);
+                }
+            }
+            Task::none()
+        }
         Key::Named(Named::Enter) if !state.ime_composing => {
+            if mods.control() && !mods.alt() && !mods.shift() {
+                if state.provider_mode.is_some() {
+                    if let Some(panel) = state.plugin_panel.clone() {
+                        if let Some(text) = panel.primary_value() {
+                            return Task::batch([
+                                iced::clipboard::write(text),
+                                flash(state, "已复制并保留输入"),
+                            ]);
+                        }
+                    }
+                    return flash(state, "暂无可复制的计算结果");
+                }
+                if let Some(res) = state.results.get(state.selected) {
+                    let target = &res.item.target;
+                    let is_fs = std::path::Path::new(target).is_file()
+                        || std::path::Path::new(target).is_dir();
+                    if is_fs {
+                        let _ = app::actions::open_containing_folder(target);
+                        hide(state);
+                        return hide_task(state);
+                    } else {
+                        return flash(state, "当前项目不是本地文件或目录");
+                    }
+                }
+                return Task::none();
+            }
             if web_search_hotkey_pressed(state, mods) {
                 launch_browser_search(state)
             } else {
@@ -136,16 +225,10 @@ pub(super) fn on_key(
 fn web_search_hotkey_pressed(state: &State, mods: Modifiers) -> bool {
     let spec = system::hotkey::normalize_web_search_hotkey(&state.web_search_hotkey);
     match spec {
-        "Ctrl+Enter" => {
-            mods.control() && !mods.alt() && !mods.shift() && !mods.logo()
-        }
+        "Ctrl+Enter" => mods.control() && !mods.alt() && !mods.shift() && !mods.logo(),
         "Alt+Enter" => mods.alt() && !mods.control() && !mods.shift() && !mods.logo(),
-        "Shift+Enter" => {
-            mods.shift() && !mods.control() && !mods.alt() && !mods.logo()
-        }
-        "Ctrl+Shift+Enter" => {
-            mods.control() && mods.shift() && !mods.alt() && !mods.logo()
-        }
+        "Shift+Enter" => mods.shift() && !mods.control() && !mods.alt() && !mods.logo(),
+        "Ctrl+Shift+Enter" => mods.control() && mods.shift() && !mods.alt() && !mods.logo(),
         _ => false,
     }
 }
@@ -213,9 +296,32 @@ pub(super) fn launch_alt_digit(state: &mut State, i: usize) -> Task<Message> {
 
 /// 选中行滚入可视区（保留上方两行），对应前端滚动定位行为。
 pub(super) fn sync_scroll(state: &State) -> Task<Message> {
-    let y =
-        ((state.selected as f32) * search_view::ROW_STEP - 2.0 * search_view::ROW_STEP).max(0.0);
+    let row_idx = if state.query.trim().is_empty() {
+        if state.selected < state.grid_recent_count {
+            state.selected / 8
+        } else {
+            2
+        }
+    } else {
+        (state.selected / 8 * 4) + (state.selected % 4)
+    };
+    let y = ((row_idx as f32) * search_view::ROW_STEP - 2.0 * search_view::ROW_STEP).max(0.0);
     scroll_to(search_view::scroll_id(), AbsoluteOffset { x: 0.0, y })
+}
+
+/// 从输入模式进入结果导航：向下从第一项开始，向上从最后一项开始。
+fn begin_result_navigation(state: &mut State, from_bottom: bool) -> Task<Message> {
+    if state.results.is_empty() {
+        return Task::none();
+    }
+    state.navigation_mode = NavigationMode::Results;
+    state.selected = if from_bottom {
+        state.results.len() - 1
+    } else {
+        0
+    };
+    state.hover_suppressed = true;
+    sync_scroll(state)
 }
 
 pub(super) fn move_selection(state: &mut State, delta: i32) -> Task<Message> {
@@ -230,6 +336,74 @@ pub(super) fn move_selection(state: &mut State, delta: i32) -> Task<Message> {
     sync_scroll(state)
 }
 
+/// 双列搜索结果二维键盘漫游（上/下在当前列移动，左/右跨列移动）
+pub(super) fn move_selection_2col(state: &mut State, key: &Named) -> Task<Message> {
+    if state.results.is_empty() {
+        return Task::none();
+    }
+    let len = state.results.len();
+    let cur = state.selected;
+    let offset = cur % 8;
+    let next = match key {
+        Named::ArrowDown => {
+            if offset == 3 || offset == 7 {
+                cur + 5
+            } else {
+                cur + 1
+            }
+        }
+        Named::ArrowUp => {
+            if offset == 0 || offset == 4 {
+                if cur >= 5 {
+                    cur - 5
+                } else {
+                    cur
+                }
+            } else {
+                cur.saturating_sub(1)
+            }
+        }
+        Named::ArrowRight => {
+            if offset < 4 {
+                cur + 4
+            } else {
+                cur
+            }
+        }
+        Named::ArrowLeft => {
+            if offset >= 4 {
+                cur.saturating_sub(4)
+            } else {
+                cur
+            }
+        }
+        _ => cur,
+    };
+    let target = if next < len {
+        next
+    } else if matches!(key, Named::ArrowDown) && cur < len - 1 {
+        len - 1
+    } else {
+        cur
+    };
+    state.selected = target;
+    state.hover_suppressed = true;
+    sync_scroll(state)
+}
+
+/// 非空查询结果的导航：少于一整列时视觉上是单列，四个方向都按列表顺序移动；
+/// 出现第二列后再使用四行双列的二维移动规则。
+fn move_selection_query(state: &mut State, key: &Named) -> Task<Message> {
+    if state.results.len() <= 4 {
+        return match key {
+            Named::ArrowUp | Named::ArrowLeft => move_selection(state, -1),
+            Named::ArrowDown | Named::ArrowRight => move_selection(state, 1),
+            _ => Task::none(),
+        };
+    }
+    move_selection_2col(state, key)
+}
+
 pub(super) fn launch_selected(state: &mut State) -> Task<Message> {
     // Enter / Alt+数字 / 鼠标点击共用入口。
     // Provider Mode 下 Panel 的 default action 优先（NativeAction 由 Kite 执行）。
@@ -240,6 +414,12 @@ pub(super) fn launch_selected(state: &mut State) -> Task<Message> {
             }
             if let Some(act) = panel.default_plugin_action() {
                 return exec_result_action(state, act);
+            }
+            if let Some(val) = panel.primary_value() {
+                return exec_native_panel_action(
+                    state,
+                    crate::plugin::panel::NativeAction::CopyText(val),
+                );
             }
         }
     }
@@ -256,7 +436,10 @@ pub(super) fn launch_selected(state: &mut State) -> Task<Message> {
 }
 
 /// 统一执行 ResultAction：Result 管展示，Action 管行为。
-pub(super) fn exec_result_action(state: &mut State, action: crate::model::ResultAction) -> Task<Message> {
+pub(super) fn exec_result_action(
+    state: &mut State,
+    action: crate::model::ResultAction,
+) -> Task<Message> {
     use crate::model::ResultAction;
     match action {
         ResultAction::CopyText { text } => {
@@ -272,12 +455,7 @@ pub(super) fn exec_result_action(state: &mut State, action: crate::model::Result
             system::env::refresh_process_env();
             match app::uwp::launch_shell_path(&path) {
                 Ok(()) => {
-                    state.qlog(|| {
-                        format!(
-                            "open_file {path} in {}us",
-                            t0.elapsed().as_micros()
-                        )
-                    });
+                    state.qlog(|| format!("open_file {path} in {}us", t0.elapsed().as_micros()));
                     hide(state);
                     hide_task(state)
                 }
@@ -325,6 +503,13 @@ pub(super) fn exec_result_action(state: &mut State, action: crate::model::Result
             // 内置：打开 Kite 设置
             if item.id == "kite:settings" {
                 return open_settings(state);
+            }
+            // 内置：切换文件搜索模式
+            if item.id == "kite:action:files" {
+                state.files_mode = !state.files_mode;
+                state.request_file_search();
+                state.refresh_results();
+                return sync_scroll(state);
             }
             // 非内联工具：选中「JSON 工具」后 Enter 打开（列表无取消行）。
             if item.id == super::json_tool::CONFIRM_RESULT_ID {
@@ -381,9 +566,7 @@ pub(super) fn exec_result_action(state: &mut State, action: crate::model::Result
                 Ok(()) => {
                     let elapsed_us = t0.elapsed().as_micros();
                     let (name, target) = (item.display_name.clone(), item.target.clone());
-                    state.qlog(|| {
-                        format!("launch '{name}' target={target} in {elapsed_us}us ok")
-                    });
+                    state.qlog(|| format!("launch '{name}' target={target} in {elapsed_us}us ok"));
                     if let Some(db) = &mut state.history {
                         let q = search::normalize_for_index(&state.query);
                         let _ = db.record_launch(&item.id, &q, storage::now_ts());
@@ -406,12 +589,16 @@ pub(super) fn exec_result_action(state: &mut State, action: crate::model::Result
     }
 }
 
-pub(super) fn exec_native_panel_action(state: &mut State, native: plugin::panel::NativeAction) -> Task<Message> {
+pub(super) fn exec_native_panel_action(
+    state: &mut State,
+    native: plugin::panel::NativeAction,
+) -> Task<Message> {
     use plugin::panel::NativeAction;
     match native {
         NativeAction::CopyText(text) => {
             state.qlog(|| "panel native copy_text".to_owned());
-            iced::clipboard::write(text)
+            hide(state);
+            Task::batch([iced::clipboard::write(text), hide_task(state)])
         }
         NativeAction::OpenUrl(url) => {
             if !plugin::plugin_url_allowed(&url) {
@@ -453,7 +640,10 @@ fn exec_plugin_action(
     // Command → enter_provider（List/Panel 共用：写入 Trigger 前缀后 refresh 路由）
     if action_id == "enter_provider" {
         let resolved = {
-            let reg = state.plugin_registry.lock().unwrap_or_else(|e| e.into_inner());
+            let reg = state
+                .plugin_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let command_id = payload
                 .get("command_id")
                 .and_then(|v| v.as_str())
@@ -477,6 +667,7 @@ fn exec_plugin_action(
                 state.results.clear();
                 state.results_stale = false;
                 state.selected = 0;
+                state.navigation_mode = NavigationMode::Input;
                 state.provider_mode = None;
                 state.plugin_panel = None;
                 let payload = act.effective_query.trim().to_string();
@@ -492,12 +683,18 @@ fn exec_plugin_action(
             }
             state.provider_mode = Some(act.clone());
             state.plugin_panel = None;
+            state.navigation_mode = NavigationMode::Input;
             state.plugin_query_generation = state.plugin_query_generation.wrapping_add(1);
             state.query = initial_query;
-            state.qlog(|| format!("command enter_provider {:?} q={:?}", act.provider_id, state.query));
+            state.qlog(|| {
+                format!(
+                    "command enter_provider {:?} q={:?}",
+                    act.provider_id, state.query
+                )
+            });
             state.refresh_results();
         }
-        return Task::none();
+        return focus(search_view::input_id());
     }
 
     // 其它 PluginAction → plugin/execute（异步，不阻塞 UI 线程）
@@ -642,11 +839,7 @@ mod interactive_log_gate_tests {
 }
 
 /// 把逻辑尺寸窗口摆到光标所在显示器工作区中心（物理定位 → 按窗口当前 scale 转逻辑）。
-fn place_on_cursor_monitor_task(
-    id: window::Id,
-    window_w: f32,
-    window_h: f32,
-) -> Task<Message> {
+fn place_on_cursor_monitor_task(id: window::Id, window_w: f32, window_h: f32) -> Task<Message> {
     window::scale_factor(id).then(move |scale| {
         let Some((px, py)) =
             system::window_place::physical_position_on_cursor_monitor(window_w, window_h)
@@ -669,6 +862,7 @@ pub(super) fn show_launcher(state: &mut State) -> Task<Message> {
     // 热键/托盘唤起只还原主启动器搜索；JSON 工具窗独立，不随唤起关闭。
     state.settings_open = false;
     state.plugin_docs_open = None;
+    state.navigation_mode = NavigationMode::Input;
     state.hidden = false;
     state.epoch += 1;
     // 每次唤起按鼠标所在 monitor 重新定位（uTools 式多显示器跟随）。
@@ -697,6 +891,7 @@ pub(super) fn show_launcher(state: &mut State) -> Task<Message> {
 
 pub(super) fn hide(state: &mut State) {
     state.hidden = true;
+    state.navigation_mode = NavigationMode::Input;
     state.ime_composing = false;
     state.alt_down = false;
     state.query_at_alt = None;
@@ -782,10 +977,7 @@ pub(super) fn settings_window_task(id: window::Id) -> Task<Message> {
     // gain_focus 在窗口不可见时是 no-op：必须先 set_mode/resize 再 focus，不能 batch 并行。
     window::set_level(id, window::Level::Normal)
         .chain(window::set_mode(id, window::Mode::Windowed))
-        .chain(window::resize(
-            id,
-            iced::Size::new(SETTINGS_W, SETTINGS_H),
-        ))
+        .chain(window::resize(id, iced::Size::new(SETTINGS_W, SETTINGS_H)))
         .chain(window::gain_focus(id))
 }
 
@@ -813,6 +1005,7 @@ pub(super) fn arm_json_tool_confirm(
     state.results = json_tool_confirm_results(state.pending_tool_confirm.as_ref());
     state.results_stale = false;
     state.selected = 0;
+    state.navigation_mode = NavigationMode::Input;
     state.hover_suppressed = false;
     state.provider_mode = None;
     state.plugin_panel = None;
@@ -960,6 +1153,7 @@ pub(super) fn try_open_json_tool_from_query(state: &mut State) -> Option<Task<Me
     state.results.clear();
     state.results_stale = false;
     state.selected = 0;
+    state.navigation_mode = NavigationMode::Input;
     state.provider_mode = None;
     state.plugin_panel = None;
     Some(arm_json_tool_confirm(
