@@ -12,6 +12,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
+      - name: Build official plugins
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-official-plugins.ps1
       - name: Rust tests
         run: cargo test
       - name: Release build

@@ -50,6 +50,8 @@ jobs:
           workspaces: .
       - name: Install NSIS
         run: choco install nsis -y
+      - name: Build official plugins
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-official-plugins.ps1
       - name: Run release tests
         run: cargo test
       - name: Build installer
