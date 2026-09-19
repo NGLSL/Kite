@@ -269,6 +269,7 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         index_ready,
         rescan_pending: false,
         files_mode: false,
+        file_filter: system::everything::FileFilter::All,
         file_query_generation: 0,
         file_results: Vec::new(),
         app_query_generation: 0,

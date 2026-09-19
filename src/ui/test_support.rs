@@ -43,6 +43,7 @@ pub(super) fn test_state(query: &str) -> State {
         index_ready: true,
         rescan_pending: false,
         files_mode: false,
+        file_filter: system::everything::FileFilter::All,
         file_query_generation: 0,
         file_results: Vec::new(),
         app_query_generation: 0,

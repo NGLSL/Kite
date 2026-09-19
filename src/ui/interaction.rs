@@ -172,11 +172,27 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::ToggleFiles => {
             state.files_mode = !state.files_mode;
+            if !state.files_mode {
+                state.file_filter = system::everything::FileFilter::All;
+            }
             state.navigation_mode = NavigationMode::Input;
             state.qlog(|| format!("files toggle -> {}", state.files_mode));
             state.request_file_search();
             state.refresh_results();
             Task::none()
+        }
+        Message::FileFilterChanged(filter) => {
+            if !state.files_mode || state.file_filter == filter {
+                return Task::none();
+            }
+            state.file_filter = filter;
+            state.navigation_mode = NavigationMode::Input;
+            state.request_file_search();
+            state.refresh_results();
+            Task::batch([
+                sync_scroll(state),
+                iced::widget::operation::focus(state.input_id.clone()),
+            ])
         }
         Message::FileSearchReady(generation, query, hits, elapsed_us) => {
             if !results::is_current_file_response(

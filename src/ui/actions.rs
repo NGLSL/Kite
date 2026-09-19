@@ -167,6 +167,7 @@ pub(super) fn on_key(
                     return focus(search_view::input_id());
                 } else if state.files_mode {
                     state.files_mode = false;
+                    state.file_filter = system::everything::FileFilter::All;
                     state.request_file_search();
                     state.refresh_results();
                     return Task::batch([sync_scroll(state), focus(search_view::input_id())]);
@@ -507,6 +508,9 @@ pub(super) fn exec_result_action(
             // 内置：切换文件搜索模式
             if item.id == "kite:action:files" {
                 state.files_mode = !state.files_mode;
+                if !state.files_mode {
+                    state.file_filter = system::everything::FileFilter::All;
+                }
                 state.request_file_search();
                 state.refresh_results();
                 return sync_scroll(state);

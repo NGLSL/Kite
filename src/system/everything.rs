@@ -2,6 +2,7 @@
 //! 不自建索引，也绝不拉起 Everything 主窗口；依赖不可用时由 UI 显示状态入口。
 
 use std::ffi::OsStr;
+use std::fmt;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,6 +19,66 @@ pub struct EverythingHit {
     pub path: String,
     pub is_folder: bool,
     pub name: String,
+}
+
+/// 文件模式的固定类别；不依赖 Everything 的用户自定义宏。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FileFilter {
+    #[default]
+    All,
+    Images,
+    Documents,
+    Videos,
+    Audio,
+    Archives,
+    Folders,
+}
+
+impl FileFilter {
+    pub const ALL: [Self; 7] = [
+        Self::All,
+        Self::Images,
+        Self::Documents,
+        Self::Videos,
+        Self::Audio,
+        Self::Archives,
+        Self::Folders,
+    ];
+
+    fn condition(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::Images => Some("ext:jpg;jpeg;png;gif;webp;bmp;ico;svg;heic;heif;avif;tif;tiff"),
+            Self::Documents => {
+                Some("ext:pdf;doc;docx;xls;xlsx;ppt;pptx;txt;md;rtf;odt;ods;odp;csv")
+            }
+            Self::Videos => Some("ext:mp4;mkv;mov;avi;wmv;webm;flv;m4v;mpeg;mpg"),
+            Self::Audio => Some("ext:mp3;wav;flac;aac;m4a;ogg;wma;opus"),
+            Self::Archives => Some("ext:zip;7z;rar;tar;gz;bz2;xz;iso"),
+            Self::Folders => Some("folder:"),
+        }
+    }
+}
+
+impl fmt::Display for FileFilter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::All => "全部",
+            Self::Images => "图片",
+            Self::Documents => "文档",
+            Self::Videos => "视频",
+            Self::Audio => "音频",
+            Self::Archives => "压缩包",
+            Self::Folders => "文件夹",
+        })
+    }
+}
+
+fn search_expression(query: &str, filter: FileFilter) -> String {
+    match filter.condition() {
+        Some(condition) => format!("<{query}> {condition}"),
+        None => query.to_owned(),
+    }
 }
 
 /// Everything 文件索引服务对 Kite 是否可用。
@@ -194,7 +255,7 @@ fn install_dirs() -> Vec<PathBuf> {
 }
 
 /// 查询 Everything；`max` 为返回上限。未运行/未安装返回空，不产生任何窗口。
-pub fn search_files(query: &str, max: usize) -> Vec<EverythingHit> {
+pub fn search_files(query: &str, max: usize, filter: FileFilter) -> Vec<EverythingHit> {
     let q = query.trim();
     if q.is_empty() || max == 0 {
         return Vec::new();
@@ -213,7 +274,8 @@ pub fn search_files(query: &str, max: usize) -> Vec<EverythingHit> {
     let _guard = QUERY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
     unsafe {
-        let wide: Vec<u16> = OsStr::new(q)
+        let expression = search_expression(q, filter);
+        let wide: Vec<u16> = OsStr::new(&expression)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
@@ -274,9 +336,54 @@ mod tests {
     #[test]
     fn empty_query_short_circuits() {
         // 不触碰 DLL：空查询/零上限直接返回空
-        assert!(search_files("", 5).is_empty());
-        assert!(search_files("   ", 5).is_empty());
-        assert!(search_files("report", 0).is_empty());
+        assert!(search_files("", 5, FileFilter::All).is_empty());
+        assert!(search_files("   ", 5, FileFilter::Images).is_empty());
+        assert!(search_files("report", 0, FileFilter::Documents).is_empty());
+    }
+
+    #[test]
+    fn file_filter_is_applied_inside_everything_query() {
+        assert_eq!(search_expression("logo", FileFilter::All), "logo");
+        assert_eq!(
+            search_expression("logo", FileFilter::Images),
+            "<logo> ext:jpg;jpeg;png;gif;webp;bmp;ico;svg;heic;heif;avif;tif;tiff"
+        );
+        assert_eq!(
+            search_expression("report | invoice", FileFilter::Documents),
+            "<report | invoice> ext:pdf;doc;docx;xls;xlsx;ppt;pptx;txt;md;rtf;odt;ods;odp;csv"
+        );
+        assert_eq!(
+            search_expression("project", FileFilter::Folders),
+            "<project> folder:"
+        );
+        assert_eq!(FileFilter::ALL.len(), 7);
+        assert!(FileFilter::ALL
+            .iter()
+            .all(|filter| !filter.to_string().is_empty()));
+    }
+
+    #[test]
+    #[ignore = "requires Everything to index this checkout"]
+    fn sdk_file_filters_return_matching_kinds_when_everything_runs() {
+        if !everything_ipc_window_available() {
+            return;
+        }
+        crate::system::resources::init(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let images = search_files("Kite", 100, FileFilter::Images);
+        assert!(!images.is_empty(), "Kite 仓库内应有已索引图片");
+        let image_extensions = [
+            "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg", "heic", "heif", "avif",
+            "tif", "tiff",
+        ];
+        assert!(images.iter().all(|hit| {
+            !hit.is_folder
+                && image_extensions
+                    .iter()
+                    .any(|ext| hit.name.to_ascii_lowercase().ends_with(&format!(".{ext}")))
+        }));
+        let folders = search_files("Kite", 100, FileFilter::Folders);
+        assert!(!folders.is_empty(), "Kite 仓库目录应已索引");
+        assert!(folders.iter().all(|hit| hit.is_folder));
     }
 
     #[test]
@@ -354,7 +461,7 @@ mod tests {
         crate::system::resources::init(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
         assert!(locate_dll().is_some(), "捆绑 DLL 应可定位");
         assert!(sdk().is_some(), "Everything64.dll 应能加载并解析符号");
-        let hits = search_files("Everything.exe", 5);
+        let hits = search_files("Everything.exe", 5, FileFilter::All);
         assert!(hits.len() <= 5);
         for h in &hits {
             assert!(!h.name.is_empty(), "结果名不应为空");
@@ -373,7 +480,7 @@ mod tests {
         }
         crate::system::resources::init(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
         let started = Instant::now();
-        let _ = search_files("we", 5);
+        let _ = search_files("we", 5, FileFilter::All);
         assert!(
             started.elapsed() < Duration::from_millis(250),
             "missing Everything probe took {:?}",

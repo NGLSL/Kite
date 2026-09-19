@@ -154,6 +154,7 @@ enum Message {
     LaunchIndex(usize),
     /// 「文件」胶囊开关（css .files-toggle）。
     ToggleFiles,
+    FileFilterChanged(system::everything::FileFilter),
     /// 后台 Everything 查询完成；代际和查询文本用于丢弃过期结果。
     FileSearchReady(u64, String, Vec<SearchResult>, u128),
     /// 后台应用搜索完成；代际和查询文本用于丢弃过期结果；末位为索引代际。
@@ -346,6 +347,7 @@ struct State {
     /// 用户主动点了重新扫描；完成后给设置页一条可见反馈。
     rescan_pending: bool,
     files_mode: bool,
+    file_filter: system::everything::FileFilter,
     file_query_generation: u64,
     file_results: Vec<SearchResult>,
     /// 应用搜索 Query 代际（后台 worker 丢弃过期结果）。

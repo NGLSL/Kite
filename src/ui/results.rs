@@ -20,9 +20,10 @@ impl State {
 
         let generation = self.file_query_generation;
         let icon_dir = self.icon_dir.clone();
+        let filter = self.file_filter;
         std::thread::spawn(move || {
             let started = Instant::now();
-            let results = build_file_results(&query, &icon_dir);
+            let results = build_file_results(&query, &icon_dir, filter);
             let elapsed_us = started.elapsed().as_micros();
             let _ = EVENT_TX
                 .get()
@@ -547,14 +548,18 @@ impl State {
     }
 }
 
-fn build_file_results(query: &str, icon_dir: &std::path::Path) -> Vec<SearchResult> {
+fn build_file_results(
+    query: &str,
+    icon_dir: &std::path::Path,
+    filter: system::everything::FileFilter,
+) -> Vec<SearchResult> {
     if let Some(status) = everything_status_result(system::everything::availability()) {
         return vec![status];
     }
     if search::normalize_for_index(query).chars().count() < 2 {
         return Vec::new();
     }
-    system::everything::search_files(query, 20)
+    system::everything::search_files(query, 20, filter)
         .into_iter()
         .map(|hit| {
             let id = format!("file:{}", hit.path.to_lowercase());
@@ -779,12 +784,38 @@ mod tests {
     }
 
     #[test]
+    fn changing_file_filter_invalidates_previous_query() {
+        use super::super::interaction::update;
+        use super::super::Message;
+
+        let mut state = test_state("Kite");
+        state.files_mode = true;
+        state.file_query_generation = 4;
+        let _ = update(&mut state, Message::FileFilterChanged(everything::FileFilter::Images));
+
+        assert_eq!(state.query, "Kite");
+        assert_eq!(state.file_filter, everything::FileFilter::Images);
+        assert_eq!(state.file_query_generation, 5);
+        assert!(!is_current_file_response(
+            true,
+            state.file_query_generation,
+            &state.query,
+            4,
+            "Kite"
+        ));
+    }
+
+    #[test]
     fn missing_everything_is_visible_as_a_search_result() {
         if everything::availability() != Availability::NotInstalled {
             return;
         }
 
-        let results = build_file_results("logo", &std::env::temp_dir());
+        let results = build_file_results(
+            "logo",
+            &std::env::temp_dir(),
+            everything::FileFilter::Images,
+        );
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].item.id, "kite:everything-download");

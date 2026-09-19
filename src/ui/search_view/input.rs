@@ -1,7 +1,9 @@
 //! 搜索输入区与放大镜绘制。
 
 use iced::widget::text_input;
-use iced::widget::{button, canvas, container, mouse_area, row, space::Space, stack, text, Button};
+use iced::widget::{
+    button, canvas, container, mouse_area, pick_list, row, space::Space, stack, text, Button,
+};
 use iced::{alignment, border, Background, Border, Color, Element, Length, Theme};
 
 use super::super::font::name_font;
@@ -122,6 +124,30 @@ pub(super) fn search_row<'a>(state: &'a State, tokens: ThemeTokens) -> Element<'
             ..button::Style::default()
         });
         row_content = row_content.push(clear);
+    }
+
+    if state.files_mode && state.provider_mode.is_none() {
+        let filter = pick_list(
+            crate::system::everything::FileFilter::ALL,
+            Some(state.file_filter),
+            Message::FileFilterChanged,
+        )
+        .width(112.0)
+        .padding([5.0, 8.0])
+        .text_size(12.0)
+        .font(name_font())
+        .style(move |_theme, _status| pick_list::Style {
+            text_color: tokens.text_primary,
+            placeholder_color: tokens.text_muted,
+            handle_color: tokens.text_muted,
+            background: Background::Color(tokens.bg_elevated),
+            border: Border {
+                color: tokens.border_window,
+                width: 1.0,
+                radius: border::radius(6.0),
+            },
+        });
+        row_content = row_content.push(filter);
     }
 
     let bg_input = tokens.bg_input;
