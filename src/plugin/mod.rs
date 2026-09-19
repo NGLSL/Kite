@@ -20,7 +20,8 @@ pub use activation::{
 pub use host::{HostError, PluginHost, PluginRuntimeState, QueryOutcome};
 pub use install::{
     apply_import_to_registry, import_from_path, import_plugin_dir, install_official_plugins,
-    official_plugins_source_dir, seed_official_plugins_if_missing, ImportOutcome,
+    official_plugins_source_dir, seed_official_plugins_if_missing, sync_official_plugins,
+    ImportOutcome,
     OFFICIAL_PLUGINS_DIR_NAME,
 };
 pub use manifest::{

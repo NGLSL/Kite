@@ -258,7 +258,9 @@ fn normalize_expr(expr: &str) -> String {
         }
         i += 1;
     }
-    out.trim().to_string()
+    let normalized = out.trim();
+    // 兼容旧版宿主或直接调用：有些调用链会把触发前缀 `=` 一并传入。
+    normalized.strip_prefix('=').unwrap_or(normalized).trim().to_string()
 }
 
 fn eval_expression(expr: &str) -> Result<f64, &'static str> {
@@ -741,6 +743,10 @@ mod mock_eval_tests {
         assert_eq!(eval("1000,000+1"), Some(1_000_001.0));
         assert_eq!(eval("1,000,000+1"), Some(1_000_001.0));
         assert_eq!(eval("1,000.5*2"), Some(2001.0));
+        assert_eq!(eval("=1^2"), Some(1.0));
+        assert_eq!(eval("=1(2)"), Some(2.0));
+        assert_eq!(eval("=1+1(2+2)"), Some(5.0));
+        assert_eq!(eval("=1/1"), Some(1.0));
         assert_eq!(format_number(113.0), "113");
         assert_eq!(format_number(v), "113");
         assert_eq!(format_number(2.5), "2.5");

@@ -48,6 +48,17 @@ else {
     }
 }
 
+# 官方插件是独立子进程；升级时也必须释放它们持有的文件句柄。
+foreach ($pluginProcess in @(
+    'kite-plugin-calculator.exe',
+    'kite-plugin-window-switcher.exe',
+    'kite-plugin-devtools.exe'
+)) {
+    if ($source -notmatch [regex]::Escape("/IM $pluginProcess")) {
+        $failures.Add("The installer does not stop the official plugin process $pluginProcess before overwriting bundled files.")
+    }
+}
+
 if ($source -notmatch 'WriteUninstaller\s+"\$INSTDIR\\uninstall\.exe"') {
     $failures.Add("The installer does not write an uninstaller, so an installed copy could never be removed.")
 }

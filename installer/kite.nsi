@@ -35,6 +35,9 @@ Section "-关闭旧版 Kite" SEC_CLOSE_OLD
   SectionIn RO
   ; 只结束 Kite 自身，不递归结束它唤起的应用。
   ExecWait '"$SYSDIR\taskkill.exe" /F /IM kite.exe'
+  ; 插件是独立子进程，旧版宿主退出异常时可能仍占用待覆盖的官方插件文件。
+  ; 这里只结束 Kite 官方插件进程，不影响用户启动的其他程序或第三方插件。
+  ExecWait '"$SYSDIR\taskkill.exe" /F /IM kite-plugin-calculator.exe /IM kite-plugin-window-switcher.exe /IM kite-plugin-devtools.exe'
   Sleep 300
 SectionEnd
 

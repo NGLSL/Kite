@@ -136,6 +136,19 @@ pub struct PluginHost {
     host_calls: Vec<(String, HostCall)>,
 }
 
+impl Drop for PluginHost {
+    fn drop(&mut self) {
+        // 插件是独立子进程；宿主退出时必须显式结束它们，否则 Windows
+        // 会继续锁住官方插件 exe，导致下一次覆盖安装失败。
+        for entry in self.entries.values_mut() {
+            if let Some(process) = entry.process.as_mut() {
+                process.kill();
+            }
+            entry.process = None;
+        }
+    }
+}
+
 /// 从 Registry 短暂抽出的启动所需信息。
 /// 调用方不应在 spawn/initialize/RPC 期间一直持有 Registry 锁。
 #[derive(Debug, Clone)]
@@ -803,6 +816,19 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(host.spawn_count("com.kite.calculator"), 1);
+    }
+
+    #[test]
+    fn dropping_host_kills_plugin_processes() {
+        let reg = registry();
+        let (mut host, proc) = host_mem();
+        let act = route_query("=1+2", &reg).unwrap();
+        let _ = host.query(&reg, &act, 0).expect("query");
+        assert!(proc.lock().unwrap().alive);
+
+        drop(host);
+
+        assert!(!proc.lock().unwrap().alive, "宿主退出必须结束插件进程");
     }
 
     #[test]

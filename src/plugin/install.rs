@@ -136,8 +136,17 @@ pub fn install_official_plugins(plugins_dir: &Path) -> Vec<Result<ImportOutcome,
     import_from_path(&src, plugins_dir)
 }
 
-/// 启动时把安装包内置的官方插件补进用户目录。
-/// 已存在的 plugin id 不覆盖（尊重用户改过的包/禁用后的重装）；源目录缺失时静默跳过。
+/// 启动时同步安装包内置的官方插件。
+///
+/// 官方插件随 Kite 一起发布，升级时必须覆盖用户数据目录中的旧版本，
+/// 否则安装目录里的修复永远不会被当前宿主加载。第三方/用户插件不在
+/// `official-plugins` 源目录中，不会被此函数触碰。
+pub fn sync_official_plugins(plugins_dir: &Path) -> Vec<Result<ImportOutcome, String>> {
+    install_official_plugins(plugins_dir)
+}
+
+/// 仅补齐缺失的安装包内置官方插件，不覆盖已有包。
+/// 需要覆盖升级时使用 [`sync_official_plugins`]；源目录缺失时静默跳过。
 pub fn seed_official_plugins_if_missing(plugins_dir: &Path) -> Vec<Result<ImportOutcome, String>> {
     let Some(src) = official_plugins_source_dir() else {
         return Vec::new();
@@ -377,6 +386,30 @@ mod tests {
         let v2: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&calc_manifest).unwrap()).unwrap();
         assert_eq!(v2["plugin"]["name"], "User Tweaked", "已存在包不得被 seed 覆盖");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sync_official_plugins_replaces_existing_official_package() {
+        let tmp = std::env::temp_dir().join(format!("kite-plugin-sync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let plugins = tmp.join("plugins");
+        crate::system::resources::init(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+
+        let first = sync_official_plugins(&plugins);
+        assert!(first.iter().all(|r| r.is_ok()), "首次同步失败: {first:?}");
+
+        let calc_manifest = plugins.join("com.kite.calculator/plugin.json");
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&calc_manifest).unwrap()).unwrap();
+        v["plugin"]["name"] = serde_json::json!("Stale Official Package");
+        std::fs::write(&calc_manifest, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+
+        let second = sync_official_plugins(&plugins);
+        assert!(second.iter().all(|r| r.is_ok()), "重复同步失败: {second:?}");
+        let v2: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&calc_manifest).unwrap()).unwrap();
+        assert_eq!(v2["plugin"]["name"], "计算器", "官方包应由安装包版本覆盖");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -109,7 +109,10 @@ fn normalize_expr(expr: &str) -> String {
         }
         i += 1;
     }
-    out.trim().to_string()
+    let normalized = out.trim();
+    // 兼容旧版宿主或直接调用：有些调用链会把触发前缀 `=` 一并传入。
+    // 正常协议传入的是 effective query（不含 `=`），因此这里只剥离一个前导前缀。
+    normalized.strip_prefix('=').unwrap_or(normalized).trim().to_string()
 }
 
 pub(crate) fn eval_expression(expr: &str) -> Result<f64, &'static str> {
@@ -382,6 +385,14 @@ mod tests {
         approx("√9+1", 4.0);
         approx("2√9", 6.0); // 隐式乘
         approx("(√16)^2", 16.0);
+    }
+
+    #[test]
+    fn accepts_calculator_prefix_from_legacy_host() {
+        approx("=1^2", 1.0);
+        approx("=1(2)", 2.0);
+        approx("=1+1(2+2)", 5.0);
+        approx("=1/1", 1.0);
     }
 
     #[test]

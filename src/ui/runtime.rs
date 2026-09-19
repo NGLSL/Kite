@@ -309,8 +309,8 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         last_hover_pt: None,
         plugin_registry: std::sync::Arc::new(Mutex::new({
             let plugins_dir = plugin::default_plugins_dir(&data_dir);
-            // 官方插件随安装包提供；首次启动补进用户目录（已存在的 id 不覆盖）。
-            let _ = plugin::seed_official_plugins_if_missing(&plugins_dir);
+            // 官方插件随安装包提供；每次启动同步到用户目录，覆盖安装包旧版本。
+            let _ = plugin::sync_official_plugins(&plugins_dir);
             plugin::load_registry_from_dir(&plugins_dir)
         })),
         plugin_host: std::sync::Arc::new(Mutex::new(PluginHost::new(
@@ -333,11 +333,19 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
     };
     // Idle Shutdown：定时清扫，不依赖下一次 Provider 触发。
     {
-        let host = state.plugin_host.clone();
+        // 后台清扫线程不能持有强引用，否则 State 退出后 PluginHost 永远不 Drop，
+        // 子插件进程会变成孤儿并锁住下一次安装要覆盖的文件。
+        let host = std::sync::Arc::downgrade(&state.plugin_host);
         std::thread::spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(5));
-            if let Ok(mut h) = host.lock() {
-                h.idle_sweep();
+            let Some(host) = host.upgrade() else {
+                break;
+            };
+            {
+                let guard = host.lock();
+                if let Ok(mut h) = guard {
+                    h.idle_sweep();
+                }
             }
         });
     }
