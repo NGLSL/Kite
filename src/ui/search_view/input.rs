@@ -126,28 +126,49 @@ pub(super) fn search_row<'a>(state: &'a State, tokens: ThemeTokens) -> Element<'
         row_content = row_content.push(clear);
     }
 
-    if state.files_mode && state.provider_mode.is_none() {
-        let filter = pick_list(
-            crate::system::everything::FileFilter::ALL,
-            Some(state.file_filter),
-            Message::FileFilterChanged,
-        )
-        .width(112.0)
-        .padding([5.0, 8.0])
-        .text_size(12.0)
-        .font(name_font())
-        .style(move |_theme, _status| pick_list::Style {
-            text_color: tokens.text_primary,
-            placeholder_color: tokens.text_muted,
-            handle_color: tokens.text_muted,
-            background: Background::Color(tokens.bg_elevated),
-            border: Border {
-                color: tokens.border_window,
-                width: 1.0,
-                radius: border::radius(6.0),
-            },
-        });
-        row_content = row_content.push(filter);
+    if state.provider_mode.is_none() {
+        if state.files_mode {
+            let filter = pick_list(
+                crate::system::everything::FileFilter::ALL,
+                Some(state.file_filter),
+                Message::FileFilterChanged,
+            )
+            .width(112.0)
+            .padding([5.0, 8.0])
+            .text_size(12.0)
+            .font(name_font())
+            .style(move |_theme, _status| pick_list::Style {
+                text_color: tokens.text_primary,
+                placeholder_color: tokens.text_muted,
+                handle_color: tokens.text_muted,
+                background: Background::Color(tokens.bg_elevated),
+                border: Border {
+                    color: tokens.border_window,
+                    width: 1.0,
+                    radius: border::radius(6.0),
+                },
+            });
+            row_content = row_content.push(filter);
+        } else {
+            let files_button = button(text("📁 文件").size(12.0).font(name_font()))
+                .padding([5.0, 9.0])
+                .on_press(Message::ToggleFiles)
+                .style(move |_theme, status| button::Style {
+                    background: Some(Background::Color(if status == button::Status::Hovered {
+                        tokens.active_bg
+                    } else {
+                        tokens.bg_elevated
+                    })),
+                    text_color: tokens.text_primary,
+                    border: Border {
+                        color: tokens.border_window,
+                        width: 1.0,
+                        radius: border::radius(6.0),
+                    },
+                    ..button::Style::default()
+                });
+            row_content = row_content.push(files_button);
+        }
     }
 
     let bg_input = tokens.bg_input;
