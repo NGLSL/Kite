@@ -14,7 +14,7 @@
 |------|------|
 | 能力外置 | 插件是**独立进程**；崩溃/卡顿/泄漏不得拖垮 Kite |
 | 体验内联 | 结果在 Kite 原生列表/面板展示；不弹抢焦点的「插件 UI」（Window 动作除外） |
-| 显式激活 | 仅 prefix/keyword Trigger 命中或 Command 入口才启动进程；普通搜索零插件进程 |
+| 显式激活 | prefix/keyword Trigger 命中时只在普通搜索列表显示插件入口；选中入口后才启动进程并展示结果 |
 | 可卸载 | 删除插件目录后 Kite 仍是完整 Windows Launcher |
 
 **适合做插件**：删除后 Kite 仍是启动器的能力（计算器、窗口切换、UUID/Hash、翻译、AI…）。
@@ -290,7 +290,7 @@ Dormant ──(首次 Trigger/Command 需要进程)──► Starting ──init
 | `kite-plugin-sdk` | — | 帧编解码 + `serve_loop`（Rust 可选依赖） |
 | `kite-plugin-calculator` | `=` | Panel，Enter 复制 |
 | `kite-plugin-window-switcher` | `win` | List，Enter 激活窗口 |
-| `kite-plugin-devtools` | `uuid`/`hash`/`ts`/`json` | 单进程多 Provider |
+| `kite-plugin-devtools` | `uuid`/`hash`/`ts`/`json` | 单进程多 Provider；`hash` 和 `json` 入口打开宿主独立工具窗 |
 
 构建并打包到 `resources/official-plugins/`：
 
@@ -370,7 +370,7 @@ fn main() {
 
 - [ ] `plugin.json` 校验通过；`command` 在包内且可执行  
 - [ ] initialize 返回 `plugin_api: 1` 与 capabilities  
-- [ ] Trigger 命中才有 query；普通词无进程  
+- [ ] Trigger 命中先显示插件入口；选中入口后才有插件 query；普通词无进程
 - [ ] List/Panel/Empty 形状正确；非法 block 会被宿主拒绝  
 - [ ] Enter：Panel default / List plugin_action 行为符合预期  
 - [ ] 快速连续 query：旧 generation 不覆盖新结果（宿主侧）  

@@ -95,10 +95,14 @@ pub(super) fn test_state(query: &str) -> State {
         plugin_import_path: String::new(),
         plugin_docs_open: None,
         json_tool_window: None,
+        hash_tool_window: None,
         plugin_tool_open: false,
         pending_tool_confirm: None,
         json_editor: iced::widget::text_editor::Content::default(),
         json_result: String::new(),
         json_tool_note: None,
+        hash_editor: iced::widget::text_editor::Content::default(),
+        hash_result: String::new(),
+        hash_tool_note: None,
     }
 }

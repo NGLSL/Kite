@@ -71,8 +71,7 @@ pub(super) fn on_key(
     // Settings and the standalone JSON tool own their text/button keyboard
     // interaction. Keep only Escape global so captured widget events cannot
     // move or launch a result in the hidden/secondary UI.
-    if (state.settings_open || state.plugin_tool_open)
-        && !matches!(key, Key::Named(Named::Escape))
+    if (state.settings_open || state.plugin_tool_open) && !matches!(key, Key::Named(Named::Escape))
     {
         return Task::none();
     }
@@ -97,7 +96,11 @@ pub(super) fn on_key(
             }
             // JSON 工具窗：Esc 关闭工具窗，主窗不动。
             if state.plugin_tool_open {
-                return close_json_tool_panel(state);
+                return if state.hash_tool_window.is_some() {
+                    close_hash_tool_panel(state)
+                } else {
+                    close_json_tool_panel(state)
+                };
             }
             // 二次确认：Esc 取消，不开工具窗。
             if state.pending_tool_confirm.is_some() {
@@ -641,6 +644,35 @@ fn exec_plugin_action(
     action_id: &str,
     payload: serde_json::Value,
 ) -> Task<Message> {
+    if action_id == "enter_trigger_provider" {
+        let activation = {
+            let reg = state
+                .plugin_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            plugin::route_query(&state.query, &reg)
+        };
+        let Some(act) = activation.filter(|act| {
+            act.plugin_id == plugin_id
+                && payload.get("provider").and_then(|v| v.as_str())
+                    == Some(act.provider_id.as_str())
+        }) else {
+            return Task::none();
+        };
+        if super::json_tool::is_native_json_activation(&act) {
+            let payload = act.effective_query.trim().to_string();
+            let task =
+                arm_json_tool_confirm(state, (!payload.is_empty()).then_some(payload), false);
+            return Task::batch([task, confirm_json_tool_open(state)]);
+        }
+        if super::hash_tool::is_native_hash_activation(&act) {
+            return open_hash_tool_panel(state, Some(act.effective_query));
+        }
+        state.provider_mode = Some(act);
+        state.plugin_panel = None;
+        state.refresh_results();
+        return focus(search_view::input_id());
+    }
     // Command → enter_provider（List/Panel 共用：写入 Trigger 前缀后 refresh 路由）
     if action_id == "enter_provider" {
         let resolved = {
@@ -665,6 +697,9 @@ fn exec_plugin_action(
             )
         };
         if let Some((act, initial_query)) = resolved {
+            if super::hash_tool::is_native_hash_activation(&act) {
+                return open_hash_tool_panel(state, None);
+            }
             // 非内联 json 工具：二次确认，不直接开窗；内联 Provider 照旧。
             if super::json_tool::is_native_json_activation(&act) {
                 state.query = initial_query;
@@ -1139,48 +1174,73 @@ pub(super) fn open_json_tool_panel_with_payload(
     Task::batch(tasks)
 }
 
-/// 搜索框 `json` / `json {...}`：不直接开窗，进入二次确认。
-/// 返回 Some(Task) 表示本次查询已接管。
-pub(super) fn try_open_json_tool_from_query(state: &mut State) -> Option<Task<Message>> {
-    let activation = {
-        let reg = state
-            .plugin_registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        crate::plugin::route_query(&state.query, &reg)?
-    };
-    if !super::json_tool::is_native_json_activation(&activation) {
-        return None;
-    }
-    let payload = activation.effective_query.trim().to_string();
-    // 保留查询文本，便于 Esc 取消后仍看到 json 关键词；清掉 Provider 残留。
-    state.results.clear();
-    state.results_stale = false;
-    state.selected = 0;
-    state.navigation_mode = NavigationMode::Input;
-    state.provider_mode = None;
-    state.plugin_panel = None;
-    Some(arm_json_tool_confirm(
-        state,
-        if payload.is_empty() {
-            None
-        } else {
-            Some(payload)
-        },
-        false,
-    ))
-}
-
 /// 关闭 JSON 工具窗：只销毁工具窗，主启动器窗口尺寸/内容不动。
 pub(super) fn close_json_tool_panel(state: &mut State) -> Task<Message> {
     let Some(tid) = state.json_tool_window else {
-        state.plugin_tool_open = false;
+        state.plugin_tool_open = state.hash_tool_window.is_some();
         return Task::none();
     };
     state.json_tool_window = None;
-    state.plugin_tool_open = false;
+    state.plugin_tool_open = state.hash_tool_window.is_some();
     state.qlog(|| "json tool close".to_owned());
     window::close(tid)
+}
+
+/// 打开 Hash 独立窗；从搜索进入时只隐藏启动器，保留其查询和结果。
+pub(super) fn open_hash_tool_panel(state: &mut State, payload: Option<String>) -> Task<Message> {
+    if let Some(raw) = payload.filter(|s| !s.is_empty()) {
+        state.hash_editor = iced::widget::text_editor::Content::with_text(&raw);
+        state.hash_result = hash_tool::sha256_hex(&raw);
+        state.hash_tool_note = None;
+    }
+    if let Some(id) = state.hash_tool_window {
+        return window::gain_focus(id);
+    }
+    let (w, h) = (hash_tool::TOOL_W, hash_tool::TOOL_H);
+    let (id, opened) = window::open(Settings {
+        size: iced::Size::new(w, h),
+        position: Position::SpecificWith(|win, monitor| {
+            iced::Point::new(
+                (monitor.width - win.width) / 2.0,
+                (monitor.height - win.height) / 2.0,
+            )
+        }),
+        visible: true,
+        resizable: false,
+        decorations: false,
+        level: window::Level::Normal,
+        exit_on_close_request: false,
+        platform_specific: PlatformSpecific {
+            skip_taskbar: false,
+            undecorated_shadow: false,
+            corner_preference: iced::window::settings::platform::CornerPreference::Round,
+            ..PlatformSpecific::default()
+        },
+        ..Settings::default()
+    });
+    state.hash_tool_window = Some(id);
+    state.plugin_tool_open = true;
+    state.qlog(|| "hash tool open".to_owned());
+    let mut tasks = vec![opened.then(move |_opened| {
+        Task::batch([
+            window::gain_focus(id),
+            place_on_cursor_monitor_task(id, w, h),
+        ])
+    })];
+    if let Some(main) = state.window_id {
+        state.hidden = true;
+        tasks.push(window::set_mode(main, window::Mode::Hidden));
+    }
+    Task::batch(tasks)
+}
+
+pub(super) fn close_hash_tool_panel(state: &mut State) -> Task<Message> {
+    let Some(id) = state.hash_tool_window.take() else {
+        return Task::none();
+    };
+    state.plugin_tool_open = state.json_tool_window.is_some();
+    state.qlog(|| "hash tool close".to_owned());
+    window::close(id)
 }
 
 /// 关闭设置：窗口切回搜索尺寸并聚焦输入框。

@@ -3,6 +3,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 fn main() {
     let stdout = std::io::stdout();
@@ -34,20 +35,18 @@ fn provider_panel(provider: &str, query: &str) -> Value {
             }))
         }
         "hash" => {
-            let text = query.trim();
+            let text = query;
             if text.is_empty() {
                 return kite_plugin_sdk::panel_response(json!({
                     "blocks": [{ "type": "notice", "level": "info", "text": "输入待哈希文本（hash …）" }],
                     "actions": []
                 }));
             }
-            // 轻量演示：非加密用途的 FNV-1a 64，避免官方样例再拉 sha2 依赖
-            let h = fnv1a64(text.as_bytes());
-            let hex = format!("{h:016x}");
+            let hex = format!("{:x}", Sha256::digest(text.as_bytes()));
             kite_plugin_sdk::panel_response(json!({
                 "blocks": [{
                     "type": "key_value",
-                    "items": [{ "key": "FNV-1a-64", "value": hex }]
+                    "items": [{ "key": "SHA-256", "value": hex }]
                 }],
                 "actions": [{
                     "id": "copy",
@@ -110,15 +109,6 @@ fn provider_panel(provider: &str, query: &str) -> Value {
     }
 }
 
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in bytes {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
-}
-
 /// 简易 UUIDv4 形态（基于时间+计数的伪随机，演示用）。
 fn simple_uuid() -> String {
     let t = SystemTime::now()
@@ -149,6 +139,8 @@ mod tests {
 
         let hash = provider_panel("hash", "abc");
         assert_eq!(hash["panel"]["blocks"][0]["type"], "key_value");
+        assert_eq!(hash["panel"]["blocks"][0]["items"][0]["key"], "SHA-256");
+        assert_eq!(hash["panel"]["blocks"][0]["items"][0]["value"], "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
 
         let ts = provider_panel("ts", "");
         assert_eq!(ts["panel"]["blocks"][1]["type"], "value");

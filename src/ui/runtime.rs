@@ -40,6 +40,8 @@ pub fn run() -> iced::Result {
 fn poc_title(state: &State, window: window::Id) -> String {
     if state.json_tool_window == Some(window) {
         "JSON 工具".to_string()
+    } else if state.hash_tool_window == Some(window) {
+        "Hash 工具".to_string()
     } else {
         "Kite".to_string()
     }
@@ -326,11 +328,15 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         plugin_import_path: String::new(),
         plugin_docs_open: None,
         json_tool_window: None,
+        hash_tool_window: None,
         plugin_tool_open: false,
         pending_tool_confirm: None,
         json_editor: iced::widget::text_editor::Content::default(),
         json_result: String::new(),
         json_tool_note: None,
+        hash_editor: iced::widget::text_editor::Content::default(),
+        hash_result: String::new(),
+        hash_tool_note: None,
     };
     // Idle Shutdown：定时清扫，不依赖下一次 Provider 触发。
     {

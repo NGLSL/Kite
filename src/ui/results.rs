@@ -1,6 +1,7 @@
 //! 搜索结果刷新与已有结果源合并。
 
 use super::*;
+use crate::model::{ResultAction, ResultSource};
 use std::sync::Arc;
 
 impl State {
@@ -146,6 +147,15 @@ impl State {
         }
         let q_norm = search::normalize_for_index(&self.query);
         let mut hits = self.merge_aux_hits(hits, &q_norm);
+        // Trigger 只提供一个可选入口；插件查询在用户进入后才执行。
+        let trigger = self.trigger_result();
+        if let Some(hit) = trigger.as_ref() {
+            let pos = hits
+                .iter()
+                .position(|h| h.score < hit.score)
+                .unwrap_or(hits.len());
+            hits.insert(pos, hit.clone());
+        }
         // Command 静态入口：不启动插件进程；按分数插入，不无条件顶掉本机精确命中
         {
             let reg = self
@@ -154,6 +164,25 @@ impl State {
                 .unwrap_or_else(|e| e.into_inner());
             let commands = plugin::command_hits(&reg, self.query.trim());
             for cmd in commands.into_iter() {
+                if let (
+                    Some(trigger),
+                    ResultAction::Plugin {
+                        plugin_id, payload, ..
+                    },
+                ) = (&trigger, &cmd.action)
+                {
+                    if let ResultSource::Plugin {
+                        plugin_id: trigger_id,
+                        provider_id,
+                    } = &trigger.source
+                    {
+                        if plugin_id == trigger_id
+                            && payload.get("provider").and_then(|v| v.as_str()) == Some(provider_id)
+                        {
+                            continue;
+                        }
+                    }
+                }
                 if hits.iter().any(|h| h.item.id == cmd.item.id) {
                     continue;
                 }
@@ -268,7 +297,7 @@ impl State {
     }
 
     /// 结果刷新唯一入口：
-    /// - Plugin Provider Mode：Trigger 命中时整列表交给插件，不与 Core 混排；
+    /// - 已进入的 Provider Mode：查询交给插件；尚未进入时 Trigger 作为普通搜索入口；
     /// - 空 Query：固定 + 最近（同步）；
     /// - 非空 Query：worker + Command 静态入口合并。
     pub(super) fn refresh_results(&mut self) {
@@ -286,12 +315,11 @@ impl State {
             plugin::route_query(&self.query, &reg)
         };
         if let Some(act) = activation {
-            // 非内联工具（JSON 独立窗）：不进 Provider；由 UI 二次确认后开窗。
-            if act.plugin_id == "com.kite.devtools" && act.provider_id == "json" {
-                if self.provider_mode.is_some() {
-                    self.exit_provider_mode();
-                }
-            } else {
+            if self.provider_mode.as_ref().is_some_and(|current| {
+                current.plugin_id == act.plugin_id && current.provider_id == act.provider_id
+            }) {
+                self.app_query_generation = self.app_query_generation.wrapping_add(1);
+                self.app_search_worker.cancel_current();
                 self.results_stale = true;
                 self.plugin_panel = None;
                 self.plugin_flash = None;
@@ -378,6 +406,13 @@ impl State {
         }
 
         let q_norm = search::normalize_for_index(&self.query);
+        if q_norm.is_empty() && !self.query.trim().is_empty() {
+            self.results = self.trigger_result().into_iter().collect();
+            self.results_stale = false;
+            self.selected = 0;
+            self.navigation_mode = NavigationMode::Input;
+            return;
+        }
         if !q_norm.is_empty() {
             self.request_app_search();
             return;
@@ -468,6 +503,41 @@ impl State {
                 self.epoch
             )
         });
+    }
+
+    fn trigger_result(&self) -> Option<SearchResult> {
+        let reg = self
+            .plugin_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let act = plugin::route_query(&self.query, &reg)?;
+        let plugin = reg.get(&act.plugin_id)?;
+        let title = plugin.manifest.contributes.commands.iter()
+            .find(|cmd| matches!(&cmd.action, plugin::manifest::CommandAction::EnterProvider { provider } if provider == &act.provider_id))
+            .map(|cmd| cmd.title.clone())
+            .unwrap_or_else(|| format!("{} · {}", plugin.manifest.plugin.name, act.provider_id));
+        let mut item = AppItem::scanned(
+            format!("plugin-trigger:{}:{}", act.plugin_id, act.provider_id),
+            title,
+            "Enter 进入插件".into(),
+            None,
+            None,
+            "plugin-command",
+        );
+        item.attach_search_fields();
+        Some(
+            SearchResult::scored(item, 900, "plugin-command").with_source_action(
+                ResultSource::Plugin {
+                    plugin_id: act.plugin_id.clone(),
+                    provider_id: act.provider_id.clone(),
+                },
+                ResultAction::plugin(
+                    &act.plugin_id,
+                    "enter_trigger_provider",
+                    serde_json::json!({"provider": act.provider_id}),
+                ),
+            ),
+        )
     }
 
     pub(super) fn exit_provider_mode(&mut self) {
@@ -791,7 +861,10 @@ mod tests {
         let mut state = test_state("Kite");
         state.files_mode = true;
         state.file_query_generation = 4;
-        let _ = update(&mut state, Message::FileFilterChanged(everything::FileFilter::Images));
+        let _ = update(
+            &mut state,
+            Message::FileFilterChanged(everything::FileFilter::Images),
+        );
 
         assert_eq!(state.query, "Kite");
         assert_eq!(state.file_filter, everything::FileFilter::Images);

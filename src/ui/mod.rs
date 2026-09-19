@@ -27,6 +27,7 @@ use crate::{app, history, log, search, storage, system};
 mod actions;
 mod backend;
 mod font;
+mod hash_tool;
 mod interaction;
 mod json_tool;
 mod keyboard;
@@ -285,6 +286,13 @@ enum Message {
     JsonToolCopyResult,
     /// 清空左右两侧。
     JsonToolClear,
+    HashToolDrag,
+    PluginCloseHashTool,
+    HashToolEdit(iced::widget::text_editor::Action),
+    HashToolPaste,
+    HashToolPasteReady(Option<String>),
+    HashToolCopyResult,
+    HashToolClear,
 }
 
 /// 插件查询落地载荷（代际 + 结果）。
@@ -420,6 +428,7 @@ struct State {
     plugin_docs_open: Option<String>,
     /// JSON 独立工具窗的窗口 id；None = 未打开。主启动器窗口永不承载工具 UI。
     json_tool_window: Option<window::Id>,
+    hash_tool_window: Option<window::Id>,
     /// JSON 工具是否打开（与 json_tool_window 同步，供逻辑/测试读取）。
     plugin_tool_open: bool,
     /// 非内联工具打开前的二次确认（JSON）。内联插件（计算器等）不进此状态。
@@ -430,6 +439,9 @@ struct State {
     json_result: String,
     /// JSON 工具状态提示（错误/成功）。
     json_tool_note: Option<(bool, String)>,
+    hash_editor: iced::widget::text_editor::Content,
+    hash_result: String,
+    hash_tool_note: Option<String>,
 }
 
 /// 非内联工具（独立窗）打开前的二次确认载荷。
@@ -445,6 +457,9 @@ pub(crate) struct PendingJsonToolConfirm {
 fn view(state: &State, window: window::Id) -> iced::Element<'_, Message> {
     if state.json_tool_window == Some(window) {
         return json_tool::view(state);
+    }
+    if state.hash_tool_window == Some(window) {
+        return hash_tool::view(state);
     }
     if state.settings_open {
         settings::settings_view(state)

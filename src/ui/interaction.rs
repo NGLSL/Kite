@@ -92,11 +92,19 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             .json_tool_window
             .map(window::drag)
             .unwrap_or_else(Task::none),
+        Message::HashToolDrag => state
+            .hash_tool_window
+            .map(window::drag)
+            .unwrap_or_else(Task::none),
         Message::JsonToolWindowClosed(id) => {
             if state.json_tool_window == Some(id) {
                 state.json_tool_window = None;
-                state.plugin_tool_open = false;
+                state.plugin_tool_open = state.hash_tool_window.is_some();
                 state.qlog(|| "json tool window closed".to_owned());
+            } else if state.hash_tool_window == Some(id) {
+                state.hash_tool_window = None;
+                state.plugin_tool_open = state.json_tool_window.is_some();
+                state.qlog(|| "hash tool window closed".to_owned());
             }
             Task::none()
         }
@@ -121,11 +129,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             state.query = q;
             // 任何新输入都回到编辑模式；方向键重新从输入框进入结果导航。
             state.navigation_mode = NavigationMode::Input;
-            // `json` / `json {...}`：非内联工具，只进二次确认，不直接开窗。
-            if let Some(task) = try_open_json_tool_from_query(state) {
-                return task;
-            }
-            // 查询不再命中 json 时，丢掉搜索态待确认。
+            // 修改查询时取消尚未打开的 JSON 工具确认。
             if state
                 .pending_tool_confirm
                 .as_ref()
@@ -179,7 +183,10 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             state.qlog(|| format!("files toggle -> {}", state.files_mode));
             state.request_file_search();
             state.refresh_results();
-            Task::none()
+            Task::batch([
+                sync_scroll(state),
+                iced::widget::operation::focus(state.input_id.clone()),
+            ])
         }
         Message::FileFilterChanged(filter) => {
             if !state.files_mode || state.file_filter == filter {
@@ -798,14 +805,14 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             flash(state, "已重新扫描插件目录")
         }
         Message::PluginTryExample(example) => {
-            // 设置页「试用 / 回到搜索」：关掉设置；json 示例进二次确认，不直接开窗。
+            // 设置页「试用 / 回到搜索」：回到混合搜索结果。
             let mut task = close_settings(state);
             state.plugin_docs_open = None;
             if !example.is_empty() {
-                state.query = example;
-                if let Some(t) = try_open_json_tool_from_query(state) {
-                    return Task::batch([task, t]);
+                if state.provider_mode.is_some() {
+                    state.exit_provider_mode();
                 }
+                state.query = example;
                 state.pending_tool_confirm = None;
                 state.request_file_search();
                 state.refresh_results();
@@ -865,6 +872,48 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             state.json_editor = iced::widget::text_editor::Content::default();
             state.json_result.clear();
             state.json_tool_note = None;
+            Task::none()
+        }
+        Message::PluginCloseHashTool => close_hash_tool_panel(state),
+        Message::HashToolEdit(action) => {
+            state.hash_editor.perform(action);
+            let input = hash_tool::input_text(&state.hash_editor);
+            state.hash_result = if input.is_empty() {
+                String::new()
+            } else {
+                hash_tool::sha256_hex(&input)
+            };
+            state.hash_tool_note = None;
+            Task::none()
+        }
+        Message::HashToolPaste => iced::clipboard::read().map(Message::HashToolPasteReady),
+        Message::HashToolPasteReady(text) => {
+            if let Some(raw) = text {
+                state.hash_editor = iced::widget::text_editor::Content::with_text(&raw);
+                state.hash_result = if raw.is_empty() {
+                    String::new()
+                } else {
+                    hash_tool::sha256_hex(&raw)
+                };
+                state.hash_tool_note = None;
+            } else {
+                state.hash_tool_note = Some("剪贴板为空".into());
+            }
+            Task::none()
+        }
+        Message::HashToolCopyResult => {
+            if state.hash_result.is_empty() {
+                state.hash_tool_note = Some("请先输入文本".into());
+                Task::none()
+            } else {
+                state.hash_tool_note = Some("已复制 SHA-256".into());
+                iced::clipboard::write(state.hash_result.clone())
+            }
+        }
+        Message::HashToolClear => {
+            state.hash_editor = iced::widget::text_editor::Content::default();
+            state.hash_result.clear();
+            state.hash_tool_note = None;
             Task::none()
         }
     }
@@ -1289,55 +1338,63 @@ mod plugin_ui_tests {
         assert!(state.plugin_flash.is_none());
     }
 
-    #[test]
-    fn search_json_keyword_opens_independent_panel_not_provider() {
+    fn devtools_plugin() -> RegisteredPlugin {
         use crate::plugin::manifest::{
             Compatibility, Contributions, PluginIdentity, PluginProvider, RuntimeSpec,
         };
-        use crate::plugin::registry::{RegisteredPlugin, RuntimePhase};
         use crate::plugin::Trigger;
 
-        fn devtools_plugin() -> RegisteredPlugin {
-            RegisteredPlugin {
-                manifest: crate::plugin::PluginManifest {
-                    schema_version: 1,
-                    plugin: PluginIdentity {
-                        id: "com.kite.devtools".into(),
-                        name: "开发者工具".into(),
-                        version: "0.1.0".into(),
-                        description: "uuid/hash/json".into(),
-                        usage: String::new(),
-                        author: String::new(),
-                    },
-                    compatibility: Compatibility {
-                        plugin_api: 1,
-                        minimum_kite_version: None,
-                    },
-                    runtime: RuntimeSpec {
-                        command: "devtools.exe".into(),
-                        args: vec![],
-                        startup_timeout_ms: Some(5000),
-                        idle_timeout_ms: Some(60_000),
-                    },
-                    contributes: Contributions {
-                        examples: vec!["json".into()],
-                        commands: vec![],
-                        providers: vec![PluginProvider {
+        RegisteredPlugin {
+            manifest: crate::plugin::PluginManifest {
+                schema_version: 1,
+                plugin: PluginIdentity {
+                    id: "com.kite.devtools".into(),
+                    name: "开发者工具".into(),
+                    version: "0.1.0".into(),
+                    description: "uuid/hash/json".into(),
+                    usage: String::new(),
+                    author: String::new(),
+                },
+                compatibility: Compatibility {
+                    plugin_api: 1,
+                    minimum_kite_version: None,
+                },
+                runtime: RuntimeSpec {
+                    command: "devtools.exe".into(),
+                    args: vec![],
+                    startup_timeout_ms: Some(5000),
+                    idle_timeout_ms: Some(60_000),
+                },
+                contributes: Contributions {
+                    examples: vec!["json".into()],
+                    commands: vec![],
+                    providers: vec![
+                        PluginProvider {
                             id: "json".into(),
                             response_mode: "panel".into(),
                             triggers: vec![Trigger::Keyword {
                                 value: "json".into(),
                             }],
-                        }],
-                    },
+                        },
+                        PluginProvider {
+                            id: "hash".into(),
+                            response_mode: "panel".into(),
+                            triggers: vec![Trigger::Keyword {
+                                value: "hash".into(),
+                            }],
+                        },
+                    ],
                 },
-                root: std::path::PathBuf::from("plugins/com.kite.devtools"),
-                enabled: true,
-                phase: RuntimePhase::Dormant,
-                last_error: None,
-            }
+            },
+            root: std::path::PathBuf::from("plugins/com.kite.devtools"),
+            enabled: true,
+            phase: RuntimePhase::Dormant,
+            last_error: None,
         }
+    }
 
+    #[test]
+    fn search_json_keyword_opens_independent_panel_not_provider() {
         let mut state = test_state("json");
         {
             let mut reg = state.plugin_registry.lock().unwrap();
@@ -1349,14 +1406,23 @@ mod plugin_ui_tests {
             "搜索 json 不得直接打开工具窗，须二次确认"
         );
         assert!(state.provider_mode.is_none(), "不得进入 Provider");
-        assert!(state.pending_tool_confirm.is_some(), "应进入二次确认");
-        assert!(state.results_stale == false);
-        assert_eq!(state.results.len(), 1, "搜索 json 只展示 JSON 工具一条");
-        assert_eq!(
-            state.results[0].item.id,
-            super::json_tool::CONFIRM_RESULT_ID
+        assert!(state.pending_tool_confirm.is_none());
+        state.apply_app_search_ready(
+            state.app_query_generation,
+            state.query.clone(),
+            vec![],
+            0,
+            state.index_generation,
         );
-        assert_eq!(state.results[0].item.name, "JSON 工具");
+        assert!(state
+            .results
+            .iter()
+            .any(|r| r.item.id == "plugin-trigger:com.kite.devtools:json"));
+        state.selected = state
+            .results
+            .iter()
+            .position(|r| r.item.id == "plugin-trigger:com.kite.devtools:json")
+            .unwrap();
         // Enter = 打开
         let _ = launch_selected(&mut state);
         assert!(
@@ -1372,7 +1438,7 @@ mod plugin_ui_tests {
             reg.insert_loaded(devtools_plugin());
         }
         let _ = update(&mut state, Message::QueryChanged("json".into()));
-        assert!(state.pending_tool_confirm.is_some());
+        assert!(state.pending_tool_confirm.is_none());
         let _ = on_key(
             &mut state,
             Key::Named(Named::Escape),
@@ -1389,15 +1455,20 @@ mod plugin_ui_tests {
         }
         let _ = update(&mut state, Message::QueryChanged(r#"json {"a":1}"#.into()));
         assert!(!state.plugin_tool_open, "带 payload 也不得直接开窗");
-        assert!(state.pending_tool_confirm.is_some());
-        assert_eq!(
-            state
-                .pending_tool_confirm
-                .as_ref()
-                .and_then(|p| p.payload.as_deref()),
-            Some(r#"{"a":1}"#)
+        assert!(state.pending_tool_confirm.is_none());
+        state.apply_app_search_ready(
+            state.app_query_generation,
+            state.query.clone(),
+            vec![],
+            0,
+            state.index_generation,
         );
-        let _ = update(&mut state, Message::PluginConfirmJsonTool);
+        state.selected = state
+            .results
+            .iter()
+            .position(|r| r.item.id == "plugin-trigger:com.kite.devtools:json")
+            .unwrap();
+        let _ = launch_selected(&mut state);
         assert!(state.plugin_tool_open);
         assert!(state.json_result.contains("\"a\": 1"), "确认后预填并格式化");
     }
@@ -1511,22 +1582,113 @@ mod plugin_ui_tests {
     }
 
     #[test]
-    fn inline_calculator_provider_does_not_need_tool_confirm() {
+    fn calculator_trigger_requires_enter_and_keeps_core_results() {
         let mut state = test_state("=1+2");
         {
             let mut reg = state.plugin_registry.lock().unwrap();
             reg.insert_loaded(calculator_plugin());
         }
         let _ = update(&mut state, Message::QueryChanged("=1+2".into()));
+        assert!(state.provider_mode.is_none());
+        let core = SearchResult::scored(
+            AppItem::scanned(
+                "core:test".into(),
+                "本机结果".into(),
+                "test".into(),
+                None,
+                None,
+                "app",
+            ),
+            1000,
+            "app",
+        );
+        state.apply_app_search_ready(
+            state.app_query_generation,
+            state.query.clone(),
+            vec![core],
+            0,
+            state.index_generation,
+        );
+        assert_eq!(state.results[0].item.id, "core:test");
+        assert!(state
+            .results
+            .iter()
+            .any(|r| r.item.id == "plugin-trigger:com.kite.calculator:calculate"));
+        state.selected = state
+            .results
+            .iter()
+            .position(|r| r.item.id == "plugin-trigger:com.kite.calculator:calculate")
+            .unwrap();
+        let _ = launch_selected(&mut state);
         assert!(
             state
                 .provider_mode
                 .as_ref()
                 .is_some_and(|a| a.provider_id == "calculate"),
-            "内联插件直接进 Provider，无需二次确认"
+            "选中插件入口后进入 Provider"
         );
         assert!(state.pending_tool_confirm.is_none());
         assert!(!state.plugin_tool_open);
+    }
+
+    #[test]
+    fn punctuation_trigger_still_shows_plugin_entry() {
+        let mut state = test_state("");
+        state
+            .plugin_registry
+            .lock()
+            .unwrap()
+            .insert_loaded(calculator_plugin());
+        let _ = update(&mut state, Message::QueryChanged("=".into()));
+        assert!(state.provider_mode.is_none());
+        if state.results_stale {
+            state.apply_app_search_ready(
+                state.app_query_generation,
+                state.query.clone(),
+                vec![],
+                0,
+                state.index_generation,
+            );
+        }
+        assert!(state
+            .results
+            .iter()
+            .any(|r| r.item.id == "plugin-trigger:com.kite.calculator:calculate"));
+    }
+
+    #[test]
+    fn hash_opens_independent_input_and_result_window_after_selection() {
+        let mut state = test_state("");
+        state
+            .plugin_registry
+            .lock()
+            .unwrap()
+            .insert_loaded(devtools_plugin());
+        let _ = update(&mut state, Message::QueryChanged("hash abc".into()));
+        assert!(state.hash_tool_window.is_none());
+        state.apply_app_search_ready(
+            state.app_query_generation,
+            state.query.clone(),
+            vec![],
+            0,
+            state.index_generation,
+        );
+        state.selected = state
+            .results
+            .iter()
+            .position(|r| r.item.id == "plugin-trigger:com.kite.devtools:hash")
+            .unwrap();
+        let _ = launch_selected(&mut state);
+        assert!(state.hash_tool_window.is_some());
+        assert!(state.provider_mode.is_none());
+        assert_eq!(state.hash_result, hash_tool::sha256_hex("abc"));
+        let _ = update(&mut state, Message::HashToolPasteReady(Some("kite".into())));
+        assert_eq!(hash_tool::input_text(&state.hash_editor), "kite");
+        assert_eq!(state.hash_result, hash_tool::sha256_hex("kite"));
+        let _ = update(&mut state, Message::HashToolClear);
+        assert!(state.hash_result.is_empty());
+        let _ = update(&mut state, Message::PluginCloseHashTool);
+        assert!(state.hash_tool_window.is_none());
     }
 }
 
