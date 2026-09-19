@@ -1002,11 +1002,9 @@ pub(super) fn open_settings(state: &mut State) -> Task<Message> {
     let Some(id) = state.window_id else {
         return Task::none();
     };
-    Task::batch([
-        settings_window_task(id),
-        // 与 show_launcher 一致：物理定位 + 窗口 scale 转逻辑，避免 2K/1K 缩放偏移。
-        place_on_cursor_monitor_task(id, SETTINGS_W, SETTINGS_H),
-    ])
+    settings_window_task(id)
+        // 先切换到设置尺寸，再按该尺寸居中，避免窗口任务并行时互相覆盖位置。
+        .chain(place_on_cursor_monitor_task(id, SETTINGS_W, SETTINGS_H))
 }
 
 const SETTINGS_W: f32 = 720.0;
@@ -1243,24 +1241,20 @@ pub(super) fn close_hash_tool_panel(state: &mut State) -> Task<Message> {
     window::close(id)
 }
 
-/// 关闭设置：窗口切回搜索尺寸并聚焦输入框。
+/// 关闭设置：恢复搜索尺寸和居中位置，再聚焦输入框。
 pub(super) fn close_settings(state: &mut State) -> Task<Message> {
     state.settings_open = false;
     state.flash = None;
     state.plugin_docs_open = None;
     // 工具面板是独立形态，不随设置关闭而打开。
     state.qlog(|| "settings close".to_owned());
-    Task::batch([
-        state
-            .window_id
-            .map(|id| window::set_level(id, window::Level::Normal))
-            .unwrap_or_else(Task::none),
-        state
-            .window_id
-            .map(|id| window::resize(id, iced::Size::new(WINDOW_W, WINDOW_H)))
-            .unwrap_or_else(Task::none),
-        iced::widget::operation::focus(state.input_id.clone()),
-    ])
+    let Some(id) = state.window_id else {
+        return Task::none();
+    };
+    window::set_level(id, window::Level::Normal)
+        .chain(window::resize(id, iced::Size::new(WINDOW_W, WINDOW_H)))
+        .chain(place_on_cursor_monitor_task(id, WINDOW_W, WINDOW_H))
+        .chain(iced::widget::operation::focus(state.input_id.clone()))
 }
 
 pub(super) fn load_aliases(state: &mut State) {

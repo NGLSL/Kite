@@ -67,29 +67,42 @@ pub fn spawn(tx: UnboundedSender<Message>, icon_png: &'static [u8]) {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
+            // On Windows, the default tray-icon behavior opens the menu on a
+            // left-button release. That release is queued before
+            // TrackPopupMenu blocks for the menu selection, so selecting a
+            // menu item can leave both a MenuEvent and a Left/Up
+            // TrayIconEvent in this iteration. The menu action must win;
+            // otherwise OpenSettings is immediately followed by Hotkey,
+            // which hides the window again.
+            let mut menu_event_seen = false;
             while let Ok(ev) = MenuEvent::receiver().try_recv() {
                 if ev.id == open_item.id() {
+                    menu_event_seen = true;
                     plog("tray menu: open");
                     let _ = tx.unbounded_send(Message::Hotkey(std::time::Instant::now()));
                 } else if ev.id == settings_item.id() {
+                    menu_event_seen = true;
                     plog("tray menu: open settings");
                     let _ = tx.unbounded_send(Message::OpenSettings);
                 } else if ev.id == rescan_item.id() {
+                    menu_event_seen = true;
                     plog("tray menu: rescan");
                     let _ = tx.unbounded_send(Message::Rescan);
                 } else if ev.id == quit_item.id() {
+                    menu_event_seen = true;
                     plog("tray menu: quit");
                     let _ = tx.unbounded_send(Message::Quit);
                 }
             }
             while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
-                if let TrayIconEvent::Click {
-                    button: tray_icon::MouseButton::Left,
-                    button_state: tray_icon::MouseButtonState::Up,
-                    ..
-                } = ev
-                {
-                    let _ = tx.unbounded_send(Message::Hotkey(std::time::Instant::now()));
+                if !menu_event_seen {
+                    if let TrayIconEvent::Click {
+                        button: tray_icon::MouseButton::Left,
+                        button_state: tray_icon::MouseButtonState::Up,
+                        ..
+                    } = ev {
+                        let _ = tx.unbounded_send(Message::Hotkey(std::time::Instant::now()));
+                    }
                 }
             }
         }
