@@ -133,20 +133,46 @@ pub(super) fn search_row<'a>(state: &'a State, tokens: ThemeTokens) -> Element<'
                 Some(state.file_filter),
                 Message::FileFilterChanged,
             )
-            .width(112.0)
-            .padding([5.0, 8.0])
-            .text_size(12.0)
+            .width(128.0)
+            .padding([7.0, 10.0])
+            .text_size(12.5)
             .font(name_font())
-            .style(move |_theme, _status| pick_list::Style {
+            .style(move |_theme, status| pick_list::Style {
                 text_color: tokens.text_primary,
                 placeholder_color: tokens.text_muted,
-                handle_color: tokens.text_muted,
+                handle_color: if matches!(status, pick_list::Status::Active) {
+                    tokens.text_muted
+                } else {
+                    tokens.accent
+                },
+                background: Background::Color(tokens.bg_elevated),
+                border: Border {
+                    color: if matches!(status, pick_list::Status::Opened { .. }) {
+                        Color {
+                            a: 0.6,
+                            ..tokens.accent
+                        }
+                    } else {
+                        tokens.border_window
+                    },
+                    width: 1.0,
+                    radius: border::radius(8.0),
+                },
+            })
+            .menu_style(move |_theme| iced::widget::overlay::menu::Style {
                 background: Background::Color(tokens.bg_elevated),
                 border: Border {
                     color: tokens.border_window,
                     width: 1.0,
-                    radius: border::radius(6.0),
+                    radius: border::radius(8.0),
                 },
+                text_color: tokens.text_primary,
+                selected_text_color: tokens.text_primary,
+                selected_background: Background::Color(Color {
+                    a: if tokens.is_dark { 0.2 } else { 0.11 },
+                    ..tokens.accent
+                }),
+                shadow: iced::Shadow::default(),
             });
             row_content = row_content.push(filter);
         } else {
