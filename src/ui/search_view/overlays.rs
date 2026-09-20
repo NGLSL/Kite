@@ -161,7 +161,7 @@ pub(super) fn menu_overlay<'a>(
         entries.push(("复制 target", MenuAction::CopyTarget));
     }
     entries.push(("复制名称", MenuAction::CopyName));
-    if item.source != "everything-status" {
+    if item.source != "everything-status" && item.source != "direct-path" {
         entries.push((
             if pinned { "取消固定" } else { "固定" },
             MenuAction::TogglePin,

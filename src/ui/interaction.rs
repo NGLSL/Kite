@@ -96,15 +96,26 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             .hash_tool_window
             .map(window::drag)
             .unwrap_or_else(Task::none),
+        Message::Base64ToolDrag => state
+            .base64_tool_window
+            .map(window::drag)
+            .unwrap_or_else(Task::none),
         Message::JsonToolWindowClosed(id) => {
             if state.json_tool_window == Some(id) {
                 state.json_tool_window = None;
-                state.plugin_tool_open = state.hash_tool_window.is_some();
+                state.plugin_tool_open =
+                    state.hash_tool_window.is_some() || state.base64_tool_window.is_some();
                 state.qlog(|| "json tool window closed".to_owned());
             } else if state.hash_tool_window == Some(id) {
                 state.hash_tool_window = None;
-                state.plugin_tool_open = state.json_tool_window.is_some();
+                state.plugin_tool_open =
+                    state.json_tool_window.is_some() || state.base64_tool_window.is_some();
                 state.qlog(|| "hash tool window closed".to_owned());
+            } else if state.base64_tool_window == Some(id) {
+                state.base64_tool_window = None;
+                state.plugin_tool_open =
+                    state.json_tool_window.is_some() || state.hash_tool_window.is_some();
+                state.qlog(|| "base64 tool window closed".to_owned());
             }
             Task::none()
         }
@@ -127,6 +138,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 }
             }
             state.query = q;
+            state.request_direct_path();
             // 任何新输入都回到编辑模式；方向键重新从输入框进入结果导航。
             state.navigation_mode = NavigationMode::Input;
             // 修改查询时取消尚未打开的 JSON 工具确认。
@@ -147,6 +159,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::ClearQuery => {
             state.query.clear();
+            state.request_direct_path();
             state.navigation_mode = NavigationMode::Input;
             state.request_file_search();
             state.refresh_results();
@@ -223,6 +236,14 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 )
             });
             state.file_results = hits;
+            state.refresh_results();
+            Task::none()
+        }
+        Message::DirectPathReady(generation, query, hits) => {
+            if generation != state.direct_path_generation || query != state.query {
+                return Task::none();
+            }
+            state.direct_path_results = hits;
             state.refresh_results();
             Task::none()
         }
@@ -813,6 +834,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                     state.exit_provider_mode();
                 }
                 state.query = example;
+                state.request_direct_path();
                 state.pending_tool_confirm = None;
                 state.request_file_search();
                 state.refresh_results();
@@ -836,6 +858,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 .unwrap_or_else(Task::none)
         }
         Message::PluginOpenJsonTool => open_json_tool_panel(state),
+        Message::PluginOpenBase64Tool => open_base64_tool_panel(state, None, false),
         Message::PluginConfirmJsonTool => confirm_json_tool_open(state),
         Message::PluginCancelJsonToolConfirm => cancel_json_tool_confirm(state),
         Message::PluginCloseJsonTool => close_json_tool_panel(state),
@@ -897,16 +920,16 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
                 };
                 state.hash_tool_note = None;
             } else {
-                state.hash_tool_note = Some("剪贴板为空".into());
+                state.hash_tool_note = Some((true, "剪贴板为空".into()));
             }
             Task::none()
         }
         Message::HashToolCopyResult => {
             if state.hash_result.is_empty() {
-                state.hash_tool_note = Some("请先输入文本".into());
+                state.hash_tool_note = Some((true, "请先输入文本".into()));
                 Task::none()
             } else {
-                state.hash_tool_note = Some("已复制 SHA-256".into());
+                state.hash_tool_note = Some((false, "已复制 SHA-256".into()));
                 iced::clipboard::write(state.hash_result.clone())
             }
         }
@@ -914,6 +937,66 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
             state.hash_editor = iced::widget::text_editor::Content::default();
             state.hash_result.clear();
             state.hash_tool_note = None;
+            Task::none()
+        }
+        Message::PluginCloseBase64Tool => close_base64_tool_panel(state),
+        Message::Base64ToolEdit(action) => {
+            let previous = action.is_edit().then(|| state.base64_editor.text());
+            state.base64_editor.perform(action);
+            if previous.is_some_and(|text| text != state.base64_editor.text()) {
+                state.base64_result.clear();
+                state.base64_tool_note = None;
+            }
+            Task::none()
+        }
+        Message::Base64ToolEncode => {
+            let raw = state.base64_editor.text();
+            if raw.is_empty() {
+                state.base64_result.clear();
+                state.base64_tool_note = Some((true, "请先输入要编码的文本".into()));
+            } else {
+                state.base64_result = base64_tool::encode_utf8(&raw);
+                state.base64_tool_note = Some((false, "已编码为标准 Base64".into()));
+            }
+            Task::none()
+        }
+        Message::Base64ToolDecode => {
+            match base64_tool::decode_utf8(&state.base64_editor.text()) {
+                Ok(decoded) => {
+                    state.base64_result = decoded;
+                    state.base64_tool_note = Some((false, "已解码为 UTF-8 文本".into()));
+                }
+                Err(error) => {
+                    state.base64_result.clear();
+                    state.base64_tool_note = Some((true, error));
+                }
+            }
+            Task::none()
+        }
+        Message::Base64ToolPaste => iced::clipboard::read().map(Message::Base64ToolPasteReady),
+        Message::Base64ToolPasteReady(content) => {
+            if let Some(raw) = content.filter(|s| !s.is_empty()) {
+                state.base64_editor = iced::widget::text_editor::Content::with_text(&raw);
+                state.base64_result.clear();
+                state.base64_tool_note = None;
+            } else {
+                state.base64_tool_note = Some((true, "剪贴板为空".into()));
+            }
+            Task::none()
+        }
+        Message::Base64ToolCopyResult => {
+            if state.base64_result.is_empty() {
+                state.base64_tool_note = Some((true, "右侧没有可复制的结果".into()));
+                Task::none()
+            } else {
+                state.base64_tool_note = Some((false, "已复制结果".into()));
+                iced::clipboard::write(state.base64_result.clone())
+            }
+        }
+        Message::Base64ToolClear => {
+            state.base64_editor = iced::widget::text_editor::Content::default();
+            state.base64_result.clear();
+            state.base64_tool_note = None;
             Task::none()
         }
     }
@@ -1383,6 +1466,13 @@ mod plugin_ui_tests {
                                 value: "hash".into(),
                             }],
                         },
+                        PluginProvider {
+                            id: "base64".into(),
+                            response_mode: "panel".into(),
+                            triggers: vec![Trigger::Keyword {
+                                value: "base64".into(),
+                            }],
+                        },
                     ],
                 },
             },
@@ -1689,6 +1779,93 @@ mod plugin_ui_tests {
         assert!(state.hash_result.is_empty());
         let _ = update(&mut state, Message::PluginCloseHashTool);
         assert!(state.hash_tool_window.is_none());
+    }
+
+    #[test]
+    fn clicking_tool_editors_keeps_existing_results() {
+        use iced::widget::text_editor::{Action, Content};
+
+        let mut state = test_state("");
+        state.json_editor = Content::with_text("{\"a\":1}");
+        let _ = update(&mut state, Message::JsonToolFormat);
+        let _ = update(&mut state, Message::HashToolPasteReady(Some("abc".into())));
+        state.base64_editor = Content::with_text("listary");
+        let _ = update(&mut state, Message::Base64ToolEncode);
+        assert_eq!(state.json_result, "{\n  \"a\": 1\n}");
+        assert_eq!(state.hash_result, hash_tool::sha256_hex("abc"));
+        assert_eq!(state.base64_result, "bGlzdGFyeQ==");
+
+        let json_result = state.json_result.clone();
+        let hash_result = state.hash_result.clone();
+        let base64_result = state.base64_result.clone();
+        let click = Action::Click(iced::Point::new(0.0, 0.0));
+
+        let _ = update(&mut state, Message::JsonToolEdit(click.clone()));
+        assert_eq!(state.json_result, json_result);
+        let _ = update(&mut state, Message::HashToolEdit(click.clone()));
+        assert_eq!(state.hash_result, hash_result);
+        let _ = update(&mut state, Message::Base64ToolEdit(click));
+        assert_eq!(state.base64_editor.text(), "listary");
+        assert_eq!(state.base64_result, base64_result);
+
+        let _ = update(
+            &mut state,
+            Message::Base64ToolEdit(Action::Edit(iced::widget::text_editor::Edit::Insert('!'))),
+        );
+        assert!(state.base64_result.is_empty());
+    }
+
+    #[test]
+    fn base64_search_opens_tool_and_supports_both_directions() {
+        let mut state = test_state("");
+        state
+            .plugin_registry
+            .lock()
+            .unwrap()
+            .insert_loaded(devtools_plugin());
+        let _ = update(&mut state, Message::QueryChanged("base64 Kite".into()));
+        state.apply_app_search_ready(
+            state.app_query_generation,
+            state.query.clone(),
+            vec![],
+            0,
+            state.index_generation,
+        );
+        state.selected = state
+            .results
+            .iter()
+            .position(|r| r.item.id == "plugin-trigger:com.kite.devtools:base64")
+            .unwrap();
+        let _ = launch_selected(&mut state);
+        assert!(state.base64_tool_window.is_some());
+        assert!(state.provider_mode.is_none());
+        assert_eq!(state.base64_result, "S2l0ZQ==");
+
+        let _ = update(&mut state, Message::Base64ToolPasteReady(Some("S2l0ZQ==".into())));
+        let _ = update(&mut state, Message::Base64ToolDecode);
+        assert_eq!(state.base64_result, "Kite");
+
+        let _ = update(&mut state, Message::Base64ToolPasteReady(Some("bad!".into())));
+        let _ = update(&mut state, Message::Base64ToolDecode);
+        assert!(state.base64_result.is_empty());
+        assert!(state.base64_tool_note.as_ref().is_some_and(|(error, _)| *error));
+
+        let _ = update(&mut state, Message::PluginCloseBase64Tool);
+        assert!(state.base64_tool_window.is_none());
+        assert!(!state.plugin_tool_open);
+    }
+
+    #[test]
+    fn base64_settings_entry_keeps_main_window_visible() {
+        let mut state = test_state("");
+        state.settings_open = true;
+        let _ = update(&mut state, Message::PluginOpenBase64Tool);
+        assert!(state.base64_tool_window.is_some());
+        assert!(state.settings_open);
+        assert!(!state.hidden);
+        let _ = update(&mut state, Message::PluginCloseBase64Tool);
+        assert!(state.base64_tool_window.is_none());
+        assert!(state.settings_open);
     }
 }
 

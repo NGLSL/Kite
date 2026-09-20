@@ -24,6 +24,14 @@ pub enum ResultAction {
     OpenFile {
         path: String,
     },
+    /// 用户输入且经文件系统确认的本地路径。
+    OpenLocalPath {
+        path: String,
+    },
+    /// 在资源管理器中定位文件；目录则直接打开。
+    RevealPath {
+        path: String,
+    },
     OpenUrl {
         url: String,
     },

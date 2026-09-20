@@ -309,13 +309,22 @@ impl HistoryDb {
 mod tests {
     use super::*;
 
-    fn temp_db() -> HistoryDb {
-        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("kite-settings-{}", std::process::id()));
+    fn temp_path(prefix: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let sequence = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("kite-{prefix}-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        let nanos = std::time::SystemTime::now().elapsed().unwrap().as_nanos();
-        let path = dir.join(format!("{nanos}-{n}.db"));
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        dir.join(format!("{nanos}-{sequence}.db"))
+    }
+
+    fn temp_db() -> HistoryDb {
+        let path = temp_path("settings");
         HistoryDb::open(&path).expect("open temp db")
     }
 
@@ -342,10 +351,7 @@ mod tests {
 
     #[test]
     fn query_log_setting_survives_reopen() {
-        let dir = std::env::temp_dir().join(format!("kite-querylog-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let nanos = std::time::SystemTime::now().elapsed().unwrap().as_nanos();
-        let path = dir.join(format!("qlog-{nanos}.db"));
+        let path = temp_path("querylog");
         {
             let mut db = HistoryDb::open(&path).expect("open temp db");
             db.save_setting("query_log", "0").unwrap();
@@ -421,10 +427,7 @@ mod tests {
     #[test]
     fn migration_survives_reopen() {
         // 模拟旧库（无 target_id）→ 打开后应补列且数据保留
-        let dir = std::env::temp_dir().join(format!("kite-migrate-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let nanos = std::time::SystemTime::now().elapsed().unwrap().as_nanos();
-        let path = dir.join(format!("migrate-{nanos}.db"));
+        let path = temp_path("migrate");
         {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(

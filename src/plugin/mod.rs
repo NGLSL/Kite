@@ -220,8 +220,8 @@ pub fn official_display_meta(id: &str) -> Option<(&'static str, &'static str, &'
         )),
         "com.kite.devtools" => Some((
             "开发者工具",
-            "uuid / hash / 时间戳 / JSON 工具等常用开发查询",
-            "在搜索框输入关键词，触发对应开发工具。\n\n工具\n  uuid\n    生成一条 UUID，Enter 复制。\n\n  hash <文本>\n    计算哈希（如 hash abc）。\n\n  ts\n    时间戳相关查询。\n\n  json\n    搜索 json，列表只显示「JSON 工具」，Enter 打开独立窗。\n    也可在本插件说明页点「打开 JSON 工具」（需确认）。\n    左原始、右结果：格式化 / 压缩 / 复制。\n    不改动启动器主窗口；Esc 或 × 只关工具窗。\n\n  json <JSON>\n    搜索后 Enter 打开工具窗，并自动格式化预填。\n    示例：json {\"name\":\"kite\",\"n\":1}\n\n说明\n  uuid / hash / ts 为内联结果，无需二次确认。\n  JSON 工具为独立窗口，打开前需确认。\n  命令入口：搜索「生成 UUID」。",
+            "uuid / hash / 时间戳 / JSON / Base64 等常用开发工具",
+            "在搜索框输入关键词，触发对应开发工具。\n\n工具\n  uuid\n    生成一条 UUID，Enter 复制。\n\n  hash <文本>\n    打开独立 Hash 工具窗，预填文本并计算 SHA-256。\n\n  ts\n    时间戳相关查询。\n\n  json\n    搜索 json，列表只显示「JSON 工具」，Enter 打开独立窗。\n    也可在本插件说明页点「打开 JSON 工具」（需确认）。\n    左原始、右结果：格式化 / 压缩 / 复制。\n    不改动启动器主窗口；Esc 或 × 只关工具窗。\n\n  json <JSON>\n    搜索后 Enter 打开工具窗，并自动格式化预填。\n    示例：json {\"name\":\"kite\",\"n\":1}\n\n  base64\n    搜索 base64，列表只显示「Base64 工具」，Enter 打开独立窗。\n    可在文本与 Base64 之间编码或解码；Esc 或 × 只关工具窗。\n\n  base64 <文本>\n    搜索后 Enter 打开工具窗，预填文本并自动编码。\n    示例：base64 hello\n\n说明\n  uuid / ts 为内联结果。Hash、JSON 和 Base64 使用独立窗口。\n  命令入口：搜索「生成 UUID」。",
         )),
         _ => None,
     }
@@ -381,6 +381,8 @@ mod discover_tests {
         let usage = display_plugin_usage(&dt);
         assert!(usage.contains("JSON 工具"), "官方用法不得沿用旧「面板」文案");
         assert!(!usage.contains("打开 JSON 面板"), "旧入口名应被宿主文案覆盖");
+        assert!(display_plugin_blurb(&dt).contains("Base64"));
+        assert!(usage.contains("base64 hello"));
     }
 
     #[test]

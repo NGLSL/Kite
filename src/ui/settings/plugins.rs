@@ -1,4 +1,4 @@
-//! 插件管理：设置内列表 + 说明详情。JSON 工具不在列表单独成卡，从搜索 json 或开发者工具说明打开。
+//! 插件管理：设置内列表 + 说明详情。开发者工具窗从搜索或插件说明打开。
 
 use iced::widget::{button, column, container, row, space::Space, text, text_input};
 use iced::{alignment, border, color, Background, Border, Color, Element, Length};
@@ -370,7 +370,7 @@ fn plugin_detail_page(
     .spacing(8.0)
     .align_y(alignment::Alignment::Center);
 
-    let mut title_extra = row![
+    let title_extra = row![
         text(name).size(20.0).color(tokens.text_primary).font(name_font()),
         text(format!("v{version}")).size(12.0).color(tokens.text_muted),
         status_pill(&tech_label, status_bad, enabled, tokens),
@@ -378,31 +378,39 @@ fn plugin_detail_page(
     .spacing(10.0)
     .align_y(alignment::Alignment::Center);
 
+    let mut title_section = column![title_extra].spacing(12.0);
     if id == "com.kite.devtools" {
-        title_extra = title_extra.push(Space::new().width(Length::Fill));
+        let mut tool_actions = row![].spacing(8.0).align_y(alignment::Alignment::Center);
         if state
             .pending_tool_confirm
             .as_ref()
             .is_some_and(|p| p.from_settings)
         {
-            title_extra = title_extra.push(primary_button(
+            tool_actions = tool_actions.push(primary_button(
                 "确认打开 JSON 工具".into(),
                 Message::PluginConfirmJsonTool,
                 tokens,
             ));
-            title_extra = title_extra.push(ghost_button(
+            tool_actions = tool_actions.push(ghost_button(
                 "取消".into(),
                 Message::PluginCancelJsonToolConfirm,
                 false,
                 tokens,
             ));
         } else {
-            title_extra = title_extra.push(primary_button(
+            tool_actions = tool_actions.push(primary_button(
                 "打开 JSON 工具".into(),
                 Message::PluginOpenJsonTool,
                 tokens,
             ));
         }
+        tool_actions = tool_actions.push(ghost_button(
+            "打开 Base64 工具".into(),
+            Message::PluginOpenBase64Tool,
+            false,
+            tokens,
+        ));
+        title_section = title_section.push(tool_actions);
     }
 
     let mut usage_col = column![
@@ -448,7 +456,7 @@ fn plugin_detail_page(
 
     let card = elevated_card(
         column![
-            title_extra,
+            title_section,
             text(blurb)
                 .size(13.0)
                 .color(tokens.text_primary)

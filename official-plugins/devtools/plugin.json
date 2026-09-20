@@ -4,8 +4,8 @@
     "id": "com.kite.devtools",
     "name": "开发者工具",
     "version": "0.1.0",
-    "description": "uuid / hash / 时间戳 / json 等常用开发查询",
-    "usage": "在搜索框输入关键词，选中插件入口后按 Enter 查看结果；其他搜索结果同时保留。\n\n工具\n  uuid\n    进入插件后生成一条 UUID，Enter 复制。\n\n  hash\n    选中入口后打开独立 Hash 工具窗，输入或粘贴 UTF-8 文本，自动计算 SHA-256，可复制结果。\n\n  hash <文本>\n    打开工具窗时预填文本并计算（如 hash abc）。\n\n  ts\n    进入插件后查询时间戳。\n\n  json\n    选中 JSON 工具入口后 Enter 打开独立窗。\n    也可在本插件说明页点「打开 JSON 工具」（需确认）。\n    左原始、右结果：格式化 / 压缩 / 复制。\n    不改动启动器主窗口；Esc 或 × 只关工具窗。\n\n  json <JSON>\n    选中入口后 Enter 打开工具窗，并自动格式化预填。\n    示例：json {\"name\":\"kite\",\"n\":1}\n\n命令入口：搜索「生成 UUID」。",
+    "description": "uuid / hash / 时间戳 / JSON / Base64 等常用开发工具",
+    "usage": "在搜索框输入关键词，选中插件入口后按 Enter 查看结果；其他搜索结果同时保留。\n\n工具\n  uuid\n    进入插件后生成一条 UUID，Enter 复制。\n\n  hash\n    选中入口后打开独立 Hash 工具窗，输入或粘贴 UTF-8 文本，自动计算 SHA-256，可复制结果。\n\n  hash <文本>\n    打开工具窗时预填文本并计算（如 hash abc）。\n\n  ts\n    进入插件后查询时间戳。\n\n  json\n    选中 JSON 工具入口后 Enter 打开独立窗。\n    也可在本插件说明页点「打开 JSON 工具」（需确认）。\n    左原始、右结果：格式化 / 压缩 / 复制。\n    不改动启动器主窗口；Esc 或 × 只关工具窗。\n\n  json <JSON>\n    选中入口后 Enter 打开工具窗，并自动格式化预填。\n    示例：json {\"name\":\"kite\",\"n\":1}\n\n  base64\n    选中 Base64 工具入口后 Enter 打开独立窗，在文本与 Base64 之间编码或解码。\n    不改动启动器主窗口；Esc 或 × 只关工具窗。\n\n  base64 <文本>\n    打开工具窗，预填文本并自动编码（如 base64 hello）。\n\n命令入口：搜索「生成 UUID」。",
     "author": "Kite"
   },
   "compatibility": {
@@ -19,7 +19,7 @@
     "idle_timeout_ms": 60000
   },
   "contributes": {
-    "examples": ["uuid", "hash abc", "ts", "json {\"a\":1}"],
+    "examples": ["uuid", "hash abc", "ts", "json {\"a\":1}", "base64", "base64 hello"],
     "commands": [
       {
         "id": "uuid",
@@ -38,6 +38,11 @@
         "id": "hash",
         "response_mode": "panel",
         "triggers": [{ "type": "keyword", "value": "hash" }]
+      },
+      {
+        "id": "base64",
+        "response_mode": "panel",
+        "triggers": [{ "type": "keyword", "value": "base64" }]
       },
       {
         "id": "ts",

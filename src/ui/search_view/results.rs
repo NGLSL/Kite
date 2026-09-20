@@ -297,7 +297,7 @@ fn result_card<'a>(
     let icon = render_icon(&r.item, 36.0, tokens);
 
     let tag = match r.item.source.as_str() {
-        "everything" => Some("文件"),
+        "everything" | "direct-path" => Some("文件"),
         "plugin" | "plugin-command" => Some("插件"),
         "browser" | "websearch" => Some("网页"),
         _ => Some("应用"),

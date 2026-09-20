@@ -96,7 +96,9 @@ pub(super) fn on_key(
             }
             // JSON 工具窗：Esc 关闭工具窗，主窗不动。
             if state.plugin_tool_open {
-                return if state.hash_tool_window.is_some() {
+                return if state.base64_tool_window.is_some() {
+                    close_base64_tool_panel(state)
+                } else if state.hash_tool_window.is_some() {
                     close_hash_tool_panel(state)
                 } else {
                     close_json_tool_panel(state)
@@ -118,6 +120,7 @@ pub(super) fn on_key(
             if state.provider_mode.is_some() {
                 state.qlog(|| "provider mode exit (esc)".to_owned());
                 state.query.clear();
+                state.request_direct_path();
                 state.exit_provider_mode();
                 state.refresh_results();
                 return focus(search_view::input_id());
@@ -469,6 +472,8 @@ pub(super) fn exec_result_action(
                 }
             }
         }
+        ResultAction::OpenLocalPath { path } => exec_direct_path(state, &path, false),
+        ResultAction::RevealPath { path } => exec_direct_path(state, &path, true),
         ResultAction::OpenUrl { url } => {
             if !plugin::plugin_url_allowed(&url) {
                 state.qlog(|| "open_url rejected non-http(s)".to_owned());
@@ -596,6 +601,33 @@ pub(super) fn exec_result_action(
     }
 }
 
+fn exec_direct_path(state: &mut State, path: &str, reveal: bool) -> Task<Message> {
+    let Some(candidate) = app::actions::direct_path_candidate(path) else {
+        return flash(state, "路径无效");
+    };
+    let Ok(metadata) = std::fs::metadata(&candidate) else {
+        return flash(state, "路径不存在或无法访问");
+    };
+    if !metadata.is_file() && !metadata.is_dir() {
+        return flash(state, "路径不是文件或文件夹");
+    }
+    let operation = if reveal {
+        app::actions::open_containing_folder(path)
+    } else {
+        app::uwp::launch_shell_path(path)
+    };
+    match operation {
+        Ok(()) => {
+            hide(state);
+            hide_task(state)
+        }
+        Err(error) => {
+            state.qlog(|| format!("direct path action failed: {error}"));
+            flash(state, "无法打开该路径")
+        }
+    }
+}
+
 pub(super) fn exec_native_panel_action(
     state: &mut State,
     native: plugin::panel::NativeAction,
@@ -668,6 +700,9 @@ fn exec_plugin_action(
         if super::hash_tool::is_native_hash_activation(&act) {
             return open_hash_tool_panel(state, Some(act.effective_query));
         }
+        if super::base64_tool::is_native_base64_activation(&act) {
+            return open_base64_tool_panel(state, Some(act.effective_query), true);
+        }
         state.provider_mode = Some(act);
         state.plugin_panel = None;
         state.refresh_results();
@@ -699,6 +734,9 @@ fn exec_plugin_action(
         if let Some((act, initial_query)) = resolved {
             if super::hash_tool::is_native_hash_activation(&act) {
                 return open_hash_tool_panel(state, None);
+            }
+            if super::base64_tool::is_native_base64_activation(&act) {
+                return open_base64_tool_panel(state, None, true);
             }
             // 非内联 json 工具：二次确认，不直接开窗；内联 Provider 照旧。
             if super::json_tool::is_native_json_activation(&act) {
@@ -937,6 +975,7 @@ pub(super) fn hide(state: &mut State) {
     state.alt_digit_consumed = false;
     state.menu = None;
     state.query.clear();
+    state.request_direct_path();
     state.invalidate_file_search();
     // 隐藏后采用后台 Full，用户下次看到的就是新快照。
     super::interaction::apply_pending_full(state);
@@ -1175,11 +1214,13 @@ pub(super) fn open_json_tool_panel_with_payload(
 /// 关闭 JSON 工具窗：只销毁工具窗，主启动器窗口尺寸/内容不动。
 pub(super) fn close_json_tool_panel(state: &mut State) -> Task<Message> {
     let Some(tid) = state.json_tool_window else {
-        state.plugin_tool_open = state.hash_tool_window.is_some();
+        state.plugin_tool_open =
+            state.hash_tool_window.is_some() || state.base64_tool_window.is_some();
         return Task::none();
     };
     state.json_tool_window = None;
-    state.plugin_tool_open = state.hash_tool_window.is_some();
+    state.plugin_tool_open =
+        state.hash_tool_window.is_some() || state.base64_tool_window.is_some();
     state.qlog(|| "json tool close".to_owned());
     window::close(tid)
 }
@@ -1236,8 +1277,72 @@ pub(super) fn close_hash_tool_panel(state: &mut State) -> Task<Message> {
     let Some(id) = state.hash_tool_window.take() else {
         return Task::none();
     };
-    state.plugin_tool_open = state.json_tool_window.is_some();
+    state.plugin_tool_open =
+        state.json_tool_window.is_some() || state.base64_tool_window.is_some();
     state.qlog(|| "hash tool close".to_owned());
+    window::close(id)
+}
+
+/// 打开 Base64 独立窗；搜索触发时隐藏启动器，设置页触发时保留设置页。
+pub(super) fn open_base64_tool_panel(
+    state: &mut State,
+    payload: Option<String>,
+    from_search: bool,
+) -> Task<Message> {
+    if let Some(raw) = payload.filter(|s| !s.is_empty()) {
+        state.base64_editor = iced::widget::text_editor::Content::with_text(&raw);
+        state.base64_result = base64_tool::encode_utf8(&raw);
+        state.base64_tool_note = Some((false, "已编码".into()));
+    }
+    if let Some(id) = state.base64_tool_window {
+        return window::gain_focus(id);
+    }
+    let (w, h) = (base64_tool::TOOL_W, base64_tool::TOOL_H);
+    let (id, opened) = window::open(Settings {
+        size: iced::Size::new(w, h),
+        position: Position::SpecificWith(|win, monitor| {
+            iced::Point::new(
+                (monitor.width - win.width) / 2.0,
+                (monitor.height - win.height) / 2.0,
+            )
+        }),
+        visible: true,
+        resizable: false,
+        decorations: false,
+        level: window::Level::Normal,
+        exit_on_close_request: false,
+        platform_specific: PlatformSpecific {
+            skip_taskbar: false,
+            undecorated_shadow: false,
+            corner_preference: iced::window::settings::platform::CornerPreference::Round,
+            ..PlatformSpecific::default()
+        },
+        ..Settings::default()
+    });
+    state.base64_tool_window = Some(id);
+    state.plugin_tool_open = true;
+    state.qlog(|| "base64 tool open".to_owned());
+    let mut tasks = vec![opened.then(move |_opened| {
+        Task::batch([
+            window::gain_focus(id),
+            place_on_cursor_monitor_task(id, w, h),
+        ])
+    })];
+    if from_search {
+        if let Some(main) = state.window_id {
+            state.hidden = true;
+            tasks.push(window::set_mode(main, window::Mode::Hidden));
+        }
+    }
+    Task::batch(tasks)
+}
+
+pub(super) fn close_base64_tool_panel(state: &mut State) -> Task<Message> {
+    let Some(id) = state.base64_tool_window.take() else {
+        return Task::none();
+    };
+    state.plugin_tool_open = state.json_tool_window.is_some() || state.hash_tool_window.is_some();
+    state.qlog(|| "base64 tool close".to_owned());
     window::close(id)
 }
 

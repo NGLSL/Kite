@@ -42,6 +42,8 @@ fn poc_title(state: &State, window: window::Id) -> String {
         "JSON 工具".to_string()
     } else if state.hash_tool_window == Some(window) {
         "Hash 工具".to_string()
+    } else if state.base64_tool_window == Some(window) {
+        "Base64 工具".to_string()
     } else {
         "Kite".to_string()
     }
@@ -274,6 +276,9 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         file_filter: system::everything::FileFilter::All,
         file_query_generation: 0,
         file_results: Vec::new(),
+        direct_path_generation: 0,
+        direct_path_latest: Default::default(),
+        direct_path_results: Vec::new(),
         app_query_generation: 0,
         results_stale: false,
         index_generation: 0,
@@ -329,6 +334,7 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         plugin_docs_open: None,
         json_tool_window: None,
         hash_tool_window: None,
+        base64_tool_window: None,
         plugin_tool_open: false,
         pending_tool_confirm: None,
         json_editor: iced::widget::text_editor::Content::default(),
@@ -337,6 +343,9 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         hash_editor: iced::widget::text_editor::Content::default(),
         hash_result: String::new(),
         hash_tool_note: None,
+        base64_editor: iced::widget::text_editor::Content::default(),
+        base64_result: String::new(),
+        base64_tool_note: None,
     };
     // Idle Shutdown：定时清扫，不依赖下一次 Provider 触发。
     {

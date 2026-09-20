@@ -1,4 +1,4 @@
-//! 官方 DevTools：单 Runtime 多 Provider（uuid / hash / ts / json）。
+//! 官方 DevTools：单 Runtime 多 Provider（uuid / hash / ts / json / base64）。
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -54,6 +54,22 @@ fn provider_panel(provider: &str, query: &str) -> Value {
                     "default": true,
                     "action": { "type": "copy_text", "text": hex }
                 }]
+            }))
+        }
+        "base64" => {
+            let raw = query.trim();
+            let text = if raw.is_empty() {
+                "宿主 Base64 工具：搜索 base64 后 Enter 打开独立窗，可在文本与 Base64 之间编码或解码。"
+                    .to_string()
+            } else {
+                format!(
+                    "宿主 Base64 工具：搜索 base64 后 Enter 打开独立窗，已预填 {} 个字符。",
+                    raw.chars().count()
+                )
+            };
+            kite_plugin_sdk::panel_response(json!({
+                "blocks": [{ "type": "notice", "level": "info", "text": text }],
+                "actions": []
             }))
         }
         "ts" => {
@@ -140,7 +156,18 @@ mod tests {
         let hash = provider_panel("hash", "abc");
         assert_eq!(hash["panel"]["blocks"][0]["type"], "key_value");
         assert_eq!(hash["panel"]["blocks"][0]["items"][0]["key"], "SHA-256");
-        assert_eq!(hash["panel"]["blocks"][0]["items"][0]["value"], "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(
+            hash["panel"]["blocks"][0]["items"][0]["value"],
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+
+        let base64 = provider_panel("base64", "hello");
+        assert_eq!(base64["type"], "panel");
+        assert_eq!(base64["panel"]["blocks"][0]["type"], "notice");
+        assert!(base64["panel"]["blocks"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("5 个字符"));
 
         let ts = provider_panel("ts", "");
         assert_eq!(ts["panel"]["blocks"][1]["type"], "value");

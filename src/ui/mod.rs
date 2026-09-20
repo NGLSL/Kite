@@ -25,6 +25,7 @@ use crate::system::hotkey::parse_raw;
 use crate::{app, history, log, search, storage, system};
 
 mod actions;
+mod base64_tool;
 mod backend;
 mod font;
 mod hash_tool;
@@ -34,6 +35,7 @@ mod keyboard;
 mod results;
 mod runtime;
 mod search_view;
+mod tool_template;
 mod settings;
 #[cfg(test)]
 mod test_support;
@@ -158,6 +160,8 @@ enum Message {
     FileFilterChanged(system::everything::FileFilter),
     /// 后台 Everything 查询完成；代际和查询文本用于丢弃过期结果。
     FileSearchReady(u64, String, Vec<SearchResult>, u128),
+    /// 后台检查用户输入的绝对路径。
+    DirectPathReady(u64, String, Vec<SearchResult>),
     /// 后台应用搜索完成；代际和查询文本用于丢弃过期结果；末位为索引代际。
     AppSearchReady(u64, String, Vec<SearchResult>, u128, u64),
     /// 托盘菜单：重新扫描应用。
@@ -262,6 +266,7 @@ enum Message {
     PluginToggleDocs(String),
     /// 进入「打开 JSON 工具」二次确认（不直接开窗）。
     PluginOpenJsonTool,
+    PluginOpenBase64Tool,
     /// 确认打开 JSON 独立工具窗。
     PluginConfirmJsonTool,
     /// 取消打开 JSON 工具的二次确认。
@@ -293,6 +298,15 @@ enum Message {
     HashToolPasteReady(Option<String>),
     HashToolCopyResult,
     HashToolClear,
+    Base64ToolDrag,
+    PluginCloseBase64Tool,
+    Base64ToolEdit(iced::widget::text_editor::Action),
+    Base64ToolEncode,
+    Base64ToolDecode,
+    Base64ToolPaste,
+    Base64ToolPasteReady(Option<String>),
+    Base64ToolCopyResult,
+    Base64ToolClear,
 }
 
 /// 插件查询落地载荷（代际 + 结果）。
@@ -358,6 +372,9 @@ struct State {
     file_filter: system::everything::FileFilter,
     file_query_generation: u64,
     file_results: Vec<SearchResult>,
+    direct_path_generation: u64,
+    direct_path_latest: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    direct_path_results: Vec<SearchResult>,
     /// 应用搜索 Query 代际（后台 worker 丢弃过期结果）。
     app_query_generation: u64,
     /// 已展示列表是否已过期：新查询提交后置位，结果落地后清除。
@@ -429,6 +446,7 @@ struct State {
     /// JSON 独立工具窗的窗口 id；None = 未打开。主启动器窗口永不承载工具 UI。
     json_tool_window: Option<window::Id>,
     hash_tool_window: Option<window::Id>,
+    base64_tool_window: Option<window::Id>,
     /// JSON 工具是否打开（与 json_tool_window 同步，供逻辑/测试读取）。
     plugin_tool_open: bool,
     /// 非内联工具打开前的二次确认（JSON）。内联插件（计算器等）不进此状态。
@@ -441,7 +459,10 @@ struct State {
     json_tool_note: Option<(bool, String)>,
     hash_editor: iced::widget::text_editor::Content,
     hash_result: String,
-    hash_tool_note: Option<String>,
+    hash_tool_note: Option<(bool, String)>,
+    base64_editor: iced::widget::text_editor::Content,
+    base64_result: String,
+    base64_tool_note: Option<(bool, String)>,
 }
 
 /// 非内联工具（独立窗）打开前的二次确认载荷。
@@ -460,6 +481,9 @@ fn view(state: &State, window: window::Id) -> iced::Element<'_, Message> {
     }
     if state.hash_tool_window == Some(window) {
         return hash_tool::view(state);
+    }
+    if state.base64_tool_window == Some(window) {
+        return base64_tool::view(state);
     }
     if state.settings_open {
         settings::settings_view(state)

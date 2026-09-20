@@ -5,6 +5,31 @@ use crate::model::{ResultAction, ResultSource};
 use std::sync::Arc;
 
 impl State {
+    pub(super) fn request_direct_path(&mut self) {
+        self.direct_path_generation = self.direct_path_generation.wrapping_add(1);
+        self.direct_path_results.clear();
+        self.direct_path_latest.store(
+            self.direct_path_generation,
+            std::sync::atomic::Ordering::Release,
+        );
+        let query = self.query.clone();
+        if app::actions::direct_path_candidate(&query).is_none() {
+            return;
+        }
+        let generation = self.direct_path_generation;
+        let latest = self.direct_path_latest.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            if latest.load(std::sync::atomic::Ordering::Acquire) != generation {
+                return;
+            }
+            let hits = build_direct_path_results(&query);
+            if let Some(tx) = EVENT_TX.get() {
+                let _ = tx.unbounded_send(Message::DirectPathReady(generation, query, hits));
+            }
+        });
+    }
+
     /// 使正在运行的文件查询失效，并清除其结果。
     pub(super) fn invalidate_file_search(&mut self) {
         self.file_query_generation = self.file_query_generation.wrapping_add(1);
@@ -196,6 +221,7 @@ impl State {
         if self.files_mode {
             prepend_dependency_status(&mut hits, &self.file_results);
         }
+        prepend_direct_path_results(&mut hits, &self.direct_path_results);
         self.results = hits;
         self.selected = 0;
         self.navigation_mode = NavigationMode::Input;
@@ -252,7 +278,10 @@ impl State {
             );
         }
         hits.truncate(search::MAX_RESULTS);
-        if !is_url && !q_norm.is_empty() {
+        if !is_url
+            && !q_norm.is_empty()
+            && app::actions::direct_path_candidate(&self.query).is_none()
+        {
             let has_app_like = hits
                 .iter()
                 .any(|h| h.item.source != "browser" && h.item.source != "websearch");
@@ -642,6 +671,66 @@ fn build_file_results(
         .collect()
 }
 
+fn build_direct_path_results(query: &str) -> Vec<SearchResult> {
+    let Some(path) = app::actions::direct_path_candidate(query) else {
+        return Vec::new();
+    };
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return Vec::new();
+    };
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Vec::new();
+    }
+    let target = path.to_string_lossy().into_owned();
+    let result = |id: &str, title: &str, action: ResultAction| {
+        let item = AppItem::scanned(
+            format!("direct-path:{id}:{target}"),
+            title.to_string(),
+            target.clone(),
+            None,
+            None,
+            "direct-path",
+        );
+        SearchResult::scored(item, 2000, "direct-path")
+            .with_source_action(ResultSource::File, action)
+    };
+    let mut hits = Vec::with_capacity(if metadata.is_file() { 2 } else { 1 });
+    if metadata.is_file() {
+        hits.push(result(
+            "open",
+            "打开文件",
+            ResultAction::OpenLocalPath {
+                path: target.clone(),
+            },
+        ));
+    }
+    hits.push(result(
+        "reveal",
+        "打开文件路径",
+        ResultAction::RevealPath {
+            path: target.clone(),
+        },
+    ));
+    hits
+}
+
+fn prepend_direct_path_results(results: &mut Vec<SearchResult>, direct: &[SearchResult]) {
+    if direct.is_empty() {
+        return;
+    }
+    results.retain(|result| {
+        !direct.iter().any(|path_result| {
+            result
+                .item
+                .target
+                .replace('/', "\\")
+                .eq_ignore_ascii_case(&path_result.item.target.replace('/', "\\"))
+        })
+    });
+    results.splice(0..0, direct.iter().cloned());
+    results.truncate(search::MAX_RESULTS);
+}
+
 fn everything_status_result(
     availability: system::everything::Availability,
 ) -> Option<SearchResult> {
@@ -700,9 +789,10 @@ pub(super) fn is_current_file_response(
 mod tests {
     use super::super::test_support::{settings_result, test_state};
     use super::{
-        build_file_results, everything_status_result, is_current_file_response,
-        prepend_dependency_status,
+        build_direct_path_results, build_file_results, everything_status_result,
+        is_current_file_response, prepend_dependency_status, prepend_direct_path_results,
     };
+    use crate::model::ResultAction;
     use crate::system::everything::{self, Availability};
     use crate::ui::actions::menu_action;
     use crate::ui::MenuAction;
@@ -930,6 +1020,100 @@ mod tests {
 
         assert_eq!(results[0].item.id, everything::DOWNLOAD_RESULT_ID);
         assert_eq!(results.len(), crate::search::MAX_RESULTS);
+    }
+
+    #[test]
+    fn direct_path_offers_two_actions_for_files_and_one_for_directories() {
+        let dir = std::env::temp_dir().join(format!(
+            "kite-path-input-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("extensionless & 100%");
+        std::fs::write(&file, b"test").unwrap();
+
+        let file_hits = build_direct_path_results(&file.to_string_lossy());
+        assert_eq!(file_hits.len(), 2);
+        assert_eq!(file_hits[0].item.display_name, "打开文件");
+        assert!(matches!(
+            file_hits[0].action,
+            ResultAction::OpenLocalPath { .. }
+        ));
+        assert_eq!(file_hits[1].item.display_name, "打开文件路径");
+        assert!(matches!(
+            file_hits[1].action,
+            ResultAction::RevealPath { .. }
+        ));
+
+        let folder_hits = build_direct_path_results(&dir.to_string_lossy());
+        assert_eq!(folder_hits.len(), 1);
+        assert_eq!(folder_hits[0].item.display_name, "打开文件路径");
+        assert!(matches!(
+            folder_hits[0].action,
+            ResultAction::RevealPath { .. }
+        ));
+
+        std::fs::remove_file(&file).unwrap();
+        assert!(build_direct_path_results(&file.to_string_lossy()).is_empty());
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    #[test]
+    fn direct_path_actions_lead_and_replace_duplicate_file_hits() {
+        let mut state = test_state(r"C:\Work\report.txt");
+        let path = state.query.clone();
+        let direct = vec![crate::model::SearchResult::scored(
+            crate::model::AppItem::scanned(
+                "direct:path".into(),
+                "打开文件".into(),
+                path.clone(),
+                None,
+                None,
+                "direct-path",
+            ),
+            2000,
+            "direct-path",
+        )];
+        let duplicate = crate::model::SearchResult::scored(
+            crate::model::AppItem::scanned(
+                "file:duplicate".into(),
+                "report.txt".into(),
+                path.to_uppercase(),
+                None,
+                None,
+                "everything",
+            ),
+            400,
+            "file",
+        );
+        let mut hits = vec![duplicate, super::super::test_support::settings_result()];
+        prepend_direct_path_results(&mut hits, &direct);
+        assert_eq!(hits[0].item.id, "direct:path");
+        assert_eq!(hits.len(), 2);
+
+        state.direct_path_results = direct.clone();
+        state.apply_app_search_ready(
+            state.app_query_generation,
+            state.query.clone(),
+            hits,
+            0,
+            state.index_generation,
+        );
+        assert_eq!(state.results[0].item.id, "direct:path");
+        assert_eq!(state.results.len(), 2);
+
+        state.direct_path_generation = 2;
+        state.query = r"C:\Work\other.txt".into();
+        state.direct_path_results.clear();
+        let _ = super::super::interaction::update(
+            &mut state,
+            super::super::Message::DirectPathReady(1, r"C:\Work\report.txt".into(), direct),
+        );
+        assert!(state.direct_path_results.is_empty());
     }
 
     #[test]

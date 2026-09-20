@@ -1,7 +1,34 @@
 //! 结果上下文动作：打开所在文件夹。
-//! 目标一律来自索引（AppItem / Everything 结果 id），绝不把用户输入拼进 shell。
+//! 索引结果与已验证的用户路径都通过固定系统接口打开，不拼接 shell 命令。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// 仅接受普通盘符绝对路径或 UNC 路径；返回去掉成对外引号后的路径。
+/// 不对文件名中的合法符号做 shell 规则过滤，因为打开时不经过 shell 命令拼接。
+pub fn direct_path_candidate(input: &str) -> Option<PathBuf> {
+    let trimmed = input.trim();
+    let value = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(trimmed);
+    if value.is_empty()
+        || value.contains(['\0', '\r', '\n', '"'])
+        || value.starts_with(r"\\?\")
+        || value.starts_with(r"\\.\")
+    {
+        return None;
+    }
+    let bytes = value.as_bytes();
+    let drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+        && !value[2..].contains(':');
+    let unc = value.starts_with(r"\\")
+        && value[2..].split('\\').take(2).all(|part| !part.is_empty())
+        && value[2..].contains('\\');
+    (drive || unc).then(|| PathBuf::from(value))
+}
 
 fn explorer_select_args(target: &Path) -> Vec<std::ffi::OsString> {
     vec!["/select,".into(), target.as_os_str().to_owned()]
@@ -83,5 +110,21 @@ mod tests {
         assert_eq!(args.len(), 2);
         assert_eq!(args[0], "/select,");
         assert_eq!(args[1], path.as_os_str());
+    }
+
+    #[test]
+    fn direct_path_accepts_ordinary_windows_names_and_rejects_non_paths() {
+        assert_eq!(
+            direct_path_candidate(r#""C:\Work\A & B 100%.txt""#),
+            Some(PathBuf::from(r"C:\Work\A & B 100%.txt"))
+        );
+        assert_eq!(
+            direct_path_candidate(r"\\server\share\report"),
+            Some(PathBuf::from(r"\\server\share\report"))
+        );
+        assert!(direct_path_candidate(r"C:relative.txt").is_none());
+        assert!(direct_path_candidate(r"\\server\").is_none());
+        assert!(direct_path_candidate(r"\\?\C:\Windows").is_none());
+        assert!(direct_path_candidate("https://example.com").is_none());
     }
 }

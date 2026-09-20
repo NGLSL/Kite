@@ -46,6 +46,9 @@ pub(super) fn test_state(query: &str) -> State {
         file_filter: system::everything::FileFilter::All,
         file_query_generation: 0,
         file_results: Vec::new(),
+        direct_path_generation: 0,
+        direct_path_latest: Default::default(),
+        direct_path_results: Vec::new(),
         app_query_generation: 0,
         results_stale: false,
         index_generation: 0,
@@ -96,6 +99,7 @@ pub(super) fn test_state(query: &str) -> State {
         plugin_docs_open: None,
         json_tool_window: None,
         hash_tool_window: None,
+        base64_tool_window: None,
         plugin_tool_open: false,
         pending_tool_confirm: None,
         json_editor: iced::widget::text_editor::Content::default(),
@@ -104,5 +108,8 @@ pub(super) fn test_state(query: &str) -> State {
         hash_editor: iced::widget::text_editor::Content::default(),
         hash_result: String::new(),
         hash_tool_note: None,
+        base64_editor: iced::widget::text_editor::Content::default(),
+        base64_result: String::new(),
+        base64_tool_note: None,
     }
 }

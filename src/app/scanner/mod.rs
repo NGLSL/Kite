@@ -79,9 +79,17 @@ pub fn command_watch_roots() -> Vec<PathBuf> {
 }
 
 fn scan_apps_with_options(icon_dir: &Path, pass: ScanPass, options: &ScanOptions) -> AppIndex {
-    let timed = pass.timed_budget();
+    let budget = pass.timed_budget().then_some(FAST_BUDGET);
+    scan_apps_with_budget(icon_dir, pass, options, budget)
+}
+
+fn scan_apps_with_budget(
+    icon_dir: &Path,
+    pass: ScanPass,
+    options: &ScanOptions,
+    budget: Option<Duration>,
+) -> AppIndex {
     let t0 = Instant::now();
-    let budget: Option<Duration> = if timed { Some(FAST_BUDGET) } else { None };
     let start_depth = pass.start_menu_depth();
     let other_depth = pass.other_source_depth();
     let max_per_dir = pass.max_per_dir();
@@ -470,13 +478,15 @@ mod tests {
         let exe = portable.join("Portable Editor.exe");
         std::fs::write(&exe, b"fixture").unwrap();
         let icon_dir = root.join("icons");
-        let index = scan_apps_pass_with_options(
+        // 这里只验证用户目录能进入检索索引；快扫时限由 pass 测试单独验证。
+        let index = scan_apps_with_budget(
             &icon_dir,
             ScanPass::Fast,
             &ScanOptions {
                 portable_dirs: vec![portable],
                 ..ScanOptions::default()
             },
+            None,
         );
         assert!(
             index
@@ -512,7 +522,8 @@ mod tests {
             force_uwp_refresh: false,
         };
 
-        let bootstrap = scan_apps_pass_with_options(&icon_dir, ScanPass::Bootstrap, &options);
+        // 来源集合与时间预算是两个契约；本测试固定前者，避免主机负载影响收录。
+        let bootstrap = scan_apps_with_budget(&icon_dir, ScanPass::Bootstrap, &options, None);
         assert!(
             !bootstrap
                 .apps
