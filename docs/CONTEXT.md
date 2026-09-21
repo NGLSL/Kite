@@ -11,9 +11,13 @@
 | **Usage / Frequency** | 某 AppItem 被 Kite 启动的次数 |
 | **Recency** | 某 AppItem 最近一次被启动的相对时间 |
 | **Query History** | 「某 Query 最终选了哪个 AppItem」的配对记忆 |
+| **选择置信度 Confidence** | 某 Query 下某个 AppItem 的选择次数占该 Query 总选择次数的比例 |
+| **Learned Relation** | 同一 Query 下反复稳定选中同一 AppItem（次数与占比均过阈值）所形成的习得关系 |
+| **配对新鲜度 Freshness** | Query→App 关系按最近使用时间衰减的程度；陈旧关系不再长期霸榜 |
 | **FinalScore** | MatchScore + 各类加分后的最终排序分 |
 | **明确匹配保护** | 高质量 Match（如 Name Exact）不得被历史分压到低质量匹配之下 |
-| **Pin（固定）** | 用户手动置顶的结果；空 Query 排在最近使用之前，非空 Query 获得固定加分（与历史加分取较大者，不叠加） |
+| **Pin（固定）** | 用户手动置顶的结果。空 Query：检索语义上优先于最近使用；UI 仪表盘按分区渲染（最近区 + 固定区）。非空 Query：固定加分与历史加分**取较大者**，不叠加越界 |
+| **文件模式** | 用户显式开启的文件搜索态；该模式下 Everything 文件命中优先于应用等其余命中。非文件模式文件结果仍追加在应用之后（见 ADR 0002） |
 | **Demote（降权）** | 用户对某入口的可撤销负偏好；非保护层扣分后移，不删除索引项、不改启动目标 |
 | **匹配位置证据** | 命中在原名称上的 start/span/gaps/edit_cost；不可映射记未知，不当作最优起点 |
 | **搜索代际** | Query 代际 + 索引代际；过期结果不得合并进当前列表 |

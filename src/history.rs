@@ -1,9 +1,11 @@
 //! 历史加权：把 Usage / Recency / Query History 映射为排序加分。
-//! 原则（PRD §41–42 / 票 04）：
+//! 原则（PRD §41–42 / 票 04 / Adaptive Search）：
 //! - MatchScore 仍是主信号；明确匹配（用户 Alias / Name Exact）硬保护
 //! - 本 Query 配对优先于全局 Usage；一次选择有限倾向，重复选择对数趋稳
 //! - 相近质量候选可竞争，不把每种匹配方式锁成不可跨越的小层
 //! - 历史总加分有上限；Pin 与历史取较大者；不做纯 LRU
+//! - Query→App 学习分 = 次数强度 × 选择置信度 × 配对新鲜度；
+//!   未形成稳定关系（次数/占比不足）时配对贡献更保守
 
 use std::collections::{HashMap, HashSet};
 
@@ -24,8 +26,15 @@ pub const PROTECTED_TIER_MAX: i32 = 2;
 
 const FREQUENCY_CAP: i32 = 45;
 const RECENCY_CAP: i32 = 40;
-/// Query 配对单独封顶：须明显高于单次 Usage，低于总上限，给 Recency 留空间。
+/// Learned Relation 的配对分上限：须明显高于单次 Usage，低于总上限，给 Recency 留空间。
+/// 未形成 Learned Relation 时不用此上限（见 `WEAK_PAIR_CAP`）。
 const PAIR_CAP: i32 = 110;
+/// 未形成 Learned Relation 时的配对贡献上限（弱历史倾向）。
+const WEAK_PAIR_CAP: i32 = 45;
+/// 形成 Learned Relation 的最小本 Query 选择次数。
+const LEARNED_MIN_COUNT: i64 = 3;
+/// 形成 Learned Relation 的最小选择占比（pair.count / 当前 query 总选择）。
+const LEARNED_MIN_CONFIDENCE: f64 = 0.70;
 
 /// 基础相关性层级：数值越小质量越高。
 pub fn quality_tier(base_score: i32) -> i32 {
@@ -128,7 +137,8 @@ pub fn preference_adjust_with_demote(
     let pinned = prefs.pinned.contains(item_id);
     let u = prefs.usage.get(item_id).cloned().unwrap_or_default();
     let p = prefs.pairs.get(item_id).cloned().unwrap_or_default();
-    let history = history_boost(&prefs.query_norm, &u, &p, prefs.now);
+    let query_pair_total: i64 = prefs.pairs.values().map(|pair| pair.count).sum();
+    let history = history_boost(&u, &p, query_pair_total, prefs.now);
     let mut boost = if pinned {
         PIN_BOOST.max(history)
     } else {
@@ -204,22 +214,66 @@ pub fn apply_personalization(hits: &mut [SearchResult], prefs: &Personalization)
     }
 }
 
-/// 计算历史加分（已 clamp 到 HISTORY_BOOST_MAX）。`_query` 预留调试。
-pub fn history_boost(_query: &str, usage: &UsageStats, pair: &QueryPairStats, now: i64) -> i32 {
-    let q = query_pair_score(pair);
+/// 计算历史加分（已 clamp 到 HISTORY_BOOST_MAX）。
+///
+/// 分层公式（Adaptive Search）：
+/// - **配对学习分** `q`：`CountStrength × Confidence × Freshness`（见 `learned_pair_score`）
+/// - **全局 Usage** `f` + **全局 Recency** `r`：仍按 AppItem 启动次数/最近启动计算，
+///   与配对分相加后再受 `HISTORY_BOOST_MAX` 约束
+///
+/// `query_pair_total` 是当前 Query 下所有 AppItem 的选择次数之和；
+/// 仅持有单条 pair 时传 `pair.count`（置信度视为 1.0）。
+pub fn history_boost(usage: &UsageStats, pair: &QueryPairStats, query_pair_total: i64, now: i64) -> i32 {
+    let q = learned_pair_score(pair, query_pair_total, now);
     let f = frequency_score(usage.launch_count);
     let r = recency_score(usage.last_used_at, now);
     (q + f + r).min(HISTORY_BOOST_MAX)
 }
 
-/// Query→App 配对：本查询的明确选择，优先于全局 Usage。
-/// 1→30, 3→45, 10→62, 30→~78；封顶 PAIR_CAP。
-fn query_pair_score(pair: &QueryPairStats) -> i32 {
+/// 是否形成稳定 Query→App 关系（次数 + 占比双门槛）。
+/// 仅供本模块评分与测试；不作为对外 API。
+fn is_learned_relation(pair: &QueryPairStats, confidence: f64) -> bool {
+    pair.count >= LEARNED_MIN_COUNT && confidence >= LEARNED_MIN_CONFIDENCE
+}
+
+/// Query→App 自适应学习分：CountStrength × Confidence × Freshness。
+/// 未形成 Learned Relation 时配对贡献更保守，避免偶然分散选择锁死首位。
+fn learned_pair_score(pair: &QueryPairStats, query_pair_total: i64, now: i64) -> i32 {
     if pair.count <= 0 {
         return 0;
     }
-    let s = 30.0 + 14.0 * (pair.count as f64).ln();
-    (s.round() as i32).min(PAIR_CAP)
+    let count_strength = 30.0 + 14.0 * (pair.count as f64).ln();
+    let total = if query_pair_total > 0 {
+        query_pair_total as f64
+    } else {
+        pair.count as f64
+    };
+    let confidence = (pair.count as f64 / total).clamp(0.0, 1.0);
+    let freshness = pair_freshness(pair.last_used_at, now);
+    let score = (count_strength * confidence * freshness).round() as i32;
+    let cap = if is_learned_relation(pair, confidence) {
+        PAIR_CAP
+    } else {
+        WEAK_PAIR_CAP
+    };
+    score.clamp(0, cap)
+}
+
+/// Query→App 配对新鲜度：陈旧关系不再长期霸榜（保守分档，不做连续 ML）。
+fn pair_freshness(last_used_at: i64, now: i64) -> f64 {
+    if last_used_at <= 0 || now <= last_used_at {
+        return 1.0;
+    }
+    let age_days = (now - last_used_at) as f64 / 86_400.0;
+    if age_days <= 30.0 {
+        1.0
+    } else if age_days <= 90.0 {
+        0.8
+    } else if age_days <= 180.0 {
+        0.6
+    } else {
+        0.4
+    }
 }
 
 fn frequency_score(count: i64) -> i32 {
@@ -315,7 +369,7 @@ mod tests {
             count: 10_000,
             last_used_at: 0,
         };
-        let b = history_boost("wx", &usage, &pair, 1_000_000);
+        let b = history_boost(&usage, &pair, pair.count, 1_000_000);
         assert!(b <= HISTORY_BOOST_MAX);
     }
 
@@ -330,7 +384,10 @@ mod tests {
             last_used_at: 0,
         };
         let weak = QueryPairStats::default();
-        assert!(history_boost("wx", &usage, &strong, 0) > history_boost("wx", &usage, &weak, 0));
+        assert!(
+            history_boost(&usage, &strong, strong.count, 0)
+                > history_boost(&usage, &weak, 0, 0)
+        );
     }
 
     #[test]
@@ -495,8 +552,8 @@ mod tests {
             count: 30,
             last_used_at: 0,
         };
-        let b1 = history_boost("q", &usage, &one, 0);
-        let b30 = history_boost("q", &usage, &many, 0);
+        let b1 = history_boost(&usage, &one, one.count, 0);
+        let b30 = history_boost(&usage, &many, many.count, 0);
         assert!(b1 > 0, "一次选择应有有限倾向");
         assert!(b1 <= 40, "一次选择加分应有限，实际 {b1}");
         assert!(b30 > b1, "重复选择应增强");
@@ -506,7 +563,7 @@ mod tests {
             count: 10,
             last_used_at: 0,
         };
-        let b10 = history_boost("q", &usage, &ten, 0);
+        let b10 = history_boost(&usage, &ten, ten.count, 0);
         assert!(
             b30 - b10 <= 25,
             "重复选择增幅应递减：10→{b10} 30→{b30}"
@@ -594,7 +651,6 @@ mod tests {
             &pinned,
         );
         let h = history_boost(
-            "p",
             &UsageStats {
                 launch_count: 30,
                 last_used_at: 1_700_000_000,
@@ -603,6 +659,7 @@ mod tests {
                 count: 20,
                 last_used_at: 1_700_000_000,
             },
+            20,
             1_700_086_400,
         );
         let expected = 100 + PIN_BOOST.max(h);
@@ -644,6 +701,87 @@ mod tests {
         assert_eq!(
             hits[0].item.id, "xterminal",
             "同层内历史应把更常用项提到前面"
+        );
+    }
+
+    #[test]
+    fn adaptive_confidence_penalizes_split_query_choices() {
+        // 同 count=5：A 独占 wx，B 与其它应用均分 —— B 学习分应明显更低
+        let usage = UsageStats::default();
+        let focused = QueryPairStats {
+            count: 5,
+            last_used_at: 1_700_000_000,
+        };
+        let split = QueryPairStats {
+            count: 5,
+            last_used_at: 1_700_000_000,
+        };
+        let now = 1_700_000_000;
+        let b_focused = history_boost(&usage, &focused, 5, now);
+        let b_split = history_boost(&usage, &split, 15, now);
+        assert!(b_focused > b_split, "置信度应区分独占与均分：{b_focused} vs {b_split}");
+        assert!(b_split > 0, "均分仍有弱历史倾向");
+    }
+
+    #[test]
+    fn adaptive_learned_relation_requires_count_and_confidence() {
+        let frequent_but_split = QueryPairStats { count: 5, last_used_at: 0 };
+        assert!(!is_learned_relation(&frequent_but_split, 0.33));
+        let rare_but_dedicated = QueryPairStats { count: 2, last_used_at: 0 };
+        assert!(!is_learned_relation(&rare_but_dedicated, 1.0));
+        let habit = QueryPairStats { count: 5, last_used_at: 0 };
+        assert!(is_learned_relation(&habit, 0.8));
+        let strong = QueryPairStats { count: 12, last_used_at: 0 };
+        assert!(is_learned_relation(&strong, 0.9));
+    }
+
+    #[test]
+    fn adaptive_stale_pair_decays_below_fresh_habit() {
+        let usage = UsageStats::default();
+        let pair = QueryPairStats {
+            count: 20,
+            last_used_at: 1_700_000_000,
+        };
+        let total = pair.count;
+        let fresh = history_boost(&usage, &pair, total, pair.last_used_at + 86_400);
+        let half_year = history_boost(&usage, &pair, total, pair.last_used_at + 200 * 86_400);
+        assert!(
+            fresh > half_year,
+            "陈旧配对应衰减：fresh={fresh} stale={half_year}"
+        );
+        assert!(half_year > 0, "衰减后仍保留部分习惯，不归零");
+    }
+
+    #[test]
+    fn adaptive_confidence_uses_full_pairs_map_for_total() {
+        use crate::search::ranker::SCORE_WORD_PREFIX;
+        let mut wechat = hit("wechat");
+        wechat.score = SCORE_WORD_PREFIX;
+        let mut devtools = hit("devtools");
+        devtools.score = SCORE_WORD_PREFIX;
+
+        let mut prefs = Personalization::default();
+        prefs.query_norm = "wx".into();
+        prefs.now = 1_700_086_400;
+        // wx: 微信 12 / 开发者工具 2 / 企业微信 1 —— 微信 conf=80%
+        prefs.pairs.insert(
+            "wechat".into(),
+            QueryPairStats { count: 12, last_used_at: 1_700_000_000 },
+        );
+        prefs.pairs.insert(
+            "devtools".into(),
+            QueryPairStats { count: 2, last_used_at: 1_700_000_000 },
+        );
+        prefs.pairs.insert(
+            "workwx".into(),
+            QueryPairStats { count: 1, last_used_at: 1_700_000_000 },
+        );
+
+        let mut hits = vec![devtools, wechat];
+        apply_personalization(&mut hits, &prefs);
+        assert_eq!(
+            hits[0].item.id, "wechat",
+            "高置信度主选应排在同层低置信度候选之前"
         );
     }
 
