@@ -10,6 +10,7 @@ pub mod manifest;
 pub mod panel;
 pub mod process;
 pub mod protocol;
+pub mod query_worker;
 pub mod registry;
 pub mod safety;
 
@@ -18,6 +19,7 @@ pub use activation::{
     trigger_query_prefix, Activation, ResponseMode, Trigger,
 };
 pub use host::{HostError, PluginHost, PluginRuntimeState, QueryOutcome};
+pub use query_worker::{PluginQueryJob, PluginQueryPayload, PluginQueryWorker};
 pub use install::{
     apply_import_to_registry, import_from_path, import_plugin_dir, install_official_plugins,
     official_plugins_source_dir, seed_official_plugins_if_missing, sync_official_plugins,

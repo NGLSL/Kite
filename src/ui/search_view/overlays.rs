@@ -146,19 +146,10 @@ pub(super) fn menu_overlay<'a>(
         std::path::Path::new(&item.target).is_file() || std::path::Path::new(&item.target).is_dir();
     let pinned = state.pinned.contains(&item.id);
 
-    let is_shell = item
-        .target
-        .trim()
-        .to_ascii_lowercase()
-        .starts_with("shell:appsfolder");
     let mut entries: Vec<(&'static str, MenuAction)> = Vec::new();
     if target_is_fs {
         entries.push(("打开所在文件夹", MenuAction::OpenFolder));
         entries.push(("复制路径", MenuAction::CopyPath));
-    } else if is_shell {
-        entries.push(("复制 AUMID", MenuAction::CopyTarget));
-    } else if !item.target.trim().is_empty() {
-        entries.push(("复制 target", MenuAction::CopyTarget));
     }
     entries.push(("复制名称", MenuAction::CopyName));
     if item.source != "everything-status" && item.source != "direct-path" {

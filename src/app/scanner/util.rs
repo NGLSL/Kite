@@ -41,7 +41,8 @@ pub fn launch_identity(target: &str, args: Option<&str>) -> String {
     )
 }
 
-fn strip_shell_appsfolder(target: &str) -> &str {
+/// `shell:AppsFolder\` 前缀剥离（大小写不敏感）；family / 检索侧共用。
+pub fn strip_shell_appsfolder(target: &str) -> &str {
     const MARKER: &str = "shell:appsfolder";
     if target.len() >= MARKER.len()
         && target.is_char_boundary(MARKER.len())

@@ -931,60 +931,16 @@ fn launch_rep_key(item: &AppItem) -> (u8, u8, &str) {
 }
 
 fn is_shell_package(target: &str) -> bool {
-    let t = target.trim();
-    t.len() >= 16
-        && t.is_char_boundary(16)
-        && t[..16].eq_ignore_ascii_case("shell:appsfolder")
+    crate::app::scanner::is_shell_package(target)
 }
 
-fn is_friendly_source(source: &str) -> bool {
-    crate::model::is_path_formal_source(source)
-}
-
-/// 已确认同一安装、同一启动动作的入口才合并；不单靠同名，不无条件忽略参数。
+/// 已确认同一安装、同一启动动作的入口才合并；契约见 `app::scanner::family`。
 fn should_merge_family(a: &AppItem, b: &AppItem) -> bool {
-    use crate::app::scanner::util::{
-        args_equivalent_for_merge, install_root_dir, names_share_install_family, normalize_path_key,
-    };
-
-    let same_name = names_share_install_family(&a.name, &b.name);
-    let stem_link = exe_stem_matches_name(a, b) || exe_stem_matches_name(b, a);
-    if !same_name && !stem_link {
-        return false;
-    }
-
-    let body_a = strip_shell_target(&a.target);
-    let body_b = strip_shell_target(&b.target);
-    let ta = normalize_path_key(body_a.trim());
-    let tb = normalize_path_key(body_b.trim());
-    if !ta.is_empty() && ta == tb {
-        // 同一 exe：仅当参数等价（或只差 /from=*）才合并
-        return args_equivalent_for_merge(a.args.as_deref(), b.args.as_deref());
-    }
-
-    // 同安装根：不同 exe 的产品族（ksolaunch vs wps.exe）
-    let root_a = install_root_dir(&a.target);
-    let root_b = install_root_dir(&b.target);
-    match (root_a, root_b) {
-        (Some(x), Some(y)) => x == y,
-        (None, Some(_)) | (Some(_), None) => {
-            let shell = is_shell_package(&a.target) || is_shell_package(&b.target);
-            let pair_ok = (is_friendly_source(&a.source) || is_friendly_source(&b.source))
-                || a.source == "app-paths"
-                || b.source == "app-paths";
-            same_name && shell && pair_ok
-        }
-        (None, None) => {
-            same_name && is_shell_package(&a.target) && is_shell_package(&b.target)
-        }
-    }
+    crate::app::scanner::should_merge_family(a, b)
 }
 
 fn strip_shell_target(target: &str) -> &str {
-    let t = target.trim();
-    t.strip_prefix("shell:AppsFolder\\")
-        .or_else(|| t.strip_prefix("shell:appsfolder\\"))
-        .unwrap_or(t)
+    crate::app::scanner::strip_shell_target(target)
 }
 
 /// 非空 Query 的 Tier C 降噪（命令 Alias + Discovery）：
@@ -1161,28 +1117,6 @@ fn build_launch_groups(docs: &[IndexedDoc]) -> (HashMap<DocId, DocId>, HashMap<D
         launch_members.insert(main, members);
     }
     (launch_rep, launch_members)
-}
-
-/// exe 文件名（去扩展）与另一条展示名一致：app-paths 的 `wps` ↔ 快捷方式 `WPS Office` 用。
-fn exe_stem_matches_name(item: &AppItem, other: &AppItem) -> bool {
-    use std::path::Path;
-    let body = item
-        .target
-        .trim()
-        .strip_prefix("shell:AppsFolder\\")
-        .or_else(|| item.target.trim().strip_prefix("shell:appsfolder\\"))
-        .unwrap_or(item.target.trim());
-    let Some(stem) = Path::new(body)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_lowercase())
-    else {
-        return false;
-    };
-    if stem.len() < 3 || stem.contains(' ') {
-        return false;
-    }
-    let family = crate::app::scanner::util::display_family_key(&other.name);
-    family == stem || family.starts_with(&format!("{stem} "))
 }
 
 fn item_extra_keywords(item: &AppItem) -> Vec<String> {

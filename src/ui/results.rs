@@ -24,9 +24,7 @@ impl State {
                 return;
             }
             let hits = build_direct_path_results(&query);
-            if let Some(tx) = EVENT_TX.get() {
-                let _ = tx.unbounded_send(Message::DirectPathReady(generation, query, hits));
-            }
+            send_event(Message::DirectPathReady(generation, query, hits));
         });
     }
 
@@ -51,25 +49,35 @@ impl State {
             let started = Instant::now();
             let results = build_file_results(&query, &icon_dir, filter);
             let elapsed_us = started.elapsed().as_micros();
-            let _ = EVENT_TX
-                .get()
-                .expect("event tx")
-                .unbounded_send(Message::FileSearchReady(
-                    generation, query, results, elapsed_us,
-                ));
+            send_event(Message::FileSearchReady(
+                generation, query, results, elapsed_us,
+            ));
         });
     }
 
     /// 读取当前个性化快照（历史/Pin/降权），供后台 worker 使用。
+    ///
+    /// usage/pin/demote 走内存缓存，避免每次按键全表扫 `usage_history`；
+    /// launch/pin/demote/清空历史后通过 `invalidate_prefs_cache` 重建。
+    /// pairs 仍按当前 query 现查。
     pub(super) fn snapshot_personalization(
-        &self,
+        &mut self,
         q_norm: &str,
     ) -> Option<history::Personalization> {
-        self.history.as_ref().map(|db| history::Personalization {
-            usage: db.usage_all(),
+        let db = self.history.as_ref()?;
+        if self.prefs_cache.is_none() {
+            self.prefs_cache = Some(CachedPrefs {
+                usage: db.usage_all(),
+                pinned: db.pinned_ids().into_iter().collect(),
+                demoted: db.demoted_ids().into_iter().collect(),
+            });
+        }
+        let cached = self.prefs_cache.clone().unwrap_or_default();
+        Some(history::Personalization {
+            usage: cached.usage,
             pairs: db.query_pairs_for(q_norm),
-            pinned: db.pinned_ids().into_iter().collect(),
-            demoted: db.demoted_ids().into_iter().collect(),
+            pinned: cached.pinned,
+            demoted: cached.demoted,
             now: storage::now_ts(),
             query_norm: q_norm.to_string(),
         })
@@ -137,12 +145,9 @@ impl State {
             cache,
             cache_epoch,
             on_done: Arc::new(move |generation, query, hits, elapsed_us| {
-                let _ = EVENT_TX
-                    .get()
-                    .expect("event tx")
-                    .unbounded_send(Message::AppSearchReady(
-                        generation, query, hits, elapsed_us, index_gen,
-                    ));
+                send_event(Message::AppSearchReady(
+                    generation, query, hits, elapsed_us, index_gen,
+                ));
             }),
         };
         self.app_search_worker.submit(job);
@@ -355,76 +360,9 @@ impl State {
                 self.provider_mode = Some(act.clone());
                 self.plugin_query_generation = self.plugin_query_generation.wrapping_add(1);
                 let gen = self.plugin_query_generation;
-                let registry = self.plugin_registry.clone();
-                let host = self.plugin_host.clone();
-                let act_for_thread = act.clone();
-                std::thread::spawn(move || {
-                    let (payload, host_calls) = {
-                        let reg = registry.lock().unwrap_or_else(|e| e.into_inner());
-                        let mut host = host.lock().unwrap_or_else(|e| e.into_inner());
-                        host.set_generation(gen);
-                        host.idle_sweep();
-                        let payload = match host.query(&reg, &act_for_thread, gen) {
-                            Ok(plugin::QueryOutcome::List {
-                                plugin_id,
-                                provider_id,
-                                items,
-                                ..
-                            }) => {
-                                let mapped = items
-                                    .iter()
-                                    .map(|it| {
-                                        plugin::host::list_item_to_search_result(
-                                            &plugin_id,
-                                            &provider_id,
-                                            it,
-                                        )
-                                    })
-                                    .collect();
-                                PluginQueryPayload::List {
-                                    plugin_id,
-                                    provider_id,
-                                    items: mapped,
-                                }
-                            }
-                            Ok(plugin::QueryOutcome::Panel {
-                                plugin_id,
-                                provider_id,
-                                panel,
-                                ..
-                            }) => PluginQueryPayload::Panel {
-                                plugin_id,
-                                provider_id,
-                                panel,
-                            },
-                            Ok(plugin::QueryOutcome::Empty {
-                                plugin_id,
-                                provider_id,
-                                ..
-                            }) => PluginQueryPayload::Empty {
-                                plugin_id,
-                                provider_id,
-                            },
-                            // 过期代际不是插件故障：静默丢弃，避免 UI 误标「崩溃」。
-                            Err(plugin::HostError::StaleGeneration { .. }) => {
-                                PluginQueryPayload::Empty {
-                                    plugin_id: act_for_thread.plugin_id.clone(),
-                                    provider_id: act_for_thread.provider_id.clone(),
-                                }
-                            }
-                            Err(e) => PluginQueryPayload::Error(e.to_string()),
-                        };
-                        let host_calls = host.drain_host_calls();
-                        (payload, host_calls)
-                    };
-                    if let Some(tx) = EVENT_TX.get() {
-                        for (pid, call) in host_calls {
-                            let _ = tx.unbounded_send(Message::PluginHostCall(pid, call));
-                        }
-                        let _ = tx.unbounded_send(Message::PluginQueryReady(gen, payload));
-                    }
-                });
-                self.qlog(|| format!("provider mode enter {:?}", act.provider_id));
+                let provider_id = act.provider_id.clone();
+                submit_plugin_query(self, gen, act);
+                self.qlog(|| format!("provider mode enter {provider_id:?}"));
                 return;
             }
         }
@@ -573,6 +511,7 @@ impl State {
         self.provider_mode = None;
         self.plugin_panel = None;
         self.plugin_query_generation = self.plugin_query_generation.wrapping_add(1);
+        self.plugin_query_worker.cancel_current();
         self.results_stale = false;
     }
 
@@ -712,6 +651,21 @@ fn build_direct_path_results(query: &str) -> Vec<SearchResult> {
         },
     ));
     hits
+}
+
+/// Provider Mode：把查询交给常驻 worker，不在 UI 线程临时 spawn。
+fn submit_plugin_query(state: &State, generation: u64, act: plugin::Activation) {
+    let job = plugin::PluginQueryJob {
+        generation,
+        activation: act,
+        registry: state.plugin_registry.clone(),
+        host: state.plugin_host.clone(),
+        on_host_call: Arc::new(|pid, call| send_event(Message::PluginHostCall(pid, call))),
+        on_done: Arc::new(|generation, payload| {
+            send_event(Message::PluginQueryReady(generation, payload))
+        }),
+    };
+    state.plugin_query_worker.submit(job);
 }
 
 fn prepend_direct_path_results(results: &mut Vec<SearchResult>, direct: &[SearchResult]) {

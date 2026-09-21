@@ -1,5 +1,5 @@
 //! 结果标题与路径的纯文本处理。
-pub(super) fn first_char(s: &str) -> String {
+pub(crate) fn first_char(s: &str) -> String {
     s.chars().next().map(|c| c.to_string()).unwrap_or_default()
 }
 

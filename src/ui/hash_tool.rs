@@ -5,6 +5,7 @@ use iced::{Element, Font};
 use sha2::{Digest, Sha256};
 
 use super::tool_template::{self, Header, NoteTone};
+use super::tools::{ToolKind, ToolOp};
 use super::{Message, State};
 
 pub(super) const TOOL_W: f32 = 880.0;
@@ -22,15 +23,24 @@ pub(super) fn sha256_hex(input: &str) -> String {
     format!("{:x}", Sha256::digest(input.as_bytes()))
 }
 
+fn tool_msg(op: ToolOp) -> Message {
+    Message::Tool(ToolKind::Hash, op)
+}
+
+fn tool_edit(action: text_editor::Action) -> Message {
+    Message::Tool(ToolKind::Hash, ToolOp::Edit(action))
+}
+
 pub(super) fn view(state: &State) -> Element<'_, Message> {
+    let win = state.tools.get(ToolKind::Hash);
     let tokens = state.theme_tokens();
     let toolbar = tool_template::toolbar(vec![
-        tool_template::button("从剪贴板粘贴", Message::HashToolPaste, false, tokens),
-        tool_template::button("复制 SHA-256", Message::HashToolCopyResult, false, tokens),
-        tool_template::button("清空", Message::HashToolClear, false, tokens),
+        tool_template::button("从剪贴板粘贴", tool_msg(ToolOp::Paste), false, tokens),
+        tool_template::button("复制 SHA-256", tool_msg(ToolOp::CopyResult), false, tokens),
+        tool_template::button("清空", tool_msg(ToolOp::Clear), false, tokens),
     ]);
 
-    let note = match &state.hash_tool_note {
+    let note = match &win.note {
         Some((is_error, message)) => tool_template::note(
             message.clone(),
             if *is_error {
@@ -50,9 +60,9 @@ pub(super) fn view(state: &State) -> Element<'_, Message> {
     let left = tool_template::editor_pane(
         "原始文本",
         tool_template::editor(
-            &state.hash_editor,
+            &win.editor,
             "在这里输入或粘贴要计算 Hash 的文本…",
-            Message::HashToolEdit,
+            tool_edit,
             Font::MONOSPACE,
             tokens,
         ),
@@ -60,12 +70,12 @@ pub(super) fn view(state: &State) -> Element<'_, Message> {
     );
     let right = tool_template::result_pane(
         "SHA-256 结果",
-        if state.hash_result.is_empty() {
+        if win.result.is_empty() {
             "输入文本后自动计算；空文本不显示结果".into()
         } else {
-            state.hash_result.clone()
+            win.result.clone()
         },
-        state.hash_result.is_empty(),
+        win.result.is_empty(),
         Font::MONOSPACE,
         tokens,
     );
@@ -76,8 +86,8 @@ pub(super) fn view(state: &State) -> Element<'_, Message> {
             icon: "#",
             title: "Hash 工具",
             subtitle: "SHA-256 · UTF-8 文本",
-            drag: Message::HashToolDrag,
-            close: Message::PluginCloseHashTool,
+            drag: tool_msg(ToolOp::Drag),
+            close: tool_msg(ToolOp::Close),
         },
         toolbar,
         note,

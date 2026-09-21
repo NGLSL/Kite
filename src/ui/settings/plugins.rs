@@ -380,6 +380,7 @@ fn plugin_detail_page(
 
     let mut title_section = column![title_extra].spacing(12.0);
     if id == "com.kite.devtools" {
+        use crate::ui::tools::ToolKind;
         let mut tool_actions = row![].spacing(8.0).align_y(alignment::Alignment::Center);
         if state
             .pending_tool_confirm
@@ -388,25 +389,25 @@ fn plugin_detail_page(
         {
             tool_actions = tool_actions.push(primary_button(
                 "确认打开 JSON 工具".into(),
-                Message::PluginConfirmJsonTool,
+                Message::PluginConfirmTool,
                 tokens,
             ));
             tool_actions = tool_actions.push(ghost_button(
                 "取消".into(),
-                Message::PluginCancelJsonToolConfirm,
+                Message::PluginCancelToolConfirm,
                 false,
                 tokens,
             ));
         } else {
             tool_actions = tool_actions.push(primary_button(
                 "打开 JSON 工具".into(),
-                Message::PluginOpenJsonTool,
+                Message::PluginOpenTool(ToolKind::Json),
                 tokens,
             ));
         }
         tool_actions = tool_actions.push(ghost_button(
             "打开 Base64 工具".into(),
-            Message::PluginOpenBase64Tool,
+            Message::PluginOpenTool(ToolKind::Base64),
             false,
             tokens,
         ));
@@ -524,8 +525,10 @@ fn example_chip(example: String, tokens: ThemeTokens) -> Element<'static, Messag
 }
 
 fn first_char(s: &str) -> String {
-    s.chars()
-        .next()
-        .map(|c| c.to_string())
-        .unwrap_or_else(|| "?".into())
+    let ch = crate::ui::search_view::first_char(s);
+    if ch.is_empty() {
+        "?".into()
+    } else {
+        ch
+    }
 }

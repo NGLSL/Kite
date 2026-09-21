@@ -8,16 +8,6 @@ use super::super::font::name_font;
 use super::super::theme::ThemeTokens;
 use super::super::Message;
 
-/// 列表分区标题（弱化，不再塞进 flow 卡片）。
-#[allow(dead_code)]
-pub(super) fn section_title(title: &str, tokens: ThemeTokens) -> Element<'static, Message> {
-    text(title.to_string())
-        .size(13.0)
-        .color(tokens.text_primary)
-        .font(name_font())
-        .into()
-}
-
 /// 统一 elevated 卡片：实体面板 + 1px 细微光边框 + 圆角。
 pub(super) fn elevated_card<'a>(
     content: Element<'a, Message>,

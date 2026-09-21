@@ -8,6 +8,7 @@ use iced::Element;
 
 use super::font::ui_font;
 use super::tool_template::{self, Header, NoteTone};
+use super::tools::{ToolKind, ToolOp};
 use super::{Message, State};
 
 /// 工具窗逻辑尺寸（独立于启动器 640×420 / 设置 720×520）。
@@ -37,17 +38,36 @@ pub(super) fn transform_json(raw: &str, minify: bool) -> Result<String, String> 
     }
 }
 
+fn tool_msg(op: ToolOp) -> Message {
+    Message::Tool(ToolKind::Json, op)
+}
+
+fn tool_edit(action: iced::widget::text_editor::Action) -> Message {
+    Message::Tool(ToolKind::Json, ToolOp::Edit(action))
+}
+
 pub fn view(state: &State) -> Element<'_, Message> {
+    let win = state.tools.get(ToolKind::Json);
     let tokens = state.theme_tokens();
     let toolbar = tool_template::toolbar(vec![
-        tool_template::button("从剪贴板粘贴", Message::JsonToolPaste, false, tokens),
-        tool_template::button("格式化", Message::JsonToolFormat, true, tokens),
-        tool_template::button("压缩", Message::JsonToolMinify, false, tokens),
-        tool_template::button("复制结果", Message::JsonToolCopyResult, false, tokens),
-        tool_template::button("清空", Message::JsonToolClear, false, tokens),
+        tool_template::button("从剪贴板粘贴", tool_msg(ToolOp::Paste), false, tokens),
+        tool_template::button(
+            "格式化",
+            tool_msg(ToolOp::Transform { minify: false }),
+            true,
+            tokens,
+        ),
+        tool_template::button(
+            "压缩",
+            tool_msg(ToolOp::Transform { minify: true }),
+            false,
+            tokens,
+        ),
+        tool_template::button("复制结果", tool_msg(ToolOp::CopyResult), false, tokens),
+        tool_template::button("清空", tool_msg(ToolOp::Clear), false, tokens),
     ]);
 
-    let note = match &state.json_tool_note {
+    let note = match &win.note {
         Some((is_err, msg)) => tool_template::note(
             msg.clone(),
             if *is_err {
@@ -68,9 +88,9 @@ pub fn view(state: &State) -> Element<'_, Message> {
     let left = tool_template::editor_pane(
         "原始 JSON",
         tool_template::editor(
-            &state.json_editor,
+            &win.editor,
             "粘贴或输入 JSON…",
-            Message::JsonToolEdit,
+            tool_edit,
             mono,
             tokens,
         ),
@@ -78,12 +98,12 @@ pub fn view(state: &State) -> Element<'_, Message> {
     );
     let right = tool_template::result_pane(
         "结果",
-        if state.json_result.is_empty() {
+        if win.result.is_empty() {
             "结果会显示在这里".into()
         } else {
-            state.json_result.clone()
+            win.result.clone()
         },
-        state.json_result.is_empty(),
+        win.result.is_empty(),
         mono,
         tokens,
     );
@@ -94,8 +114,8 @@ pub fn view(state: &State) -> Element<'_, Message> {
             icon: "{ }",
             title: "JSON 工具",
             subtitle: "开发者工具 · 原生独立窗",
-            drag: Message::JsonToolDrag,
-            close: Message::PluginCloseJsonTool,
+            drag: tool_msg(ToolOp::Drag),
+            close: tool_msg(ToolOp::Close),
         },
         toolbar,
         note,

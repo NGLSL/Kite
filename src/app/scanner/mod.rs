@@ -10,6 +10,7 @@
 
 mod cache;
 mod commands;
+mod family;
 mod icon_batch;
 mod lnk;
 mod merge;
@@ -36,6 +37,10 @@ use pass::FAST_BUDGET;
 use scoop::collect_scoop_shims;
 use walk::{budget_exhausted, collect_from_dir};
 
+pub use family::{
+    discovery_absorbs_into, exe_stem_matches_display_family, exe_stem_links_to_compact_name,
+    is_shell_package, should_merge_family, strip_shell_target,
+};
 pub use icon_batch::{extract_icons_parallel, missing_icon_targets};
 pub use pass::{ScanOptions, ScanPass};
 

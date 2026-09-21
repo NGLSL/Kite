@@ -14,6 +14,7 @@ mod results;
 mod text;
 
 pub(crate) use results::{results_scroll_style_tokens, results_scrollbar};
+pub(crate) use text::first_char;
 #[cfg(test)]
 pub(super) use text::truncate_display_label;
 

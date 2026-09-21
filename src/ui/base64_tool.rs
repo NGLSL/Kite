@@ -7,6 +7,7 @@ use iced::Element;
 
 use super::font::ui_font;
 use super::tool_template::{self, Header, NoteTone};
+use super::tools::{ToolKind, ToolOp};
 use super::{Message, State};
 
 pub(super) const TOOL_W: f32 = 880.0;
@@ -34,20 +35,29 @@ pub(super) fn decode_utf8(input: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "解码结果不是 UTF-8 文本".to_string())
 }
 
+fn tool_msg(op: ToolOp) -> Message {
+    Message::Tool(ToolKind::Base64, op)
+}
+
+fn tool_edit(action: iced::widget::text_editor::Action) -> Message {
+    Message::Tool(ToolKind::Base64, ToolOp::Edit(action))
+}
+
 pub(super) fn view(state: &State) -> Element<'_, Message> {
+    let win = state.tools.get(ToolKind::Base64);
     let tokens = state.theme_tokens();
     let mono = Font {
         family: Family::Name("Consolas"),
         ..ui_font()
     };
     let toolbar = tool_template::toolbar(vec![
-        tool_template::button("从剪贴板粘贴", Message::Base64ToolPaste, false, tokens),
-        tool_template::button("编码", Message::Base64ToolEncode, true, tokens),
-        tool_template::button("解码", Message::Base64ToolDecode, false, tokens),
-        tool_template::button("复制结果", Message::Base64ToolCopyResult, false, tokens),
-        tool_template::button("清空", Message::Base64ToolClear, false, tokens),
+        tool_template::button("从剪贴板粘贴", tool_msg(ToolOp::Paste), false, tokens),
+        tool_template::button("编码", tool_msg(ToolOp::Encode), true, tokens),
+        tool_template::button("解码", tool_msg(ToolOp::Decode), false, tokens),
+        tool_template::button("复制结果", tool_msg(ToolOp::CopyResult), false, tokens),
+        tool_template::button("清空", tool_msg(ToolOp::Clear), false, tokens),
     ]);
-    let note = match &state.base64_tool_note {
+    let note = match &win.note {
         Some((error, message)) => tool_template::note(
             message.clone(),
             if *error {
@@ -66,21 +76,21 @@ pub(super) fn view(state: &State) -> Element<'_, Message> {
     let left = tool_template::editor_pane(
         "输入文本 / Base64",
         tool_template::editor(
-            &state.base64_editor,
+            &win.editor,
             "粘贴或输入文本，选择编码或解码…",
-            Message::Base64ToolEdit,
+            tool_edit,
             mono,
             tokens,
         ),
         tokens,
     );
-    let empty = state.base64_result.is_empty();
+    let empty = win.result.is_empty();
     let right = tool_template::result_pane(
         "结果",
         if empty {
             "结果会显示在这里".to_string()
         } else {
-            state.base64_result.clone()
+            win.result.clone()
         },
         empty,
         mono,
@@ -92,8 +102,8 @@ pub(super) fn view(state: &State) -> Element<'_, Message> {
             icon: "64",
             title: "Base64 工具",
             subtitle: "开发者工具 · UTF-8 文本",
-            drag: Message::Base64ToolDrag,
-            close: Message::PluginCloseBase64Tool,
+            drag: tool_msg(ToolOp::Drag),
+            close: tool_msg(ToolOp::Close),
         },
         toolbar,
         note,

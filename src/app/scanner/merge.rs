@@ -268,51 +268,7 @@ pub(crate) fn absorb_discovery_rows(items: &mut Vec<RawItem>) {
 
 /// 同一 launch identity / 同一 exe（参数等价）/ 同安装根且名称族或 exe 词干链接。
 fn discovery_absorbs_into(discovery: &AppItem, formal: &AppItem) -> bool {
-    use super::util::{args_equivalent_for_merge, install_root_dir, launch_identity, names_share_install_family};
-
-    if launch_identity(&discovery.target, discovery.args.as_deref())
-        == launch_identity(&formal.target, formal.args.as_deref())
-    {
-        return true;
-    }
-
-    let td = normalize_path_key(&discovery.target);
-    let tf = normalize_path_key(&formal.target);
-    if !td.is_empty() && td == tf {
-        return args_equivalent_for_merge(discovery.args.as_deref(), formal.args.as_deref());
-    }
-
-    let (Some(rd), Some(rf)) = (install_root_dir(&discovery.target), install_root_dir(&formal.target))
-    else {
-        return false;
-    };
-    if rd != rf {
-        return false;
-    }
-    if !args_equivalent_for_merge(discovery.args.as_deref(), formal.args.as_deref()) {
-        return false;
-    }
-    names_share_install_family(&discovery.name, &formal.name)
-        || exe_stem_links_to_name(&discovery.target, &formal.name)
-        || exe_stem_links_to_name(&formal.target, &discovery.name)
-}
-
-fn exe_stem_links_to_name(target: &str, name: &str) -> bool {
-    let Some(stem) = std::path::Path::new(target)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_lowercase())
-    else {
-        return false;
-    };
-    if stem.len() < 3 {
-        return false;
-    }
-    let compact_name = crate::search::normalize_for_index(name)
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect::<String>();
-    // 仅允许「展示名包含 exe 词干」或全等；反向前缀（code ← CodeHelper）会误吸收。
-    !compact_name.is_empty() && (stem == compact_name || compact_name.starts_with(&stem))
+    super::family::discovery_absorbs_into(discovery, formal)
 }
 
 /// 同一 target 的不同参数可能代表不同的启动语义（例如普通 PowerShell

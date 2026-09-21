@@ -35,21 +35,35 @@ mod keyboard;
 mod results;
 mod runtime;
 mod search_view;
-mod tool_template;
 mod settings;
+mod tool_template;
+mod tools;
+mod tray;
+mod update_plugins;
+mod update_search;
+mod update_settings;
+mod update_window;
 #[cfg(test)]
 mod test_support;
 pub mod theme;
-mod tray;
 
-use actions::*;
 use interaction::update;
 use keyboard::{alt_digit_from_query_change, alt_digit_index};
 pub use runtime::run;
 pub use theme::{ThemeMode, ThemeTokens};
+use tools::{PendingToolConfirm, ToolKind, ToolOp, ToolWindows};
 
 const WINDOW_W: f32 = 640.0;
 const WINDOW_H: f32 = 420.0;
+
+/// 搜索路径上的个性化共享缓存（usage/pin/demote），避免每次按键全表扫。
+/// pairs 仍按 query 现查；launch/pin/demote/清空历史后调用 `invalidate_prefs_cache`。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CachedPrefs {
+    pub usage: std::collections::HashMap<String, storage::UsageStats>,
+    pub pinned: std::collections::HashSet<String>,
+    pub demoted: std::collections::HashSet<String>,
+}
 
 /// boot 里生成的跨线程消息通道：后台线程 → iced runtime。
 /// 用 futures 的 unbounded channel：worker 侧 `next().await` 真异步等待
@@ -60,8 +74,46 @@ static EVENT_RX: OnceLock<Mutex<Option<iced::futures::channel::mpsc::UnboundedRe
     OnceLock::new();
 static BOOT_DIR: OnceLock<PathBuf> = OnceLock::new();
 static ICON_DIR: OnceLock<PathBuf> = OnceLock::new();
-/// 热键线程的改键命令通道（"Alt+Space" → 运行时重注册）。
-static HOTKEY_CMD: OnceLock<std::sync::mpsc::Sender<String>> = OnceLock::new();
+/// 热键线程命令：改键 / 录制吞键 / 结束录制。
+pub(super) enum HotkeyCmd {
+    /// 重注册全局快捷键（"Alt+Space" 形式）。
+    Apply(String),
+    /// 进入录制：临时 RegisterHotKey 吞掉 Alt+Space 等系统组合，避免弹出系统菜单。
+    BeginRecord,
+    /// 结束录制：注销吞键，恢复原先的全局快捷键。
+    EndRecord,
+}
+
+static HOTKEY_CMD: OnceLock<std::sync::mpsc::Sender<HotkeyCmd>> = OnceLock::new();
+
+/// 向 iced runtime 发送后台消息；通道未初始化时静默丢弃，避免热路径 panic。
+fn send_event(message: Message) {
+    if let Some(tx) = EVENT_TX.get() {
+        let _ = tx.unbounded_send(message);
+    }
+}
+
+fn event_tx() -> Option<iced::futures::channel::mpsc::UnboundedSender<Message>> {
+    EVENT_TX.get().cloned()
+}
+
+/// 在插件 Registry 锁内执行，避免各调用点重复 `lock().unwrap_or_else`。
+fn with_plugin_registry<T>(state: &State, f: impl FnOnce(&mut PluginRegistry) -> T) -> T {
+    let mut reg = state
+        .plugin_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    f(&mut reg)
+}
+
+/// 在插件 Host 锁内执行。
+fn with_plugin_host<T>(state: &State, f: impl FnOnce(&mut PluginHost) -> T) -> T {
+    let mut host = state
+        .plugin_host
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    f(&mut host)
+}
 
 /// 设置页分区（对齐前端 NAV）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,6 +267,8 @@ enum Message {
     FlashClear,
     /// 热键「更改」按钮：进入录制态。
     StartHotkeyRecord,
+    /// 录制期间由热键线程吞到的系统冲突组合（如 Alt+Space）。
+    HotkeyRecordCaptured(String),
     /// 检查 GitHub 更新（关于页）。
     CheckUpdate,
     DownloadUpdate,
@@ -264,77 +318,25 @@ enum Message {
     PluginTryExample(String),
     /// 设置页：展开/收起某个插件的详细使用说明。
     PluginToggleDocs(String),
-    /// 进入「打开 JSON 工具」二次确认（不直接开窗）。
-    PluginOpenJsonTool,
-    PluginOpenBase64Tool,
-    /// 确认打开 JSON 独立工具窗。
-    PluginConfirmJsonTool,
-    /// 取消打开 JSON 工具的二次确认。
-    PluginCancelJsonToolConfirm,
-    /// 关闭 JSON 独立工具窗。
-    PluginCloseJsonTool,
-    /// 拖拽 JSON 工具窗标题栏。
-    JsonToolDrag,
+    /// 设置页打开工具（JSON 走二次确认；Hash/Base64 直接开独立窗）。
+    PluginOpenTool(ToolKind),
+    /// 确认打开独立工具窗。
+    PluginConfirmTool,
+    /// 取消打开工具窗的二次确认。
+    PluginCancelToolConfirm,
+    /// 对某个工具窗的操作（拖拽/编辑/格式化/粘贴/复制/清空/关闭）。
+    Tool(ToolKind, ToolOp),
     /// 某窗口已销毁；工具窗关闭时清理状态。
-    JsonToolWindowClosed(window::Id),
-    /// JSON 工具左侧编辑器动作。
-    JsonToolEdit(iced::widget::text_editor::Action),
-    /// 左侧原文 → 右侧格式化（缩进）。
-    JsonToolFormat,
-    /// 左侧原文 → 右侧压缩（单行）。
-    JsonToolMinify,
-    /// 从系统剪贴板粘贴到左侧。
-    JsonToolPaste,
-    /// 剪贴板读取结果落地。
-    JsonToolPasteReady(Option<String>),
-    /// 复制右侧结果到剪贴板。
-    JsonToolCopyResult,
-    /// 清空左右两侧。
-    JsonToolClear,
-    HashToolDrag,
-    PluginCloseHashTool,
-    HashToolEdit(iced::widget::text_editor::Action),
-    HashToolPaste,
-    HashToolPasteReady(Option<String>),
-    HashToolCopyResult,
-    HashToolClear,
-    Base64ToolDrag,
-    PluginCloseBase64Tool,
-    Base64ToolEdit(iced::widget::text_editor::Action),
-    Base64ToolEncode,
-    Base64ToolDecode,
-    Base64ToolPaste,
-    Base64ToolPasteReady(Option<String>),
-    Base64ToolCopyResult,
-    Base64ToolClear,
+    ToolWindowClosed(window::Id),
 }
 
-/// 插件查询落地载荷（代际 + 结果）。
-#[derive(Debug, Clone)]
-pub(crate) enum PluginQueryPayload {
-    List {
-        plugin_id: String,
-        provider_id: String,
-        items: Vec<SearchResult>,
-    },
-    Panel {
-        plugin_id: String,
-        provider_id: String,
-        panel: PanelData,
-    },
-    Empty {
-        plugin_id: String,
-        provider_id: String,
-    },
-    Error(String),
-}
+/// 插件查询落地载荷：见 `plugin::PluginQueryPayload`。
+pub(crate) use crate::plugin::PluginQueryPayload;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuAction {
     OpenFolder,
     CopyPath,
-    /// shell:AppsFolder / ms-settings 等非路径 target 的复制。
-    CopyTarget,
     CopyName,
     TogglePin,
     /// 降低此结果优先级（可恢复）。
@@ -435,6 +437,8 @@ struct State {
     // ── Plugin System ──
     plugin_registry: std::sync::Arc<Mutex<PluginRegistry>>,
     plugin_host: std::sync::Arc<Mutex<PluginHost>>,
+    /// Provider Mode 常驻查询 worker（只跑最新请求）。
+    plugin_query_worker: std::sync::Arc<crate::plugin::PluginQueryWorker>,
     provider_mode: Option<Activation>,
     plugin_panel: Option<PanelData>,
     plugin_query_generation: u64,
@@ -443,47 +447,29 @@ struct State {
     plugin_import_path: String,
     /// 设置页：当前展开详细说明的插件 id。
     plugin_docs_open: Option<String>,
-    /// JSON 独立工具窗的窗口 id；None = 未打开。主启动器窗口永不承载工具 UI。
-    json_tool_window: Option<window::Id>,
-    hash_tool_window: Option<window::Id>,
-    base64_tool_window: Option<window::Id>,
-    /// JSON 工具是否打开（与 json_tool_window 同步，供逻辑/测试读取）。
-    plugin_tool_open: bool,
+    /// JSON/Hash/Base64 独立工具窗状态；None window_id = 未打开。
+    tools: ToolWindows,
     /// 非内联工具打开前的二次确认（JSON）。内联插件（计算器等）不进此状态。
-    pending_tool_confirm: Option<PendingJsonToolConfirm>,
-    /// JSON 工具左侧原文。
-    json_editor: iced::widget::text_editor::Content,
-    /// JSON 工具右侧结果。
-    json_result: String,
-    /// JSON 工具状态提示（错误/成功）。
-    json_tool_note: Option<(bool, String)>,
-    hash_editor: iced::widget::text_editor::Content,
-    hash_result: String,
-    hash_tool_note: Option<(bool, String)>,
-    base64_editor: iced::widget::text_editor::Content,
-    base64_result: String,
-    base64_tool_note: Option<(bool, String)>,
+    pending_tool_confirm: Option<PendingToolConfirm>,
+    /// 搜索路径 usage/pin/demote 缓存；变更后置 None 重建。
+    prefs_cache: Option<CachedPrefs>,
 }
 
-/// 非内联工具（独立窗）打开前的二次确认载荷。
-#[derive(Debug, Clone)]
-pub(crate) struct PendingJsonToolConfirm {
-    /// 搜索 `json <payload>` 时的预填内容；空工具为 None。
-    pub payload: Option<String>,
-    /// true = 从设置页进入；false = 从搜索结果确认。
-    pub from_settings: bool,
+impl State {
+    /// 启动/固定/降权/清空历史等路径上作废个性化共享缓存。
+    pub(crate) fn invalidate_prefs_cache(&mut self) {
+        self.prefs_cache = None;
+    }
 }
 
-/// 按窗口路由视图：工具窗 → JSON 工具；主窗 → 设置/搜索。主窗内容不因工具而切换。
+/// 按窗口路由视图：工具窗 → 对应工具；主窗 → 设置/搜索。主窗内容不因工具而切换。
 fn view(state: &State, window: window::Id) -> iced::Element<'_, Message> {
-    if state.json_tool_window == Some(window) {
-        return json_tool::view(state);
-    }
-    if state.hash_tool_window == Some(window) {
-        return hash_tool::view(state);
-    }
-    if state.base64_tool_window == Some(window) {
-        return base64_tool::view(state);
+    if let Some(kind) = state.tools.kind_of_window(window) {
+        return match kind {
+            ToolKind::Json => json_tool::view(state),
+            ToolKind::Hash => hash_tool::view(state),
+            ToolKind::Base64 => base64_tool::view(state),
+        };
     }
     if state.settings_open {
         settings::settings_view(state)

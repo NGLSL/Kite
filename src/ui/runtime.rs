@@ -36,16 +36,11 @@ pub fn run() -> iced::Result {
         .run()
 }
 
-/// 窗口标题：工具窗「JSON 工具」，主窗「Kite」。
+/// 窗口标题：工具窗按种类命名，主窗「Kite」。
 fn poc_title(state: &State, window: window::Id) -> String {
-    if state.json_tool_window == Some(window) {
-        "JSON 工具".to_string()
-    } else if state.hash_tool_window == Some(window) {
-        "Hash 工具".to_string()
-    } else if state.base64_tool_window == Some(window) {
-        "Base64 工具".to_string()
-    } else {
-        "Kite".to_string()
+    match state.tools.kind_of_window(window) {
+        Some(kind) => kind.title().to_string(),
+        None => "Kite".to_string(),
     }
 }
 
@@ -93,16 +88,7 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         .map_err(|e| plog(&format!("history db open failed: {e}")))
         .ok();
 
-    let index = std::sync::Arc::new(Mutex::new(AppIndex::empty()));
-    // Warm Start：兼容 last-good 直接恢复可搜索快照；失败则保持 empty，走 Cold Bootstrap。
-    let mut index_ready = false;
-    if let Some(loaded) = app::snapshot::load() {
-        let n = loaded.apps.len();
-        *index.lock().unwrap_or_else(|error| error.into_inner()) = loaded;
-        // 已有可搜索 RetrievalIndex：语义上应视为 ready，不必等 FullIndexReady。
-        index_ready = true;
-        plog(&format!("boot restored last-good snapshot n={n}"));
-    }
+    let (index, index_ready) = warm_start_index();
     let saved_settings = history_db
         .as_ref()
         .map(HistoryDb::load_settings)
@@ -116,144 +102,296 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         ..app::scanner::ScanOptions::default()
     }));
 
+    let tx = setup_event_bridge();
+    spawn_hotkey_worker(saved_settings.hotkey.clone());
+    spawn_index_builders(index.clone(), icon_dir.clone(), scan_options.clone(), tx);
+    init_resources();
+    spawn_tray();
+    spawn_activation_listener();
+
+    let mut state = build_state(data_dir, icon_dir, history_db, index, scan_options, index_ready);
+    spawn_idle_sweep(&state.plugin_host);
+    apply_saved_settings(&mut state, saved_settings);
+    state.refresh_results();
+    open_main_window(state)
+}
+
+fn warm_start_index() -> (std::sync::Arc<Mutex<AppIndex>>, bool) {
+    let index = std::sync::Arc::new(Mutex::new(AppIndex::empty()));
+    if let Some(loaded) = app::snapshot::load() {
+        let n = loaded.apps.len();
+        *index.lock().unwrap_or_else(|error| error.into_inner()) = loaded;
+        plog(&format!("boot restored last-good snapshot n={n}"));
+        return (index, true);
+    }
+    (index, false)
+}
+
+fn setup_event_bridge() -> iced::futures::channel::mpsc::UnboundedSender<Message> {
     let (tx, rx) = iced::futures::channel::mpsc::unbounded::<Message>();
     let _ = EVENT_TX.set(tx.clone());
     let _ = EVENT_RX.set(Mutex::new(Some(rx)));
+    tx
+}
 
-    // 先读取持久化快捷键，再启动注册线程。否则升级/重启后线程会先注册
-    // 默认 Alt+Space，而 UI 随后才加载用户配置，保存的快捷键永远不会生效。
-    let saved_hotkey = saved_settings.hotkey.clone();
-
-    // 快捷键线程：原生 RegisterHotKey（线程关联）+ 消息泵 + 改键命令轮询。
-    // 注意：必须在本线程泵消息（GetMessageW），WM_HOTKEY 才会被投递；注册失败
-    // 只禁用热键并保留托盘，用户仍可从设置页改键。
-    let (hk_tx, hk_rx) = std::sync::mpsc::channel::<String>();
+fn spawn_hotkey_worker(saved_hotkey: String) {
+    use super::HotkeyCmd;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
+        MOD_SHIFT,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, WM_HOTKEY,
+    };
+    const ID_MAIN: i32 = 0xB00B;
+    const ID_REC_BASE: i32 = 0xB0C0;
+    /// 录制期吞键：Windows 会把 Alt+Space 交给系统菜单，必须先 RegisterHotKey 抢下。
+    const RECORD_SWALLOWS: &[(&str, u32, u32)] = &[
+        ("Alt+Space", MOD_ALT.0 | MOD_NOREPEAT.0, 0x20),
+        (
+            "Ctrl+Alt+Space",
+            MOD_ALT.0 | MOD_CONTROL.0 | MOD_NOREPEAT.0,
+            0x20,
+        ),
+        (
+            "Alt+Shift+Space",
+            MOD_ALT.0 | MOD_SHIFT.0 | MOD_NOREPEAT.0,
+            0x20,
+        ),
+    ];
+    let default_mods = (MOD_ALT | MOD_NOREPEAT).0;
+    let (saved_mods, saved_vk) = parse_raw(&saved_hotkey).unwrap_or((default_mods, 0x20u32));
+    let mut current = (HOT_KEY_MODIFIERS(saved_mods), saved_vk);
+    let (hk_tx, hk_rx) = std::sync::mpsc::channel::<HotkeyCmd>();
     let _ = HOTKEY_CMD.set(hk_tx);
-    std::thread::spawn(move || {
-        use windows::Win32::UI::Input::KeyboardAndMouse::{
-            RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_NOREPEAT,
+    std::thread::spawn(move || unsafe {
+        let mut registered = match RegisterHotKey(None, ID_MAIN, current.0, current.1) {
+            Ok(()) => {
+                plog(&format!("hotkey registered {saved_hotkey}"));
+                true
+            }
+            Err(error) => {
+                plog(&format!(
+                    "hotkey register failed for {saved_hotkey}; hotkey disabled; error={error}"
+                ));
+                send_event(Message::HotkeyUnavailable(saved_hotkey.clone()));
+                false
+            }
         };
-        use windows::Win32::UI::WindowsAndMessaging::{
-            DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, WM_HOTKEY,
-        };
-        const ID: i32 = 0xB00B;
-        let default_mods = (MOD_ALT | MOD_NOREPEAT).0;
-        let (saved_mods, saved_vk) = parse_raw(&saved_hotkey).unwrap_or((default_mods, 0x20u32));
-        let mut current = (HOT_KEY_MODIFIERS(saved_mods), saved_vk);
-        unsafe {
-            let mut registered = match RegisterHotKey(None, ID, current.0, current.1) {
-                Ok(()) => {
-                    plog(&format!("hotkey registered {saved_hotkey}"));
-                    true
+        let mut recording = false;
+        let mut swallow_ids: Vec<(i32, &'static str)> = Vec::new();
+
+        fn end_record(
+            recording: &mut bool,
+            swallow_ids: &mut Vec<(i32, &'static str)>,
+            registered: &mut bool,
+            current: (HOT_KEY_MODIFIERS, u32),
+        ) {
+            if !*recording && swallow_ids.is_empty() {
+                return;
+            }
+            *recording = false;
+            for (id, _) in swallow_ids.drain(..) {
+                unsafe {
+                    let _ = UnregisterHotKey(None, id);
                 }
-                Err(error) => {
-                    plog(&format!(
-                        "hotkey register failed for {saved_hotkey}; hotkey disabled; error={error}"
-                    ));
-                    // Keep the worker alive so settings can register a new key.
-                    let _ = EVENT_TX
-                        .get()
-                        .expect("event tx")
-                        .unbounded_send(Message::HotkeyUnavailable(saved_hotkey.clone()));
-                    false
+            }
+            if !*registered {
+                *registered = unsafe { RegisterHotKey(None, ID_MAIN, current.0, current.1) }.is_ok();
+                if *registered {
+                    plog("hotkey restored after record");
                 }
-            };
-            let mut msg = MSG::default();
-            loop {
-                // 泵全部待处理消息
-                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                    if msg.message == WM_HOTKEY {
-                        plog("WM_HOTKEY received");
-                        let _ = EVENT_TX
-                            .get()
-                            .expect("event tx")
-                            .unbounded_send(Message::Hotkey(Instant::now()));
-                    }
-                    let _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
-                // 设置页改键：注销旧键 → 注册新键（失败回退旧键）。
-                // 初始键位被占用时 registered=false，仍可在此处改键。
-                if let Ok(spec) = hk_rx.try_recv() {
-                    if let Some((mods, vk)) = parse_raw(&spec) {
-                        let old_registered = registered;
-                        if registered {
-                            let _ = UnregisterHotKey(None, ID);
-                            registered = false;
-                        }
-                        let result = match RegisterHotKey(None, ID, HOT_KEY_MODIFIERS(mods), vk) {
-                            Ok(()) => {
-                                current = (HOT_KEY_MODIFIERS(mods), vk);
-                                registered = true;
-                                plog(&format!("hotkey re-registered: {spec}"));
-                                Ok(())
-                            }
-                            Err(error) => {
-                                if old_registered {
-                                    registered =
-                                        RegisterHotKey(None, ID, current.0, current.1).is_ok();
-                                }
-                                plog(&format!(
-                                    "hotkey register failed for {spec}; old_restored={registered}; error={error}"
-                                ));
-                                Err(error.to_string())
-                            }
-                        };
-                        let _ = EVENT_TX
-                            .get()
-                            .expect("event tx")
-                            .unbounded_send(Message::HotkeyRegistrationResult(spec, result));
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
+
+        let mut msg = MSG::default();
+        loop {
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                if msg.message == WM_HOTKEY {
+                    let id = msg.wParam.0 as i32;
+                    if let Some((_, spec)) = swallow_ids.iter().find(|(sid, _)| *sid == id) {
+                        plog(&format!("hotkey record captured {spec}"));
+                        send_event(Message::HotkeyRecordCaptured((*spec).to_string()));
+                    } else if id == ID_MAIN && !recording {
+                        plog("WM_HOTKEY received");
+                        send_event(Message::Hotkey(Instant::now()));
+                    }
+                }
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            while let Ok(cmd) = hk_rx.try_recv() {
+                match cmd {
+                    HotkeyCmd::BeginRecord => {
+                        if registered {
+                            let _ = UnregisterHotKey(None, ID_MAIN);
+                            registered = false;
+                        }
+                        recording = true;
+                        swallow_ids.clear();
+                        for (offset, (spec, mods, vk)) in RECORD_SWALLOWS.iter().enumerate() {
+                            let id = ID_REC_BASE + offset as i32;
+                            match RegisterHotKey(None, id, HOT_KEY_MODIFIERS(*mods), *vk) {
+                                Ok(()) => {
+                                    swallow_ids.push((id, spec));
+                                    plog(&format!("hotkey record swallow {spec}"));
+                                }
+                                Err(error) => {
+                                    plog(&format!(
+                                        "hotkey record swallow failed for {spec}; error={error}"
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    HotkeyCmd::EndRecord => {
+                        end_record(
+                            &mut recording,
+                            &mut swallow_ids,
+                            &mut registered,
+                            current,
+                        );
+                    }
+                    HotkeyCmd::Apply(spec) => {
+                        if let Some((mods, vk)) = parse_raw(&spec) {
+                            end_record(
+                                &mut recording,
+                                &mut swallow_ids,
+                                &mut registered,
+                                current,
+                            );
+                            let old_registered = registered;
+                            if registered {
+                                let _ = UnregisterHotKey(None, ID_MAIN);
+                                registered = false;
+                            }
+                            let result =
+                                match RegisterHotKey(None, ID_MAIN, HOT_KEY_MODIFIERS(mods), vk) {
+                                    Ok(()) => {
+                                        current = (HOT_KEY_MODIFIERS(mods), vk);
+                                        registered = true;
+                                        plog(&format!("hotkey re-registered: {spec}"));
+                                        Ok(())
+                                    }
+                                    Err(error) => {
+                                        if old_registered {
+                                            registered = RegisterHotKey(
+                                                None,
+                                                ID_MAIN,
+                                                current.0,
+                                                current.1,
+                                            )
+                                            .is_ok();
+                                        }
+                                        plog(&format!(
+                                            "hotkey register failed for {spec}; old_restored={registered}; error={error}"
+                                        ));
+                                        Err(error.to_string())
+                                    }
+                                };
+                            send_event(Message::HotkeyRegistrationResult(spec, result));
+                        }
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     });
+}
 
-    // 索引线程：后台构建完整快照，完成后一次发布（单飞）
-    {
-        let index = index.clone();
-        let dir = icon_dir.clone();
-        let options = scan_options.clone();
-        backend::request_build(index.clone(), dir.clone(), options.clone(), tx.clone());
-        // 入口变化监听：debounce 合并后触发重建
-        let w_index = index;
-        let w_dir = dir;
-        let w_tx = tx.clone();
-        app::watch::spawn_entry_watchers(options.clone(), move || {
-            backend::request_build(
-                w_index.clone(),
-                w_dir.clone(),
-                options.clone(),
-                w_tx.clone(),
-            );
-        });
-    }
+fn spawn_index_builders(
+    index: std::sync::Arc<Mutex<AppIndex>>,
+    icon_dir: PathBuf,
+    scan_options: std::sync::Arc<std::sync::RwLock<app::scanner::ScanOptions>>,
+    tx: iced::futures::channel::mpsc::UnboundedSender<Message>,
+) {
+    backend::request_build(index.clone(), icon_dir.clone(), scan_options.clone(), tx.clone());
+    let w_index = index;
+    let w_dir = icon_dir;
+    let w_tx = tx;
+    app::watch::spawn_entry_watchers(scan_options.clone(), move || {
+        backend::request_build(
+            w_index.clone(),
+            w_dir.clone(),
+            scan_options.clone(),
+            w_tx.clone(),
+        );
+    });
+}
 
-    // 资源目录（Everything64.dll）：优先 exe 旁，落到仓库 resources
+fn init_resources() {
     if let Some(rd) = resource_dir() {
         system::resources::init(rd);
         plog("resources initialized (Everything64.dll located)");
     } else {
         plog("resources dir not found; file search disabled");
     }
+}
 
-    // 托盘常驻：独立线程，左键/菜单事件走 events 桥
-    tray::spawn(
-        EVENT_TX.get().expect("event tx").clone(),
-        include_bytes!("../../icons/32x32.png"),
-    );
+fn spawn_tray() {
+    if let Some(tx) = event_tx() {
+        tray::spawn(tx, include_bytes!("../../icons/32x32.png"));
+    }
+}
 
-    // 二次启动激活：主实例已在 lib::run claim；此处消息桥就绪后开始监听。
+fn spawn_activation_listener() {
     if let Err(error) = system::singleton::spawn_activation_listener(|| {
-        if let Some(tx) = EVENT_TX.get() {
-            let _ = tx.unbounded_send(Message::EnsureVisible);
-        }
+        send_event(Message::EnsureVisible);
     }) {
         plog(&format!("activation listener not started: {error}"));
     }
+}
 
-    let mut state = State {
+fn spawn_idle_sweep(plugin_host: &std::sync::Arc<Mutex<PluginHost>>) {
+    let host = std::sync::Arc::downgrade(plugin_host);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        let Some(host) = host.upgrade() else {
+            break;
+        };
+        {
+            let guard = host.lock();
+            if let Ok(mut h) = guard {
+                h.idle_sweep();
+            }
+        }
+    });
+}
+
+fn apply_saved_settings(state: &mut State, saved_settings: storage::settings::Settings) {
+    state.hide_on_blur = saved_settings.hide_on_blur;
+    state.autostart = saved_settings.autostart;
+    state.history_recording = saved_settings.history_recording;
+    state.query_log = saved_settings.query_log;
+    state.search_engine = saved_settings.search_engine.clone();
+    state.web_search_hotkey = saved_settings.web_search_hotkey.clone();
+    state.search_engine_custom = state
+        .history
+        .as_ref()
+        .and_then(|db| db.search_url_template())
+        .or_else(|| {
+            system::search_engine::preset_by_id(&state.search_engine)
+                .filter(|p| !p.template.is_empty())
+                .map(|p| p.template.to_string())
+        })
+        .unwrap_or_default();
+    state.hotkey = saved_settings.hotkey;
+    state.hotkey_label = saved_settings.hotkey_label;
+}
+
+fn build_state(
+    data_dir: PathBuf,
+    icon_dir: PathBuf,
+    history_db: Option<HistoryDb>,
+    index: std::sync::Arc<Mutex<AppIndex>>,
+    scan_options: std::sync::Arc<std::sync::RwLock<app::scanner::ScanOptions>>,
+    index_ready: bool,
+) -> State {
+    let saved_settings = history_db
+        .as_ref()
+        .map(HistoryDb::load_settings)
+        .unwrap_or_default();
+    State {
         data_dir: data_dir.clone(),
         icon_dir: icon_dir.clone(),
         index,
@@ -317,7 +455,6 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         last_hover_pt: None,
         plugin_registry: std::sync::Arc::new(Mutex::new({
             let plugins_dir = plugin::default_plugins_dir(&data_dir);
-            // 官方插件随安装包提供；每次启动同步到用户目录，覆盖安装包旧版本。
             let _ = plugin::sync_official_plugins(&plugins_dir);
             plugin::load_registry_from_dir(&plugins_dir)
         })),
@@ -329,66 +466,19 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         provider_mode: None,
         plugin_panel: None,
         plugin_query_generation: 0,
+        plugin_query_worker: std::sync::Arc::new(plugin::PluginQueryWorker::spawn()),
         plugin_flash: None,
         plugin_import_path: String::new(),
         plugin_docs_open: None,
-        json_tool_window: None,
-        hash_tool_window: None,
-        base64_tool_window: None,
-        plugin_tool_open: false,
+        tools: Default::default(),
         pending_tool_confirm: None,
-        json_editor: iced::widget::text_editor::Content::default(),
-        json_result: String::new(),
-        json_tool_note: None,
-        hash_editor: iced::widget::text_editor::Content::default(),
-        hash_result: String::new(),
-        hash_tool_note: None,
-        base64_editor: iced::widget::text_editor::Content::default(),
-        base64_result: String::new(),
-        base64_tool_note: None,
-    };
-    // Idle Shutdown：定时清扫，不依赖下一次 Provider 触发。
-    {
-        // 后台清扫线程不能持有强引用，否则 State 退出后 PluginHost 永远不 Drop，
-        // 子插件进程会变成孤儿并锁住下一次安装要覆盖的文件。
-        let host = std::sync::Arc::downgrade(&state.plugin_host);
-        std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            let Some(host) = host.upgrade() else {
-                break;
-            };
-            {
-                let guard = host.lock();
-                if let Ok(mut h) = guard {
-                    h.idle_sweep();
-                }
-            }
-        });
+        prefs_cache: None,
     }
-    // 启动时载入设置（副本库）
-    state.hide_on_blur = saved_settings.hide_on_blur;
-    state.autostart = saved_settings.autostart;
-    state.history_recording = saved_settings.history_recording;
-    state.query_log = saved_settings.query_log;
-    state.search_engine = saved_settings.search_engine.clone();
-    state.web_search_hotkey = saved_settings.web_search_hotkey.clone();
-    state.search_engine_custom = state
-        .history
-        .as_ref()
-        .and_then(|db| db.search_url_template())
-        .or_else(|| {
-            system::search_engine::preset_by_id(&state.search_engine)
-                .filter(|p| !p.template.is_empty())
-                .map(|p| p.template.to_string())
-        })
-        .unwrap_or_default();
-    state.hotkey = saved_settings.hotkey;
-    state.hotkey_label = saved_settings.hotkey_label;
-    state.refresh_results();
-    // 主启动器窗口：hidden 启动；JSON 工具窗口在触发时另行 window::open。
+}
+
+fn open_main_window(mut state: State) -> (State, Task<Message>) {
     let launcher_settings = Settings {
         size: iced::Size::new(WINDOW_W, WINDOW_H),
-        // 对齐 Kite：水平居中、y = 屏高 1/3（system/window.rs place_on_current_monitor）
         position: Position::SpecificWith(|win, monitor| {
             iced::Point::new((monitor.width - win.width) / 2.0, monitor.height / 3.0)
         }),
@@ -399,7 +489,6 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         exit_on_close_request: false,
         platform_specific: PlatformSpecific {
             skip_taskbar: true,
-            // 无边框窗口保留系统投影（对齐 tauri shadow:true，白底不至于融入桌面）
             undecorated_shadow: false,
             corner_preference: iced::window::settings::platform::CornerPreference::Round,
             ..PlatformSpecific::default()
@@ -413,12 +502,9 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
 
 fn subscription(state: &State) -> Subscription<Message> {
     Subscription::batch([
-        // 后台线程消息桥（快捷键、索引构建完成等）
         Subscription::run(events_worker),
-        // 键盘 + IME + 窗口焦点事件
         keyboard::keyboard_events(state),
-        // 工具窗被系统关闭时清理 json_tool_window
-        window::close_events().map(Message::JsonToolWindowClosed),
+        window::close_events().map(Message::ToolWindowClosed),
     ])
 }
 
