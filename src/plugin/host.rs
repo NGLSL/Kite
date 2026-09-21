@@ -222,6 +222,11 @@ impl PluginHost {
         self.current_generation = generation;
     }
 
+    /// 当前查询代际；UI/测试/性能基线只读，不直接碰私有字段。
+    pub fn current_generation(&self) -> u64 {
+        self.current_generation
+    }
+
     pub fn state(&self, plugin_id: &str) -> PluginRuntimeState {
         self.entries
             .get(plugin_id)

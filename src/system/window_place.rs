@@ -50,7 +50,8 @@ pub fn physical_position_on_cursor_monitor(
 }
 
 /// 工作区物理矩形内居中逻辑尺寸窗口，返回物理左上角。
-fn center_physical(
+/// pub(crate)：性能基线在无显示器环境下压测 DPI/多屏几何矩阵。
+pub(crate) fn center_physical(
     work_left: f32,
     work_top: f32,
     work_right: f32,

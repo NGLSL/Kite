@@ -1,0 +1,89 @@
+   Compiling kite v0.3.6 (D:\Project\Kite)
+    Finished `release` profile [optimized] target(s) in 2m 30s
+     Running unittests src\lib.rs (target\release\deps\kite_lib-c4644c6e5ba93ec2.exe)
+
+running 1 test
+
+# Kite 0.3.7 代码级性能基线
+
+不主动唤起 UI。真窗口唤起见 scripts/measure-performance.ps1。
+
+
+## 搜索 / 索引（反复查询代理，无 UI）
+
+| 场景 | p50 µs | p95 µs | max µs | 不变量 |
+|---|---:|---:|---:|---|
+| search/80/`chrome` | 112 | 129 | 176 | hits ok |
+| search/80/`vis` | 99 | 112 | 184 | hits ok |
+| search/80/`微信` | 40 | 72 | 126 | hits ok |
+| search/80/`weixin` | 126 | 155 | 296 | hits ok |
+| search/80/`zzzz` | 75 | 101 | 159 | hits ok |
+| search/80/`v` | 4 | 33 | 35 | hits ok |
+| empty-query/80 | 18 | 19 | 39 | index-build 4333µs |
+| search/800/`chrome` | 59 | 61 | 110 | hits ok |
+| search/800/`vis` | 48 | 49 | 68 | hits ok |
+| search/800/`微信` | 6 | 6 | 12 | hits ok |
+| search/800/`weixin` | 63 | 87 | 176 | hits ok |
+| search/800/`zzzz` | 39 | 41 | 98 | hits ok |
+| search/800/`v` | 7 | 7 | 70 | hits ok |
+| empty-query/800 | 24 | 25 | 69 | index-build 265638µs |
+
+## 插件崩溃 / 超时（MemProcessBackend，无 UI）
+
+| 场景 | p50 µs | p95 µs | max µs | 不变量 |
+|---|---:|---:|---:|---|
+| plugin-query-reuse | 12 | 17 | 57 | spawn=1 state=Ready |
+| plugin-crash-recover-probe | 19 | 19 | 19 | faulted=true retry_ok=true |
+| plugin-query-hang | 802079 | 802079 | 802079 | bounded=true elapsed_ms=802 is_err=true |
+| plugin-crash-loop-block | 0 | 0 | 0 | blocked=true |
+
+## Everything 降级 / 系统脉冲恢复（代码注入，无 UI）
+
+| 场景 | p50 µs | p95 µs | max µs | 不变量 |
+|---|---:|---:|---:|---|
+| everything-search-ready | 1 | 1 | 1 | search_calls=220 |
+| everything-search-stopped | 0 | 0 | 0 | empty when not running |
+| recovery-everything-pulse | 0 | 0 | 3 | last=Some(InstalledButNotRunning) probes=40 |
+| recovery-pulse/ResumeFromSleep | 0 | 0 | 0 | actions non-empty |
+| recovery-pulse/ExplorerRestarted | 0 | 0 | 0 | actions non-empty |
+| recovery-pulse/DisplayTopologyChanged | 0 | 0 | 0 | actions non-empty |
+| recovery-pulse/HotkeyLost | 0 | 0 | 0 | actions non-empty |
+
+## DPI / 多屏几何（纯计算，无 Win32 窗口）
+
+| 场景 | p50 µs | p95 µs | max µs | 不变量 |
+|---|---:|---:|---:|---|
+| dpi-center-matrix | 0 | 0 | 0 | finite=true monitors=4 |
+
+## 存储升级 / 原子写（fixture，无 UI）
+
+| 场景 | p50 µs | p95 µs | max µs | 不变量 |
+|---|---:|---:|---:|---|
+| history-db-open-migrate | 5513 | 5513 | 5513 | usage_kept=true hotkey_set=true theme=dark |
+| settings-partial-load | 0 | 0 | 0 | hotkey=Ctrl+Alt+K theme_default=true |
+[kite] warm start from snapshot n=40 (C:\Users\admin\AppData\Local\Temp\kite-perf-snapshot-59708\index-snapshot.json)
+| snapshot-warm-load | 9497 | 9497 | 9497 | apps=40 compatible=true |
+| snapshot-incompatible-cold | 0 | 0 | 0 | rejected=true |
+[kite] index snapshot incompatible or empty; cold start (path=C:\Users\admin\AppData\Local\Temp\kite-perf-snapshot-59708\index-snapshot.json)
+| atomic-file-overwrite-64k | 5760 | 6836 | 7531 | bytes_ok=true |
+
+## OS-only（不在代码基线内）
+
+| 场景 | 方式 | 说明 |
+|---|---|---|
+| 真 UI 唤起延迟 | scripts/measure-performance.ps1 | Alt+Space→可见→Esc，发布抽检 |
+| 真实睡眠/唤醒 | 实机 | Recovery effects 已代码覆盖；电源事件需 OS |
+| Explorer 真重启 | 实机 | 脉冲动作集已代码覆盖 |
+| Everything 真进程重启 | 实机 | 降级路径已 ScriptedEverything 覆盖 |
+| 多屏热插拔 / 系统 DPI | 实机 | 几何矩阵已代码覆盖 |
+| 覆盖安装 / 旧版升级实机 | installer + 实机 | 静态契约见 test-installer-upgrade.ps1 |
+test perf::report_perf_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 571 filtered out; finished in 1.97s
+
+     Running unittests src\main.rs (target\release\deps\kite-faf7a917f8d07053.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -8,6 +8,7 @@ pub mod env;
 pub mod everything;
 pub mod hotkey;
 pub mod icons;
+pub mod recovery;
 pub mod resources;
 pub mod search_engine;
 pub mod singleton;

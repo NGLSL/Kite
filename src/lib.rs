@@ -4,6 +4,10 @@ pub mod app;
 pub mod history;
 pub mod log;
 pub mod model;
+/// 0.3.7 代码级性能基线（不进默认 cargo test）：
+/// `cargo test --release report_perf_baseline -- --ignored --nocapture`
+#[cfg(test)]
+mod perf;
 pub mod plugin;
 pub mod search;
 pub mod storage;

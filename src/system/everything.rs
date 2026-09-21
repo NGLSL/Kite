@@ -89,6 +89,102 @@ pub enum Availability {
     NotInstalled,
 }
 
+/// 文件搜索后端 seam：生产走原生 SDK/IPC；测试与性能基线可注入脚本化实现。
+/// UI 与 Recovery 只依赖本接口，不直接绑死 Win32 探测。
+pub trait EverythingClient: Send + Sync {
+    fn availability(&self) -> Availability;
+    fn search(&self, query: &str, max: usize, filter: FileFilter) -> Vec<EverythingHit>;
+}
+
+/// 生产 adapter：封装现有 Everything64.dll + IPC 路径。
+pub struct NativeEverything;
+
+impl EverythingClient for NativeEverything {
+    fn availability(&self) -> Availability {
+        let ipc_available = everything_ipc_window_available();
+        if ipc_available {
+            return Availability::Ready;
+        }
+        classify_availability(false, everything_installed_cached())
+    }
+
+    fn search(&self, query: &str, max: usize, filter: FileFilter) -> Vec<EverythingHit> {
+        native_search_files(query, max, filter)
+    }
+}
+
+/// 脚本化 adapter：Everything 重启/未运行等场景的代码级测试用。
+/// 内部用 Arc，便于在 Recovery 之外保留计数句柄。
+#[cfg(test)]
+#[derive(Clone)]
+pub struct ScriptedEverything {
+    inner: std::sync::Arc<ScriptedInner>,
+}
+
+#[cfg(test)]
+struct ScriptedInner {
+    availability: std::sync::Mutex<Availability>,
+    hits: std::sync::Mutex<Vec<EverythingHit>>,
+    probe_calls: std::sync::atomic::AtomicUsize,
+    search_calls: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl ScriptedEverything {
+    pub fn new(availability: Availability) -> Self {
+        Self {
+            inner: std::sync::Arc::new(ScriptedInner {
+                availability: std::sync::Mutex::new(availability),
+                hits: std::sync::Mutex::new(Vec::new()),
+                probe_calls: std::sync::atomic::AtomicUsize::new(0),
+                search_calls: std::sync::atomic::AtomicUsize::new(0),
+            }),
+        }
+    }
+
+    pub fn ready() -> Self {
+        Self::new(Availability::Ready)
+    }
+
+    pub fn with_hits(self, hits: Vec<EverythingHit>) -> Self {
+        *self.inner.hits.lock().unwrap() = hits;
+        self
+    }
+
+    pub fn set_availability(&self, availability: Availability) {
+        *self.inner.availability.lock().unwrap() = availability;
+    }
+
+    pub fn probe_count(&self) -> usize {
+        self.inner.probe_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn search_count(&self) -> usize {
+        self.inner.search_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+impl EverythingClient for ScriptedEverything {
+    fn availability(&self) -> Availability {
+        self.inner
+            .probe_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.inner.availability.lock().unwrap()
+    }
+
+    fn search(&self, _query: &str, max: usize, _filter: FileFilter) -> Vec<EverythingHit> {
+        self.inner
+            .search_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if *self.inner.availability.lock().unwrap() != Availability::Ready {
+            return Vec::new();
+        }
+        let hits = self.inner.hits.lock().unwrap();
+        hits.iter().take(max).cloned().collect()
+    }
+}
+
 pub const DOWNLOAD_RESULT_ID: &str = "kite:everything-download";
 pub const NOT_RUNNING_RESULT_ID: &str = "kite:everything-not-running";
 pub const DOWNLOAD_URL: &str = "https://www.voidtools.com/downloads/";
@@ -139,11 +235,7 @@ fn everything_ipc_window_available() -> bool {
 }
 
 pub fn availability() -> Availability {
-    let ipc_available = everything_ipc_window_available();
-    if ipc_available {
-        return Availability::Ready;
-    }
-    classify_availability(false, everything_installed_cached())
+    NativeEverything.availability()
 }
 
 fn classify_availability(ipc_available: bool, installed: bool) -> Availability {
@@ -256,6 +348,10 @@ fn install_dirs() -> Vec<PathBuf> {
 
 /// 查询 Everything；`max` 为返回上限。未运行/未安装返回空，不产生任何窗口。
 pub fn search_files(query: &str, max: usize, filter: FileFilter) -> Vec<EverythingHit> {
+    NativeEverything.search(query, max, filter)
+}
+
+fn native_search_files(query: &str, max: usize, filter: FileFilter) -> Vec<EverythingHit> {
     let q = query.trim();
     if q.is_empty() || max == 0 {
         return Vec::new();
