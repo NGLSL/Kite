@@ -251,12 +251,9 @@ fn collect_from_root(root: &Path, source: &str, out: &mut Vec<RawItem>) {
             continue;
         };
         let target = path.to_string_lossy().into_owned();
-        let working_dir = path
-            .parent()
-            .filter(|parent| parent.is_dir())
-            .map(|parent| parent.to_string_lossy().into_owned());
         let id = stable_item_id(&target, None);
-        let item = AppItem::scanned(id, name, target.clone(), None, working_dir, source);
+        // PATH/包管理器命令的所在目录是安装位置，不是用户的启动位置。
+        let item = AppItem::scanned(id, name, target.clone(), None, None, source);
         out.push((item, Some(target)));
     }
 }
@@ -400,7 +397,7 @@ mod tests {
             .expect(".lnk must be searchable");
         assert_eq!(lnk.0.target, lnk_target);
         assert_eq!(lnk.0.source, COMMAND_SOURCE);
-        assert!(lnk.0.working_dir.is_some());
+        assert!(out.iter().all(|(item, _)| item.working_dir.is_none()));
 
         let _ = std::fs::remove_dir_all(root);
     }

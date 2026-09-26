@@ -4,6 +4,7 @@ use iced::{border, Color, Element};
 use super::super::theme::{ThemeMode, ThemeTokens};
 use super::super::{Message, State};
 use super::widgets::{flow_card, flow_row, std_button, toggle};
+use crate::app::CliTerminal;
 
 pub(super) fn general_card<'a>(state: &'a State, tokens: ThemeTokens) -> Element<'a, Message> {
     flow_card(
@@ -18,6 +19,12 @@ pub(super) fn general_card<'a>(state: &'a State, tokens: ThemeTokens) -> Element
                 "开机自动启动",
                 "登录 Windows 后在后台待命".to_string(),
                 toggle(state.autostart, Message::SetAutostart(!state.autostart), tokens),
+                tokens,
+            ),
+            flow_row(
+                "CLI 启动终端",
+                "仅用于命令目录中的 .cmd/.bat；自动顺序：Terminal → PowerShell → CMD".to_string(),
+                terminal_switcher(state.cli_terminal, tokens),
                 tokens,
             ),
             flow_row(
@@ -55,6 +62,57 @@ pub(super) fn general_card<'a>(state: &'a State, tokens: ThemeTokens) -> Element
         ],
         tokens,
     )
+}
+
+fn terminal_switcher(current: CliTerminal, tokens: ThemeTokens) -> Element<'static, Message> {
+    let opt = |label: &'static str, terminal: CliTerminal| {
+        let active = current == terminal;
+        button(text(label).size(12.0).color(if active {
+            tokens.accent
+        } else {
+            tokens.text_primary
+        }))
+        .padding([5.0, 8.0])
+        .on_press(Message::SetCliTerminal(terminal))
+        .style(move |_t, status| button::Style {
+            background: if active {
+                Some(iced::Background::Color(Color {
+                    a: 0.15,
+                    ..tokens.accent
+                }))
+            } else if status == button::Status::Hovered {
+                Some(iced::Background::Color(tokens.active_bg))
+            } else {
+                None
+            },
+            text_color: if active {
+                tokens.accent
+            } else {
+                tokens.text_primary
+            },
+            border: iced::Border {
+                color: if active {
+                    Color {
+                        a: 0.45,
+                        ..tokens.accent
+                    }
+                } else {
+                    tokens.border_window
+                },
+                width: 1.0,
+                radius: border::radius(6.0),
+            },
+            ..button::Style::default()
+        })
+    };
+    row![
+        opt("自动", CliTerminal::Auto),
+        opt("Terminal", CliTerminal::WindowsTerminal),
+        opt("PowerShell", CliTerminal::PowerShell),
+        opt("CMD", CliTerminal::Cmd),
+    ]
+    .spacing(4.0)
+    .into()
 }
 
 fn theme_switcher(current: ThemeMode, tokens: ThemeTokens) -> Element<'static, Message> {

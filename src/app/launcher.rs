@@ -1,11 +1,193 @@
+use std::ffi::OsStr;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use base64::Engine;
 
 use crate::model::AppItem;
 use crate::system::env::expand_env;
 
 use super::uwp;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CliTerminal {
+    #[default]
+    Auto,
+    WindowsTerminal,
+    PowerShell,
+    Cmd,
+}
+
+impl CliTerminal {
+    pub fn from_setting(value: &str) -> Self {
+        match value {
+            "windows_terminal" => Self::WindowsTerminal,
+            "powershell" => Self::PowerShell,
+            "cmd" => Self::Cmd,
+            _ => Self::Auto,
+        }
+    }
+
+    pub fn as_setting(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::WindowsTerminal => "windows_terminal",
+            Self::PowerShell => "powershell",
+            Self::Cmd => "cmd",
+        }
+    }
+}
+
+pub fn launch_with_terminal(item: &AppItem, terminal: CliTerminal) -> Result<(), String> {
+    let path = Path::new(&item.target);
+    if item.source == "commands" && item.args.is_none() && is_batch_script(path) {
+        if !path.is_file() {
+            return Err(format!("target not found: {}", item.target));
+        }
+        return launch_cli_script(path, terminal);
+    }
+    launch(item)
+}
+
+#[derive(Default)]
+struct AvailableTerminals {
+    wt: Option<PathBuf>,
+    powershell: Option<PathBuf>,
+    cmd: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalKind {
+    WindowsTerminal,
+    PowerShell,
+    Cmd,
+}
+
+impl AvailableTerminals {
+    fn detect() -> Self {
+        let windows = std::env::var_os("SystemRoot").map(PathBuf::from);
+        let wt = find_on_path("wt.exe").or_else(|| {
+            std::env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .map(|p| p.join(r"Microsoft\WindowsApps\wt.exe"))
+                .filter(|p| p.is_file())
+        });
+        let powershell = find_on_path("pwsh.exe")
+            .or_else(|| find_on_path("powershell.exe"))
+            .or_else(|| {
+                windows
+                    .as_ref()
+                    .map(|p| p.join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
+                    .filter(|p| p.is_file())
+            });
+        let cmd = std::env::var_os("ComSpec")
+            .map(PathBuf::from)
+            .filter(|p| p.is_file())
+            .or_else(|| {
+                windows
+                    .as_ref()
+                    .map(|p| p.join(r"System32\cmd.exe"))
+                    .filter(|p| p.is_file())
+            });
+        Self {
+            wt,
+            powershell,
+            cmd,
+        }
+    }
+
+    fn choose(&self, preferred: CliTerminal) -> Result<TerminalKind, String> {
+        match preferred {
+            CliTerminal::Auto => {
+                if self.wt.is_some() && self.powershell.is_some() {
+                    Ok(TerminalKind::WindowsTerminal)
+                } else if self.powershell.is_some() {
+                    Ok(TerminalKind::PowerShell)
+                } else if self.cmd.is_some() {
+                    Ok(TerminalKind::Cmd)
+                } else {
+                    Err("未找到可用终端".into())
+                }
+            }
+            CliTerminal::WindowsTerminal if self.wt.is_some() && self.powershell.is_some() => {
+                Ok(TerminalKind::WindowsTerminal)
+            }
+            CliTerminal::PowerShell if self.powershell.is_some() => Ok(TerminalKind::PowerShell),
+            CliTerminal::Cmd if self.cmd.is_some() => Ok(TerminalKind::Cmd),
+            _ => Err("所选终端不可用，请在设置中更换启动方式".into()),
+        }
+    }
+}
+
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+fn is_batch_script(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| {
+        extension.eq_ignore_ascii_case(OsStr::new("cmd"))
+            || extension.eq_ignore_ascii_case(OsStr::new("bat"))
+    })
+}
+
+fn powershell_encoded_command(path: &Path) -> String {
+    let literal = path.to_string_lossy().replace('\'', "''");
+    let script = format!("& '{literal}'");
+    let utf16le: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    base64::engine::general_purpose::STANDARD.encode(utf16le)
+}
+
+fn launch_cli_script(path: &Path, preferred: CliTerminal) -> Result<(), String> {
+    let available = AvailableTerminals::detect();
+    let kind = available.choose(preferred)?;
+    // PATH shims are installed beside Node/package-manager binaries. Running from that directory
+    // makes interactive CLIs act on the install folder, so use the user's home as their cwd.
+    let cwd = resolve_working_dir(None).ok_or("无法确定终端工作目录")?;
+    let mut command = match kind {
+        TerminalKind::WindowsTerminal => {
+            let mut cmd = Command::new(available.wt.as_ref().unwrap());
+            cmd.arg("new-tab")
+                .arg("-d")
+                .arg(&cwd)
+                .arg(available.powershell.as_ref().unwrap())
+                .arg("-NoLogo")
+                .arg("-NoExit")
+                .arg("-EncodedCommand")
+                .arg(powershell_encoded_command(path));
+            cmd
+        }
+        TerminalKind::PowerShell => {
+            let mut cmd = Command::new(available.powershell.as_ref().unwrap());
+            cmd.arg("-NoLogo")
+                .arg("-NoExit")
+                .arg("-EncodedCommand")
+                .arg(powershell_encoded_command(path));
+            cmd
+        }
+        TerminalKind::Cmd => {
+            let mut cmd = Command::new(available.cmd.as_ref().unwrap());
+            // Expand the indexed path once inside quotes. /s keeps the inner quote pair;
+            // do not use `call`, which expands paired %NAME% in a filename a second time.
+            cmd.arg("/d")
+                .arg("/v:off")
+                .arg("/s")
+                .arg("/k")
+                .env("KITE_CLI_TARGET", path);
+            cmd.raw_arg("\"\"%KITE_CLI_TARGET%\"\"");
+            cmd
+        }
+    };
+    command.current_dir(cwd);
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("启动终端失败: {e}"))
+}
 
 /// 启动工作目录：条目自带的起始位置（展开 %VAR%）优先，否则用户主目录。
 /// 终端类应用（WT / PowerShell / cmd）会把 cwd 当 shell 初始路径展示给用户，
@@ -62,7 +244,12 @@ pub fn launch(item: &AppItem) -> Result<(), String> {
         cmd.raw_arg(args);
     }
     // working_dir 无效时回落用户主目录，而不是继承 Kite 自己的 cwd
-    let working_dir = resolve_working_dir(item.working_dir.as_deref());
+    let working_dir = resolve_working_dir(if item.source == "commands" {
+        // Also override older cached command rows that recorded the CLI installation directory.
+        None
+    } else {
+        item.working_dir.as_deref()
+    });
     if let Some(dir) = &working_dir {
         cmd.current_dir(dir);
     }
@@ -100,6 +287,115 @@ fn opener_open(path: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_script_starts_in_user_home() {
+        let fixture = std::env::temp_dir().join(format!(
+            "kite-cli-cwd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&fixture).unwrap();
+        let script = fixture.join("cli & %TEMP% 100%.cmd");
+        let output = fixture.join("cwd.txt");
+        std::fs::write(
+            &script,
+            format!(
+                "@echo off\r\necho %CD%>\"{}\"\r\nexit\r\n",
+                output.display()
+            ),
+        )
+        .unwrap();
+        let item = AppItem::scanned(
+            "cli-script-test".into(),
+            "cli script".into(),
+            script.to_string_lossy().into_owned(),
+            None,
+            None,
+            "commands",
+        );
+        launch_with_terminal(&item, CliTerminal::Cmd).expect("launch command script");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let cwd = loop {
+            if let Ok(value) = std::fs::read_to_string(&output) {
+                break value;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "script did not write cwd"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert_eq!(
+            cwd.trim().to_lowercase(),
+            dirs::home_dir().unwrap().to_string_lossy().to_lowercase()
+        );
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
+    fn terminal_selection_prefers_terminal_then_powershell_then_cmd() {
+        let all = AvailableTerminals {
+            wt: Some("wt.exe".into()),
+            powershell: Some("powershell.exe".into()),
+            cmd: Some("cmd.exe".into()),
+        };
+        assert_eq!(
+            all.choose(CliTerminal::Auto).unwrap(),
+            TerminalKind::WindowsTerminal
+        );
+        let without_wt = AvailableTerminals { wt: None, ..all };
+        assert_eq!(
+            without_wt.choose(CliTerminal::Auto).unwrap(),
+            TerminalKind::PowerShell
+        );
+        let only_cmd = AvailableTerminals {
+            powershell: None,
+            ..without_wt
+        };
+        assert_eq!(
+            only_cmd.choose(CliTerminal::Auto).unwrap(),
+            TerminalKind::Cmd
+        );
+        assert!(only_cmd.choose(CliTerminal::WindowsTerminal).is_err());
+        assert_eq!(CliTerminal::from_setting("unknown"), CliTerminal::Auto);
+    }
+
+    #[test]
+    fn powershell_encoded_command_runs_quoted_batch_path() {
+        let fixture = std::env::temp_dir().join(format!(
+            "kite-cli-powershell-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&fixture).unwrap();
+        let script = fixture.join("cli & ' 100%.cmd");
+        let output = fixture.join("ran.txt");
+        std::fs::write(
+            &script,
+            format!("@echo off\r\necho reached>\"{}\"\r\n", output.display()),
+        )
+        .unwrap();
+        let powershell = AvailableTerminals::detect()
+            .powershell
+            .expect("Windows test machine needs PowerShell");
+        let status = Command::new(powershell)
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-EncodedCommand")
+            .arg(powershell_encoded_command(&script))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(std::fs::read_to_string(&output).unwrap().trim(), "reached");
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
 
     #[test]
     fn explicit_valid_dir_wins() {
@@ -172,6 +468,39 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn command_source_exe_ignores_cached_install_directory() {
+        let out = std::env::temp_dir().join(format!(
+            "kite-cli-exe-cwd-{}.txt",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&out);
+        let cmd_path =
+            std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into());
+        let item = AppItem::scanned(
+            "cli-cwd-test".into(),
+            "cmd".into(),
+            cmd_path,
+            Some(format!("/c cd > \"{}\"", out.display())),
+            Some(std::env::temp_dir().to_string_lossy().into_owned()),
+            "commands",
+        );
+        launch(&item).expect("spawn command source exe");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let cwd = loop {
+            if let Ok(value) = std::fs::read_to_string(&out) {
+                break value;
+            }
+            assert!(std::time::Instant::now() < deadline, "CLI did not write cwd");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert_eq!(
+            cwd.trim().to_lowercase(),
+            dirs::home_dir().unwrap().to_string_lossy().to_lowercase()
+        );
+        let _ = std::fs::remove_file(out);
     }
 
     #[test]

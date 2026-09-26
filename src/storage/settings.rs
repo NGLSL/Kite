@@ -27,6 +27,8 @@ pub struct Settings {
     pub web_search_hotkey: String,
     /// 外观主题：system / dark / light
     pub theme_mode: String,
+    /// CLI 启动终端：auto / windows_terminal / powershell / cmd。
+    pub cli_terminal: String,
 }
 
 impl Default for Settings {
@@ -43,6 +45,7 @@ impl Default for Settings {
             search_engine: "auto".into(),
             web_search_hotkey: crate::system::hotkey::DEFAULT_WEB_SEARCH_HOTKEY.into(),
             theme_mode: "dark".into(),
+            cli_terminal: "auto".into(),
         }
     }
 }
@@ -123,6 +126,11 @@ impl HistoryDb {
             if !v.is_empty() {
                 s.theme_mode = v;
             }
+        }
+        if let Ok(v) = self.get_setting("cli_terminal") {
+            s.cli_terminal = crate::app::CliTerminal::from_setting(&v)
+                .as_setting()
+                .to_string();
         }
         s
     }
@@ -454,5 +462,19 @@ mod tests {
 
         db.save_theme_mode("system").unwrap();
         assert_eq!(db.load_settings().theme_mode, "system");
+    }
+
+    #[test]
+    fn cli_terminal_setting_survives_reopen_and_invalid_value_uses_auto() {
+        let path = temp_path("cli-terminal");
+        {
+            let mut db = HistoryDb::open(&path).expect("open temp db");
+            assert_eq!(db.load_settings().cli_terminal, "auto");
+            db.save_setting("cli_terminal", "powershell").unwrap();
+        }
+        let mut db = HistoryDb::open(&path).expect("reopen temp db");
+        assert_eq!(db.load_settings().cli_terminal, "powershell");
+        db.save_setting("cli_terminal", "invalid").unwrap();
+        assert_eq!(db.load_settings().cli_terminal, "auto");
     }
 }

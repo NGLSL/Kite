@@ -564,7 +564,7 @@ pub(super) fn exec_result_action(
             }
             let t0 = Instant::now();
             system::env::refresh_process_env();
-            match app::launch(&item) {
+            match app::launch_with_terminal(&item, state.cli_terminal) {
                 Ok(()) => {
                     let elapsed_us = t0.elapsed().as_micros();
                     let (name, target) = (item.display_name.clone(), item.target.clone());
@@ -583,7 +583,7 @@ pub(super) fn exec_result_action(
                             item.display_name, item.target
                         )
                     });
-                    Task::none()
+                    flash(state, &format!("启动失败：{e}"))
                 }
             }
         }
@@ -1035,6 +1035,7 @@ pub(super) fn open_settings(state: &mut State) -> Task<Message> {
         state.autostart = s.autostart;
         state.history_recording = s.history_recording;
         state.query_log = s.query_log;
+        state.cli_terminal = app::CliTerminal::from_setting(&s.cli_terminal);
         state.search_engine = s.search_engine.clone();
         state.web_search_hotkey = s.web_search_hotkey.clone();
         state.search_engine_custom = db

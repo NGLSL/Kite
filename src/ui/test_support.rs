@@ -63,6 +63,7 @@ pub(super) fn test_state(query: &str) -> State {
         autostart: false,
         history_recording: true,
         theme_mode: ThemeMode::System,
+        cli_terminal: app::CliTerminal::Auto,
         grid_recent_count: 0,
         query_log: true,
         search_engine: "auto".into(),

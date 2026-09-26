@@ -58,6 +58,13 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
             }
             flash(state, "外观模式已切换")
         }
+        Message::SetCliTerminal(terminal) => {
+            state.cli_terminal = terminal;
+            if let Some(db) = &mut state.history {
+                let _ = db.save_setting("cli_terminal", terminal.as_setting());
+            }
+            flash(state, "CLI 启动终端已更新")
+        }
         Message::SetSearchEngine(id) => {
             state.search_engine = id.clone();
             if let Some(preset) = system::search_engine::preset_by_id(&id) {

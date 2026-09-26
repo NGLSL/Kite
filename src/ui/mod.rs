@@ -242,6 +242,7 @@ enum Message {
     SetHideOnBlur(bool),
     SetHistoryRecording(bool),
     SetThemeMode(ThemeMode),
+    SetCliTerminal(app::CliTerminal),
     /// 开关查询级诊断日志（结果就绪／过期）。
     SetQueryLog(bool),
     /// 搜索引擎预设：auto / baidu / bing / google / duckduckgo / custom。
@@ -400,6 +401,7 @@ struct State {
     autostart: bool,
     history_recording: bool,
     pub theme_mode: ThemeMode,
+    cli_terminal: app::CliTerminal,
     /// 空 Query 网格仪表盘中“最近使用”条目数（用于精确分区与键盘漫游）
     pub(crate) grid_recent_count: usize,
     /// 输入与查询级诊断日志开关（Alt/IME 按键日志 + 结果就绪／过期）。保存在内存里，

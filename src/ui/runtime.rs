@@ -363,6 +363,7 @@ fn apply_saved_settings(state: &mut State, saved_settings: storage::settings::Se
     state.autostart = saved_settings.autostart;
     state.history_recording = saved_settings.history_recording;
     state.query_log = saved_settings.query_log;
+    state.cli_terminal = app::CliTerminal::from_setting(&saved_settings.cli_terminal);
     state.search_engine = saved_settings.search_engine.clone();
     state.web_search_hotkey = saved_settings.web_search_hotkey.clone();
     state.search_engine_custom = state
@@ -431,6 +432,7 @@ fn build_state(
         autostart: false,
         history_recording: true,
         theme_mode: ThemeMode::parse(&saved_settings.theme_mode),
+        cli_terminal: app::CliTerminal::from_setting(&saved_settings.cli_terminal),
         grid_recent_count: 0,
         query_log: true,
         search_engine: "auto".into(),

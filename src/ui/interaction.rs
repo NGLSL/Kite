@@ -33,6 +33,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
         | Message::SetHideOnBlur(..)
         | Message::SetHistoryRecording(..)
         | Message::SetThemeMode(..)
+        | Message::SetCliTerminal(..)
         | Message::SetQueryLog(..)
         | Message::SetSearchEngine(..)
         | Message::SearchEngineCustomChanged(..)

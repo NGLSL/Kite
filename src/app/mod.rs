@@ -13,5 +13,5 @@ pub mod watch;
 pub mod web;
 mod windows_settings;
 
-pub use launcher::launch;
+pub use launcher::{launch, launch_with_terminal, CliTerminal};
 pub use scanner::scan_apps;
