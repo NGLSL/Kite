@@ -110,8 +110,11 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::FullIndexReady(n) => {
             plog(&format!("full index ready n={n}"));
             state.index_ready = true;
-            if state.hidden || state.rescan_pending {
-                apply_pending_full(state);
+            // 活跃输入要立即看到新入口；结果导航中保留当前列表，等下一次查询或隐藏时采用。
+            let active_query = !state.query.trim().is_empty()
+                && state.navigation_mode == super::NavigationMode::Input;
+            if (state.hidden || state.rescan_pending || active_query) && apply_pending_full(state) {
+                state.refresh_results();
             }
             if std::mem::take(&mut state.rescan_pending) {
                 flash(state, &format!("扫描完成，共 {n} 条"))

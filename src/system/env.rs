@@ -22,6 +22,20 @@ use windows::Win32::System::Registry::{
 const MACHINE_ENV: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
 const USER_ENV: &str = "Environment";
 
+/// 扫描命令入口时使用当前会话与注册表中的 PATH，覆盖启动器常驻期间新装的 CLI。
+pub fn effective_path() -> String {
+    let current = std::env::var_os("PATH")
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let machine = read_hive(HKEY_LOCAL_MACHINE, MACHINE_ENV);
+    let user = read_hive(HKEY_CURRENT_USER, USER_ENV);
+    merge_path(
+        &current,
+        machine.get("PATH").map(String::as_str),
+        user.get("PATH").map(String::as_str),
+    )
+}
+
 /// 拉起子进程前调用。失败静默（读不到注册表就不改环境）。
 pub fn refresh_process_env() {
     let current: HashMap<String, String> = std::env::vars_os()

@@ -1,7 +1,7 @@
 //! 查询输入、结果选择与后台搜索结果落地。
 
 use super::actions::{flash, launch_alt_digit, launch_selected, menu_action, sync_scroll};
-use super::interaction::{capture_menu_item, request_rescan};
+use super::interaction::{apply_pending_full, capture_menu_item, request_rescan};
 use super::results;
 use super::{alt_digit_from_query_change, Message, NavigationMode, State};
 use iced::Task;
@@ -26,6 +26,8 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 }
             }
             state.query = q;
+            // Full 可能在窗口可见时已完成；输入新查询前采用它，避免继续查旧索引。
+            apply_pending_full(state);
             state.request_direct_path();
             state.navigation_mode = NavigationMode::Input;
             if state

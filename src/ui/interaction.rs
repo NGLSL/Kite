@@ -70,10 +70,10 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
     }
 }
 
-/// 采用后台 Full 挂起快照；Launcher 可见期间不调用。
-pub(super) fn apply_pending_full(state: &mut State) {
+/// 采用后台 Full 挂起快照；调用方随后刷新当前查询。
+pub(super) fn apply_pending_full(state: &mut State) -> bool {
     let Some(full) = super::backend::take_pending_full() else {
-        return;
+        return false;
     };
     let count = full.apps.len();
     let applied = state
@@ -85,7 +85,7 @@ pub(super) fn apply_pending_full(state: &mut State) {
         })
         .unwrap_or(false);
     if !applied {
-        return;
+        return false;
     }
     plog(&format!("applied pending full snapshot n={count}"));
     // 旧含 source 的 id 迁移到 stable id，保留 Pin/历史/Alias
@@ -106,7 +106,7 @@ pub(super) fn apply_pending_full(state: &mut State) {
     state.invalidate_prefs_cache();
     state.index_generation = state.index_generation.wrapping_add(1);
     state.base_hit_cache.clear();
-    state.refresh_results();
+    true
 }
 
 pub(super) fn capture_menu_item(results: &[SearchResult], index: usize) -> Option<AppItem> {

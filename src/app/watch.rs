@@ -99,8 +99,22 @@ pub fn spawn_entry_watchers(
                 .into_iter()
                 .filter(|root| root.exists())
                 .collect();
+            let command_roots = crate::app::scanner::command_scan_roots();
             for root in desired.difference(&watched) {
-                if let Err(e) = watcher.watch(root, RecursiveMode::Recursive) {
+                // 命令目录只扫描直接子项；递归监听 PATH 下的工具目录会被构建输出频繁触发。
+                // Codex bin 父目录仍递归监听，以捕获新版本目录。
+                let mode = if command_roots.iter().any(|command| {
+                    let command = command.to_string_lossy();
+                    let root = root.to_string_lossy();
+                    command
+                        .trim_end_matches(['\\', '/'])
+                        .eq_ignore_ascii_case(root.trim_end_matches(['\\', '/']))
+                }) {
+                    RecursiveMode::NonRecursive
+                } else {
+                    RecursiveMode::Recursive
+                };
+                if let Err(e) = watcher.watch(root, mode) {
                     crate::log::info(&format!("watch {:?} failed: {e}", root));
                 } else {
                     crate::log::info(&format!("watching {:?}", root));
@@ -179,6 +193,8 @@ fn spawn_registry_watchers(tx: mpsc::Sender<()>, dirty: Arc<AtomicBool>) {
 
 fn registry_watch_specs() -> Vec<(u8, &'static str, bool)> {
     let mut specs = Vec::new();
+    specs.push((0, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment", false));
+    specs.push((1, "Environment", false));
     let app_paths = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths";
     specs.extend([
         (0, app_paths, false),
@@ -274,6 +290,10 @@ mod tests {
     #[test]
     fn registry_watch_specs_exclude_the_noisy_classes_tree() {
         let specs = registry_watch_specs();
+        assert!(specs.iter().any(|(hive, key, _)| *hive == 1 && *key == "Environment"));
+        assert!(specs.iter().any(|(hive, key, _)| {
+            *hive == 0 && key.ends_with(r"Session Manager\Environment")
+        }));
         for expected in ["App Paths", "Uninstall"] {
             assert!(
                 specs.iter().any(|(_, key, _)| key.ends_with(expected)),

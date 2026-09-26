@@ -2,7 +2,7 @@
 //!
 //! Cold Start：Bootstrap 立刻发布可搜索首屏。
 //! Warm Start：启动前已由 snapshot 恢复，跳过 Bootstrap。
-//! Full：写 last-good，并挂起；Launcher 隐藏后/下次打开再采用，避免可见时卡顿。
+//! Full：写 last-good，并挂起；Launcher 在隐藏、下次打开或查询更新时采用。
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -35,7 +35,15 @@ fn pending_full_slot() -> &'static Mutex<Option<AppIndex>> {
     PENDING_FULL.get_or_init(|| Mutex::new(None))
 }
 
-/// UI 在空闲时机（隐藏后 / 下次打开）取走并采用 Full 结果。
+#[cfg(test)]
+pub(super) static PENDING_FULL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+pub(super) fn queue_pending_full_for_test(index: AppIndex) {
+    *pending_full_slot().lock().unwrap() = Some(index);
+}
+
+/// UI 在合适的消息边界取走并采用 Full 结果。
 pub fn take_pending_full() -> Option<AppIndex> {
     pending_full_slot()
         .lock()
@@ -203,7 +211,7 @@ fn queue_full_snapshot(
             *slot = Some(full);
         }
         plog(&format!(
-            "full snapshot queued for idle apply n={count} in {:?} (generation={generation})",
+            "full snapshot queued for UI apply n={count} in {:?} (generation={generation})",
             started.elapsed()
         ));
     } else {
@@ -348,6 +356,7 @@ mod tests {
 
     #[test]
     fn take_pending_full_clears_slot() {
+        let _guard = PENDING_FULL_TEST_LOCK.lock().unwrap();
         let mut built = AppIndex {
             apps: vec![app("x", "X", r"C:\X.exe", "start-menu")],
             system_entries: Vec::new(),

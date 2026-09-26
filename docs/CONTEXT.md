@@ -22,7 +22,7 @@
 | **匹配位置证据** | 命中在原名称上的 start/span/gaps/edit_cost；不可映射记未知，不当作最优起点 |
 | **搜索代际** | Query 代际 + 索引代际；过期结果不得合并进当前列表 |
 | **评分诊断** | 命中字段→验证方式→分/偏好标签→归并入口的调试明细，不改变排序 |
-| **SourceLayer / Tier** | 索引来源的产品分层，用于空 Query 可见性与弱匹配降噪，**不是**用户 Demote/Alias。**Tier A Formal（白名单）**：Start Menu/Desktop/UWP/apps-folder/用户 Portable。**Tier B System**：Kite curated 系统入口（`system_entries`），不扫 System32。**Tier C Discovery/Command**：App Paths/Uninstall/Scoop/WinGet/WindowsApps/Chocolatey——可作 alias/元数据/精确命令或兜底，**默认不当正式应用刷屏**。未知 source 默认 Supplemental（不当正式应用） |
+| **SourceLayer / Tier** | 索引来源的产品分层，用于空 Query 可见性与弱匹配降噪，**不是**用户 Demote/Alias。**Tier A Formal（白名单）**：Start Menu/Desktop/UWP/apps-folder/用户 Portable。**Tier B System**：Kite curated 系统入口（`system_entries`），不扫 System32。**Tier C Discovery/Command**：App Paths/Uninstall/Scoop/WinGet/WindowsApps/Chocolatey/PATH 非系统命令目录/Codex Desktop CLI——可作 alias/元数据/精确命令或兜底，**默认不当正式应用刷屏**。未知 source 默认 Supplemental（不当正式应用） |
 | **ResultSource** | 单条 **Result** 的展示/行为来源：App / File / Web / Builtin / Plugin。与 SourceLayer（索引分层）、AppItem.source（扫描来源字符串）不是同一概念；插件结果用 Plugin { plugin_id, provider_id } |
 | **文件类型筛选** | 文件搜索模式下由用户选定的文件类别，只约束文件结果；类别按文件扩展名或目录身份判定，不代表文件内容类型。 |
 | **ResultAction** | Result 携带的行为：Result 管展示，Action 管行为（LaunchApp / OpenFile / OpenLocalPath / RevealPath / OpenUrl / CopyText / Plugin）。路径直达只从已确认存在的用户绝对路径生成，执行时复核。启动入口逐步改为执行该字段，而不是在 UI 里硬编码 AppItem |

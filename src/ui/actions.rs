@@ -811,6 +811,7 @@ mod interactive_log_gate_tests {
     /// 也就没有同步文件写入。
     #[test]
     fn interactive_path_writes_no_log_when_query_log_off() {
+        let _guard = crate::ui::backend::PENDING_FULL_TEST_LOCK.lock().unwrap();
         let mut state = test_state("k");
         state.query_log = false;
 
@@ -916,7 +917,7 @@ pub(super) fn show_launcher(state: &mut State) -> Task<Message> {
         plog("show before window ready; ignored");
         return Task::none();
     };
-    // 下次打开时采用挂起的 Full，避免可见期间打断列表。
+    // 下次打开时采用挂起的 Full。
     super::interaction::apply_pending_full(state);
     // 热键/托盘唤起只还原主启动器搜索；JSON 工具窗独立，不随唤起关闭。
     state.settings_open = false;

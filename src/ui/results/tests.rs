@@ -11,6 +11,69 @@ use crate::system::everything::{self, Availability};
 use crate::ui::actions::menu_action;
 use crate::ui::MenuAction;
 
+fn grok_full_index() -> crate::model::AppIndex {
+    use crate::model::{AppIndex, AppItem};
+
+    let mut grok = AppItem::scanned(
+        "grok-cli".into(),
+        "grok".into(),
+        r"C:\Users\example\.grok\bin\grok.exe".into(),
+        None,
+        None,
+        "commands",
+    );
+    grok.attach_search_fields();
+    let mut full = AppIndex {
+        apps: vec![grok],
+        system_entries: Vec::new(),
+        retrieval: None,
+    };
+    full.rebuild_retrieval();
+    full
+}
+
+#[test]
+fn visible_query_adopts_completed_full_index_before_search() {
+    use crate::ui::backend::{queue_pending_full_for_test, PENDING_FULL_TEST_LOCK};
+    use crate::ui::interaction::update;
+    use crate::ui::Message;
+
+    let _guard = PENDING_FULL_TEST_LOCK.lock().unwrap();
+    let mut state = test_state("");
+    state.index.lock().unwrap().rebuild_retrieval();
+    queue_pending_full_for_test(grok_full_index());
+
+    let _ = update(&mut state, Message::FullIndexReady(1));
+    let _ = update(&mut state, Message::QueryChanged("grok".into()));
+
+    let index = state.index.lock().unwrap();
+    assert!(index.apps.iter().any(|item| item.name == "grok"));
+    assert_eq!(state.index_generation, 1);
+    assert_eq!(state.query, "grok");
+    assert_eq!(state.app_query_generation, 1);
+}
+
+#[test]
+fn active_query_refreshes_when_full_index_finishes() {
+    use crate::ui::backend::{queue_pending_full_for_test, PENDING_FULL_TEST_LOCK};
+    use crate::ui::interaction::update;
+    use crate::ui::Message;
+
+    let _guard = PENDING_FULL_TEST_LOCK.lock().unwrap();
+    let mut state = test_state("grok");
+    state.index.lock().unwrap().rebuild_retrieval();
+    state.refresh_results();
+    let old_query_generation = state.app_query_generation;
+    queue_pending_full_for_test(grok_full_index());
+
+    let _ = update(&mut state, Message::FullIndexReady(1));
+
+    let index = state.index.lock().unwrap();
+    assert!(index.apps.iter().any(|item| item.name == "grok"));
+    assert_eq!(state.index_generation, 1);
+    assert!(state.app_query_generation > old_query_generation);
+}
+
 #[test]
 fn bootstrap_ready_bumps_index_generation_and_clears_base_cache() {
     use super::super::interaction::update;
@@ -121,6 +184,7 @@ fn clearing_query_cancels_in_flight_app_search() {
 #[test]
 fn hiding_window_cancels_in_flight_app_search() {
     use crate::ui::actions::hide;
+    let _guard = crate::ui::backend::PENDING_FULL_TEST_LOCK.lock().unwrap();
 
     let mut state = test_state("k");
     state.refresh_results();

@@ -1,7 +1,7 @@
-//! 从包管理器和 Windows 命令别名目录收集少量可启动入口。
+//! 从包管理器和命令目录收集可启动入口。
 //!
-//! 这里只读取三个固定目录的直接子项，不扫描整个 `PATH`，也不递归进入
-//! 其他目录。`.lnk` 保留快捷方式文件本身作为 target；启动阶段交给
+//! 读取固定目录及 PATH 中非 Windows 系统目录的直接子项，并补充 Codex Desktop
+//! 的版本化 CLI 目录。`.lnk` 保留快捷方式文件本身作为 target；启动阶段交给
 //! Windows ShellExecute 处理，避免在此处复制快捷方式 COM 解析逻辑。
 
 use std::collections::HashSet;
@@ -19,7 +19,7 @@ pub const COMMAND_SOURCE: &str = "commands";
 
 const SUPPORTED_EXTENSIONS: &[&str] = &["exe", "cmd", "bat", "com", "lnk"];
 
-/// 读取 WindowsApps、WinGet Links 和 Chocolatey 的直接命令入口。
+/// 读取固定目录、PATH 和 Codex Desktop 的直接命令入口。
 ///
 /// 每个候选都必须是现存文件，并且只允许 `SUPPORTED_EXTENSIONS` 中的扩展名。
 /// 单个目录或文件读取失败时静默跳过，其他来源仍继续收集。
@@ -32,7 +32,22 @@ pub fn collect_command_entries(source: &str, out: &mut Vec<RawItem>) {
 pub fn configured_command_roots() -> Vec<PathBuf> {
     let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
     let program_data = std::env::var_os("ProgramData").map(PathBuf::from);
-    command_roots(local_app_data.as_deref(), program_data.as_deref())
+    let windows_dir = std::env::var_os("SystemRoot")
+        .or_else(|| std::env::var_os("windir"))
+        .map(PathBuf::from);
+    let mut roots = command_roots(local_app_data.as_deref(), program_data.as_deref());
+    roots.extend(additional_command_roots(
+        local_app_data.as_deref(),
+        &crate::system::env::effective_path(),
+        windows_dir.as_deref(),
+    ));
+    roots
+}
+
+pub fn codex_bin_root() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .map(|local| local.join(r"OpenAI\Codex\bin"))
 }
 
 /// 构造固定的命令入口目录；参数独立出来便于无环境副作用地测试。
@@ -44,6 +59,55 @@ pub fn command_roots(local_app_data: Option<&Path>, program_data: Option<&Path>)
     }
     if let Some(program_data) = program_data {
         roots.push(program_data.join(r"chocolatey\bin"));
+    }
+    roots
+}
+
+fn additional_command_roots(
+    local_app_data: Option<&Path>,
+    effective_path: &str,
+    windows_dir: Option<&Path>,
+) -> Vec<PathBuf> {
+    const MAX_PATH_ROOTS: usize = 128;
+    let windows_key = windows_dir.map(|dir| normalize_path_key(&dir.to_string_lossy()));
+    let mut roots = Vec::new();
+    for segment in effective_path.split(';').take(MAX_PATH_ROOTS) {
+        let segment = segment.trim().trim_matches('"');
+        if segment.is_empty() {
+            continue;
+        }
+        let expanded = crate::system::env::expand_env(segment);
+        let root = PathBuf::from(expanded);
+        if !root.is_absolute() || root.to_string_lossy().starts_with(r"\\") {
+            continue;
+        }
+        let key = normalize_path_key(&root.to_string_lossy());
+        if windows_key.as_ref().is_some_and(|windows| {
+            key == *windows || key.starts_with(&format!("{}\\", windows.trim_end_matches('\\')))
+        }) {
+            continue;
+        }
+        roots.push(root);
+    }
+
+    // Codex Desktop 管理版本目录，并只向它启动的终端注入 CLI PATH；Kite 可能
+    // 早于 Codex 启动，因此还要从安装目录选一个当前存在的版本。
+    if let Some(bin) = local_app_data.map(|local| local.join(r"OpenAI\Codex\bin")) {
+        let latest = std::fs::read_dir(bin).ok().and_then(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|dir| dir.join("codex.exe").is_file())
+                .max_by_key(|dir| {
+                    dir.join("codex.exe")
+                        .metadata()
+                        .and_then(|metadata| metadata.modified())
+                        .ok()
+                })
+        });
+        if let Some(root) = latest {
+            roots.push(root);
+        }
     }
     roots
 }
@@ -266,6 +330,44 @@ mod tests {
             ]
         );
         assert_eq!(command_roots(None, None), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn path_and_codex_cli_entries_are_discovered() {
+        let root = std::env::temp_dir().join(format!("kite-cli-roots-{}", std::process::id()));
+        let grok_bin = root.join(".grok").join("bin");
+        let codex_bin = root
+            .join("AppData")
+            .join("Local")
+            .join("OpenAI")
+            .join("Codex")
+            .join("bin");
+        let codex_version = codex_bin.join("version-a");
+        let windows_dir = root.join("Windows");
+        std::fs::create_dir_all(&grok_bin).unwrap();
+        std::fs::create_dir_all(&codex_version).unwrap();
+        std::fs::create_dir_all(windows_dir.join("System32")).unwrap();
+        std::fs::write(grok_bin.join("grok.exe"), b"fixture").unwrap();
+        std::fs::write(codex_version.join("codex.exe"), b"fixture").unwrap();
+        std::fs::write(windows_dir.join("System32").join("cmd.exe"), b"fixture").unwrap();
+
+        let roots = additional_command_roots(
+            Some(&root.join("AppData").join("Local")),
+            &format!(
+                "{};{};relative-bin",
+                grok_bin.display(),
+                windows_dir.join("System32").display()
+            ),
+            Some(&windows_dir),
+        );
+        let mut out = Vec::new();
+        collect_from_roots(&roots, COMMAND_SOURCE, &mut out);
+        let names: HashSet<_> = out.iter().map(|(item, _)| item.name.as_str()).collect();
+        assert!(names.contains("grok"), "user PATH CLI must be indexed");
+        assert!(names.contains("codex"), "Codex Desktop CLI must be indexed");
+        assert!(!names.contains("cmd"), "Windows system commands must stay excluded");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

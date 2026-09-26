@@ -77,9 +77,16 @@ pub fn scan_apps_pass_with_options(
     scan_apps_with_options(icon_dir, pass, options)
 }
 
-/// Fixed command-source directories that should participate in filesystem
-/// change monitoring together with Start Menu and configured portable roots.
+/// 监听命令目录的直接子项，以及 Codex Desktop 的版本目录变化。
 pub fn command_watch_roots() -> Vec<PathBuf> {
+    let mut roots = command_scan_roots();
+    if let Some(codex_bin) = commands::codex_bin_root() {
+        roots.push(codex_bin);
+    }
+    roots
+}
+
+pub fn command_scan_roots() -> Vec<PathBuf> {
     commands::configured_command_roots()
 }
 
@@ -340,12 +347,23 @@ fn scan_apps_with_budget(
     let mut metadata_time = Duration::ZERO;
     let meta_batch: Vec<Vec<String>> = if pass.include_metadata() {
         let tm = Instant::now();
-        let paths: Vec<PathBuf> = items
+        // 命令别名以文件名精确检索；PATH 中的 CLI 数量可能很多，不为它们读取
+        // 版本资源。正式应用仍保留版本关键词。
+        let paths: Vec<(usize, PathBuf)> = items
             .iter()
-            .map(|(item, _)| PathBuf::from(&item.target))
+            .enumerate()
+            .filter(|(_, (item, _))| item.source != commands::COMMAND_SOURCE)
+            .map(|(idx, (item, _))| (idx, PathBuf::from(&item.target)))
             .collect();
         let mut meta_cache = metadata::MetaCache::load(icon_dir);
-        let batch = metadata::executable_keywords_batch(&paths, &mut meta_cache);
+        let found = metadata::executable_keywords_batch(
+            &paths.iter().map(|(_, path)| path.clone()).collect::<Vec<_>>(),
+            &mut meta_cache,
+        );
+        let mut batch = vec![Vec::new(); items.len()];
+        for ((idx, _), keywords) in paths.into_iter().zip(found) {
+            batch[idx] = keywords;
+        }
         meta_cache.save();
         crate::log::info(&format!(
             "meta cache: {} hits / {} misses",
