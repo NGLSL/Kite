@@ -246,6 +246,7 @@ pub(super) fn editor<'a>(
     text_editor(content)
         .placeholder(placeholder)
         .on_action(on_action)
+        .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
         .height(Length::Fill)
         .min_height(280.0)
         .size(13.0)
@@ -302,6 +303,7 @@ pub(super) fn result_pane(
         .size(if empty { 12.0 } else { 13.0 })
         .font(font)
         .color(result_color)
+        .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
         .width(Length::Fill);
     let result_box = container(
         scrollable(result_text)
