@@ -2,8 +2,13 @@
 //! 手写 SQL，无 ORM。连接可被 `Mutex` 串行使用。
 
 pub mod demote;
+pub mod hidden;
+pub mod manual;
 pub mod pins;
 pub mod settings;
+
+pub use hidden::HiddenItem;
+pub use manual::ManualApp;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -13,7 +18,8 @@ use rusqlite::{params, params_from_iter, Connection};
 /// SQLite schema 版本（ADR 0001：`PRAGMA user_version`）。
 /// 1: 基础 usage/query/settings/aliases
 /// 2: + pinned + demoted
-pub const SCHEMA_VERSION: i32 = 2;
+/// 3: + hidden item preferences + manually registered applications
+pub const SCHEMA_VERSION: i32 = 3;
 
 pub struct HistoryDb {
     conn: Connection,
@@ -64,26 +70,76 @@ impl HistoryDb {
     }
 
     fn user_version(&self) -> rusqlite::Result<i32> {
-        self.conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
-    }
-
-    fn set_user_version(&mut self, v: i32) -> rusqlite::Result<()> {
-        self.conn
-            .execute_batch(&format!("PRAGMA user_version = {v};"))?;
-        Ok(())
+        self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))
     }
 
     /// 按 `user_version` 前向迁移；重复打开安全，不删已有数据。
     fn migrate(&mut self) -> rusqlite::Result<()> {
         let v = self.user_version().unwrap_or(0);
-        if v < 2 {
-            self.ensure_schema()?;
-            self.ensure_pins_schema()?;
-            self.ensure_demote_schema()?;
-            self.set_user_version(SCHEMA_VERSION)?;
+        if v >= SCHEMA_VERSION {
+            return Ok(());
         }
-        Ok(())
+        // Keep the complete schema upgrade in one transaction. This matters
+        // for a v2 database: a failure creating either v3 preference table
+        // must not leave user_version claiming that the upgrade completed.
+        let tx = self.conn.transaction()?;
+        if v < 2 {
+            tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS user_aliases (
+                    alias TEXT PRIMARY KEY,
+                    target_name TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS pinned (
+                    item_id TEXT PRIMARY KEY,
+                    pinned_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS demoted (
+                    item_id TEXT PRIMARY KEY,
+                    demoted_at INTEGER NOT NULL
+                );
+                "#,
+            )?;
+            // Old v1 databases predate target_id. Inspect the schema first so
+            // only the genuinely missing column is altered; migration errors
+            // must remain visible to the transaction and caller.
+            let has_target_id = {
+                let mut stmt = tx.prepare("PRAGMA table_info(user_aliases)")?;
+                let columns = stmt
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                columns.iter().any(|column| column == "target_id")
+            };
+            if !has_target_id {
+                tx.execute("ALTER TABLE user_aliases ADD COLUMN target_id TEXT", [])?;
+            }
+        }
+        if v < 3 {
+            tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS hidden_items (
+                    item_id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    target TEXT NOT NULL,
+                    args TEXT,
+                    hidden_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS manual_apps (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT NOT NULL,
+                    path_key TEXT NOT NULL UNIQUE,
+                    display_name TEXT NOT NULL,
+                    item_id TEXT NOT NULL
+                );
+                "#,
+            )?;
+        }
+        tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+        tx.commit()
     }
 
     pub(crate) fn raw_conn(&self) -> &Connection {
@@ -155,9 +211,25 @@ impl HistoryDb {
 
     /// 清空使用历史（Usage + Query History）。固定项不属于历史，保留。
     pub fn clear_history(&mut self) -> rusqlite::Result<()> {
-        self.conn.execute("DELETE FROM usage_history", [])?;
-        self.conn.execute("DELETE FROM query_history", [])?;
-        Ok(())
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM usage_history", [])?;
+        tx.execute("DELETE FROM query_history", [])?;
+        tx.commit()
+    }
+
+    /// Delete all Query→App pairings for one normalized Query. Global Usage,
+    /// other Query pairings, and all independent preferences are preserved.
+    /// The public seam accepts the same normalized form used by search and
+    /// launch recording; normalizing again makes the operation safe for a UI
+    /// caller that still has the raw input string.
+    pub fn clear_query_pairs(&mut self, query_norm: &str) -> rusqlite::Result<usize> {
+        let query = crate::search::normalize_for_index(query_norm);
+        if query.is_empty() {
+            return Ok(0);
+        }
+        Ok(self
+            .conn
+            .execute("DELETE FROM query_history WHERE query = ?1", params![query])?)
     }
 
     /// 将旧 item_id 的 Usage / Query History / Pin / Alias 迁移到 new_id。
@@ -166,20 +238,22 @@ impl HistoryDb {
         if old_id == new_id || old_id.is_empty() || new_id.is_empty() {
             return Ok(false);
         }
+        let tx = self.conn.transaction()?;
         let mut moved = false;
 
         // usage：合并计数，保留较新 last_used_at
-        let existing: Option<(i64, i64)> = self
-            .conn
-            .query_row(
-                "SELECT launch_count, last_used_at FROM usage_history WHERE item_id = ?1",
-                params![old_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .ok();
+        let existing: Option<(i64, i64)> = match tx.query_row(
+            "SELECT launch_count, last_used_at FROM usage_history WHERE item_id = ?1",
+            params![old_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ) {
+            Ok(value) => Some(value),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(error) => return Err(error),
+        };
         if let Some((count, last)) = existing {
             moved = true;
-            self.conn.execute(
+            tx.execute(
                 "INSERT INTO usage_history (item_id, launch_count, last_used_at)
                  VALUES (?1, ?2, ?3)
                  ON CONFLICT(item_id) DO UPDATE SET
@@ -187,7 +261,7 @@ impl HistoryDb {
                    last_used_at = max(usage_history.last_used_at, excluded.last_used_at)",
                 params![new_id, count, last],
             )?;
-            self.conn.execute(
+            tx.execute(
                 "DELETE FROM usage_history WHERE item_id = ?1",
                 params![old_id],
             )?;
@@ -195,7 +269,7 @@ impl HistoryDb {
 
         // query_history：按 (query, item_id) 合并
         let pairs: Vec<(String, i64, i64)> = {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = tx.prepare(
                 "SELECT query, count, last_used_at FROM query_history WHERE item_id = ?1",
             )?;
             let rows = stmt.query_map(params![old_id], |r| {
@@ -209,7 +283,7 @@ impl HistoryDb {
         };
         for (query, count, last) in pairs {
             moved = true;
-            self.conn.execute(
+            tx.execute(
                 "INSERT INTO query_history (query, item_id, count, last_used_at)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(query, item_id) DO UPDATE SET
@@ -218,33 +292,78 @@ impl HistoryDb {
                 params![query, new_id, count, last],
             )?;
         }
-        self.conn.execute(
+        tx.execute(
             "DELETE FROM query_history WHERE item_id = ?1",
             params![old_id],
         )?;
 
         // pin：只改 id，保留 pinned_at
-        let pinned: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT pinned_at FROM pinned WHERE item_id = ?1",
-                params![old_id],
-                |r| r.get(0),
-            )
-            .ok();
+        let pinned: Option<i64> = match tx.query_row(
+            "SELECT pinned_at FROM pinned WHERE item_id = ?1",
+            params![old_id],
+            |r| r.get(0),
+        ) {
+            Ok(value) => Some(value),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(error) => return Err(error),
+        };
         if let Some(at) = pinned {
             moved = true;
-            self.conn.execute(
+            tx.execute(
                 "INSERT INTO pinned (item_id, pinned_at) VALUES (?1, ?2)
                  ON CONFLICT(item_id) DO UPDATE SET pinned_at = max(pinned.pinned_at, excluded.pinned_at)",
                 params![new_id, at],
             )?;
-            self.conn
-                .execute("DELETE FROM pinned WHERE item_id = ?1", params![old_id])?;
+            tx.execute("DELETE FROM pinned WHERE item_id = ?1", params![old_id])?;
+        }
+
+        // demote：保持较新的时间戳
+        let demoted_at: Option<i64> = match tx.query_row(
+            "SELECT demoted_at FROM demoted WHERE item_id = ?1",
+            params![old_id],
+            |r| r.get(0),
+        ) {
+            Ok(value) => Some(value),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(at) = demoted_at {
+            moved = true;
+            tx.execute(
+                "INSERT INTO demoted (item_id, demoted_at) VALUES (?1, ?2)
+                 ON CONFLICT(item_id) DO UPDATE SET demoted_at = max(demoted.demoted_at, excluded.demoted_at)",
+                params![new_id, at],
+            )?;
+            tx.execute("DELETE FROM demoted WHERE item_id = ?1", params![old_id])?;
+        }
+
+        // hidden：preserve management metadata and the newest hide timestamp.
+        let hidden: Option<(String, String, Option<String>, i64)> = match tx.query_row(
+            "SELECT display_name, target, args, hidden_at
+             FROM hidden_items WHERE item_id = ?1",
+            params![old_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        ) {
+            Ok(value) => Some(value),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(error) => return Err(error),
+        };
+        if let Some((display_name, target, args, hidden_at)) = hidden {
+            moved = true;
+            tx.execute(
+                "INSERT INTO hidden_items (item_id, display_name, target, args, hidden_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(item_id) DO UPDATE SET hidden_at = max(hidden_items.hidden_at, excluded.hidden_at)",
+                params![new_id, display_name, target, args, hidden_at],
+            )?;
+            tx.execute(
+                "DELETE FROM hidden_items WHERE item_id = ?1",
+                params![old_id],
+            )?;
         }
 
         // user_aliases.target_id
-        let n = self.conn.execute(
+        let n = tx.execute(
             "UPDATE user_aliases SET target_id = ?1 WHERE target_id = ?2",
             params![new_id, old_id],
         )?;
@@ -252,6 +371,7 @@ impl HistoryDb {
             moved = true;
         }
 
+        tx.commit()?;
         Ok(moved)
     }
 
@@ -392,6 +512,7 @@ pub fn now_ts() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn temp_db() -> HistoryDb {
         static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -543,6 +664,83 @@ mod tests {
     }
 
     #[test]
+    fn clear_history_keeps_hidden_and_manual_preferences() {
+        let mut db = temp_db();
+        let item = crate::model::AppItem::scanned(
+            "app-a".into(),
+            "App A".into(),
+            r"C:\Apps\a.exe".into(),
+            None,
+            None,
+            "manual",
+        );
+        db.hide_item(&item, 10).unwrap();
+        let manual_id = db
+            .save_manual_app(r"C:\Apps\a.exe", "App A", "app-a")
+            .unwrap();
+        db.record_launch("app-a", "a", 100).unwrap();
+        db.clear_history().unwrap();
+        assert!(db.query_pairs_for("a").is_empty());
+        assert_eq!(db.hidden_ids().unwrap(), HashSet::from(["app-a".to_string()]));
+        assert_eq!(db.list_manual_apps().unwrap()[0].id, manual_id);
+    }
+
+    #[test]
+    fn clear_query_pairs_keeps_other_preferences_and_queries() {
+        let mut db = temp_db();
+        db.record_launch("app-a", "code", 100).unwrap();
+        db.record_launch("app-a", "other", 200).unwrap();
+        db.record_launch("app-b", "code", 300).unwrap();
+        db.pin_item("app-a", 1).unwrap();
+        db.demote_item("app-a", 2).unwrap();
+        let item = crate::model::AppItem::scanned(
+            "app-a".into(),
+            "App A".into(),
+            r"C:\Apps\a.exe".into(),
+            None,
+            None,
+            "test",
+        );
+        db.hide_item(&item, 3).unwrap();
+        db.set_alias("a", Some("app-a"), "App A").unwrap();
+
+        assert_eq!(db.clear_query_pairs("code").unwrap(), 2);
+        assert!(db.query_pairs_for("code").is_empty());
+        assert!(db.query_pairs_for("other").contains_key("app-a"));
+        assert_eq!(
+            db.usage_snapshot(&["app-a".into()])["app-a"].launch_count,
+            2
+        );
+        assert_eq!(db.pinned_ids(), vec!["app-a"]);
+        assert!(db.is_demoted("app-a"));
+        assert_eq!(
+            db.hidden_ids().unwrap(),
+            HashSet::from(["app-a".to_string()])
+        );
+        assert_eq!(db.list_aliases().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn clear_query_pairs_empty_is_a_noop() {
+        let mut db = temp_db();
+        db.record_launch("app-a", "code", 100).unwrap();
+        assert_eq!(db.clear_query_pairs("").unwrap(), 0);
+        assert!(db.query_pairs_for("code").contains_key("app-a"));
+    }
+
+    #[test]
+    fn clear_query_pairs_normalizes_input_even_when_history_is_paused() {
+        let mut db = temp_db();
+        db.record_launch("app-a", "vs code", 100).unwrap();
+        db.save_setting("history_recording", "0").unwrap();
+        assert_eq!(db.clear_query_pairs("  VS   CODE  ").unwrap(), 1);
+        assert!(db.query_pairs_for("vs code").is_empty());
+        // Pausing recording does not disable an explicit cleanup operation.
+        db.record_launch("app-a", "vs code", 200).unwrap();
+        assert!(db.query_pairs_for("vs code").is_empty());
+    }
+
+    #[test]
     fn record_launch_skipped_when_paused() {
         let mut db = temp_db();
         db.save_setting("history_recording", "0").unwrap();
@@ -581,6 +779,39 @@ mod tests {
         assert_eq!(alias.target_id.as_deref(), Some("new-id"));
         let pairs = db.query_pair_snapshot("q", &["new-id".into()]);
         assert!(pairs.contains_key("new-id"));
+    }
+
+    #[test]
+    fn remap_item_id_moves_demote_and_hidden_atomically() {
+        let mut db = temp_db();
+        let item = crate::model::AppItem::scanned(
+            "old-id".into(),
+            "Old App".into(),
+            r"C:\Apps\old.exe".into(),
+            Some("--safe".into()),
+            None,
+            "test",
+        );
+        db.demote_item("old-id", 11).unwrap();
+        db.hide_item(&item, 12).unwrap();
+        let mut new_item = item.clone();
+        new_item.id = "new-id".into();
+        db.demote_item("new-id", 20).unwrap();
+        db.hide_item(&new_item, 21).unwrap();
+
+        assert!(db.remap_item_id("old-id", "new-id").unwrap());
+        assert!(db.is_demoted("new-id"));
+        assert!(!db.is_demoted("old-id"));
+        assert_eq!(
+            db.hidden_ids().unwrap(),
+            HashSet::from(["new-id".to_string()])
+        );
+        assert!(db
+            .list_hidden_items()
+            .unwrap()
+            .iter()
+            .all(|i| i.item_id == "new-id"));
+        assert_eq!(db.list_hidden_items().unwrap()[0].hidden_at, 21);
     }
 
     #[test]
@@ -679,6 +910,95 @@ mod tests {
         let db = HistoryDb::open(&path).unwrap();
         assert_eq!(db.user_version().unwrap(), SCHEMA_VERSION);
         assert!(db.is_demoted("legacy-demote"), "不得丢已有降权记录");
+    }
+
+    #[test]
+    fn v2_database_migrates_hidden_and_manual_tables_without_losing_preferences() {
+        let path = temp_history_path("v2-to-v3");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE usage_history (
+                    item_id TEXT PRIMARY KEY,
+                    launch_count INTEGER NOT NULL DEFAULT 0,
+                    last_used_at INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE query_history (
+                    query TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    count INTEGER NOT NULL DEFAULT 0,
+                    last_used_at INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (query, item_id)
+                );
+                CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE user_aliases (
+                    alias TEXT PRIMARY KEY,
+                    target_name TEXT NOT NULL,
+                    target_id TEXT
+                );
+                CREATE TABLE pinned (item_id TEXT PRIMARY KEY, pinned_at INTEGER NOT NULL);
+                CREATE TABLE demoted (item_id TEXT PRIMARY KEY, demoted_at INTEGER NOT NULL);
+                INSERT INTO settings VALUES ('theme_mode', 'light');
+                INSERT INTO demoted VALUES ('legacy', 42);
+                PRAGMA user_version = 2;
+                "#,
+            )
+            .unwrap();
+        }
+        let mut db = HistoryDb::open(&path).unwrap();
+        assert_eq!(db.user_version().unwrap(), 3);
+        assert_eq!(db.load_settings().theme_mode, "light");
+        assert!(db.is_demoted("legacy"));
+        let item = crate::model::AppItem::scanned(
+            "new-id".into(),
+            "Registered".into(),
+            r"C:\Apps\registered.exe".into(),
+            None,
+            None,
+            "manual",
+        );
+        db.hide_item(&item, 100).unwrap();
+        let manual_id = db
+            .save_manual_app(r"C:\Apps\registered.exe", "Registered", "new-id")
+            .unwrap();
+        drop(db);
+        let db = HistoryDb::open(&path).unwrap();
+        assert_eq!(db.list_hidden_items().unwrap().len(), 1);
+        assert_eq!(db.list_manual_apps().unwrap()[0].id, manual_id);
+    }
+
+    #[test]
+    fn remap_failure_rolls_back_all_preference_moves() {
+        let mut db = temp_db();
+        db.record_launch("old-id", "query", 10).unwrap();
+        db.demote_item("old-id", 11).unwrap();
+        let item = crate::model::AppItem::scanned(
+            "old-id".into(),
+            "Old App".into(),
+            r"C:\Apps\old.exe".into(),
+            None,
+            None,
+            "test",
+        );
+        db.hide_item(&item, 12).unwrap();
+        db.raw_conn_mut()
+            .execute_batch(
+                "CREATE TRIGGER fail_remap_demote
+                 BEFORE INSERT ON demoted
+                 BEGIN SELECT RAISE(ABORT, 'injected remap failure'); END;",
+            )
+            .unwrap();
+
+        assert!(db.remap_item_id("old-id", "new-id").is_err());
+        assert!(db.recent_ids(10).unwrap().contains(&"old-id".to_string()));
+        assert!(!db.recent_ids(10).unwrap().contains(&"new-id".to_string()));
+        assert!(db.is_demoted("old-id"));
+        assert!(!db.is_demoted("new-id"));
+        assert_eq!(
+            db.hidden_ids().unwrap(),
+            HashSet::from(["old-id".to_string()])
+        );
     }
 
     fn temp_history_path(tag: &str) -> std::path::PathBuf {

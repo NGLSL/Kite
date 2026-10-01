@@ -2,48 +2,363 @@
 
 use super::*;
 
+/// Build the single action list shared by mouse and Shift+F10.
+pub(super) fn menu_entries(state: &State, item: &AppItem) -> Vec<(String, MenuAction)> {
+    let target_is_fs = std::path::Path::new(&item.target).is_file()
+        || std::path::Path::new(&item.target).is_dir();
+    let mut entries = Vec::new();
+    if target_is_fs {
+        entries.push(("打开所在文件夹".to_string(), MenuAction::OpenFolder));
+        entries.push(("复制路径".to_string(), MenuAction::CopyPath));
+    }
+    entries.push(("复制名称".to_string(), MenuAction::CopyName));
+    if can_personalize_entry(item) {
+        let pinned = state.pinned.contains(&item.id);
+        entries.push((
+            if pinned { "取消固定" } else { "固定" }.to_string(),
+            MenuAction::TogglePin,
+        ));
+        let demoted = state
+            .history
+            .as_ref()
+            .map(|db| db.is_demoted(&item.id))
+            .unwrap_or(false);
+        entries.push((
+            if demoted { "恢复优先级" } else { "降低此结果优先级" }.to_string(),
+            if demoted { MenuAction::Undemote } else { MenuAction::Demote },
+        ));
+    }
+    if is_app_entry(item) {
+        entries.push(("设置 Alias".to_string(), MenuAction::SetAlias));
+        entries.push(("隐藏此入口".to_string(), MenuAction::HideEntry));
+    }
+    // Once the panel is open, use the query captured with its target.  The
+    // input may change while a mouse or keyboard action is pending, but the
+    // panel must continue to describe the action that will be executed.
+    let panel_query = if state.menu.is_some() {
+        state.menu_query.trim()
+    } else {
+        state.query.trim()
+    };
+    if !panel_query.is_empty() && !state.files_mode && state.provider_mode.is_none() {
+        entries.push((
+            format!("忘记「{panel_query}」的学习记录"),
+            MenuAction::ForgetQuery,
+        ));
+    }
+    if item.source == "direct-path" && is_registerable_path(&item.target) {
+        entries.push(("添加到 Kite".to_string(), MenuAction::AddToKite));
+    }
+    entries
+}
+
+pub(super) fn is_app_entry(item: &AppItem) -> bool {
+    !item.id.starts_with("kite:")
+        && crate::model::is_hideable_application_source(&item.source)
+}
+
+/// Pin/Demote keep the original panel permissions. Alias/Hide use the
+/// narrower application-source check above, while file, web and plugin
+/// results may still carry their existing preference actions.
+fn can_personalize_entry(item: &AppItem) -> bool {
+    item.source != "everything-status" && item.source != "direct-path"
+}
+
+fn resolve_from_index(state: &State, captured: &AppItem) -> Option<AppItem> {
+    let index = state
+        .index
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    index
+        .apps
+        .iter()
+        .chain(index.system_entries.iter())
+        .find(|candidate| candidate.id == captured.id)
+        .cloned()
+        .filter(|current| same_launch_identity(current, captured))
+}
+
+fn needs_index_resolution(item: &AppItem, action: MenuAction) -> bool {
+    if matches!(action, MenuAction::SetAlias | MenuAction::HideEntry) {
+        return true;
+    }
+    matches!(action, MenuAction::TogglePin | MenuAction::Demote | MenuAction::Undemote)
+        && !item.id.starts_with("kite:")
+        && (is_app_entry(item)
+            || matches!(
+                item.source.as_str(),
+                "builtin" | "builtin-system" | "win-settings"
+            ))
+}
+
+pub(super) fn is_registerable_path(target: &str) -> bool {
+    let path = std::path::Path::new(target);
+    path.is_file()
+        && matches!(
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.to_ascii_lowercase())
+                .as_deref(),
+            Some("exe" | "lnk")
+        )
+}
+
+pub(super) fn close_menu(state: &mut State) {
+    state.menu = None;
+    state.menu_selected = 0;
+    state.menu_query.clear();
+    state.action_alias_item = None;
+    state.action_alias_input.clear();
+    state.action_alias_conflict = None;
+}
+
+pub(super) fn cancel_action_alias(state: &mut State) -> Task<Message> {
+    state.action_alias_item = None;
+    state.action_alias_input.clear();
+    state.action_alias_conflict = None;
+    iced::widget::operation::focus(search_view::input_id())
+}
+
+pub(super) fn menu_height(state: &State, item: &AppItem) -> f32 {
+    if state.action_alias_item.is_some() {
+        if state.action_alias_conflict.is_some() {
+            220.0
+        } else {
+            145.0
+        }
+    } else {
+        8.0 + menu_entries(state, item).len() as f32 * 33.0
+    }
+}
+
+/// Keep an already-open panel inside the window after its content expands.
+/// Alias conflict details add a second block below the input, so the anchor
+/// captured for the compact menu may need to move upward before rendering.
+pub(super) fn clamp_menu_height(state: &mut State, height: f32) {
+    if let Some((_, _, y)) = state.menu.as_mut() {
+        *y = (*y).min(WINDOW_H - height).max(8.0);
+    }
+}
+
+pub(super) fn open_context_menu(state: &mut State, index: usize) -> Task<Message> {
+    if state.menu.is_some() {
+        close_menu(state);
+        return Task::none();
+    }
+    let Some(item) = super::interaction::capture_menu_item(&state.results, index) else {
+        return Task::none();
+    };
+    state.menu_query = state.query.clone();
+    let panel_height = menu_height(state, &item);
+    let c = state.cursor.get();
+    let x = c.x.min(WINDOW_W - 240.0).max(8.0);
+    let y = c.y.min(WINDOW_H - panel_height).max(8.0);
+    state.menu = Some((item, x, y));
+    state.menu_selected = 0;
+    Task::none()
+}
+
+fn same_launch_identity(left: &AppItem, right: &AppItem) -> bool {
+    crate::app::scanner::util::launch_identity(&left.target, left.args.as_deref())
+        == crate::app::scanner::util::launch_identity(&right.target, right.args.as_deref())
+}
+
+pub(super) fn resolve_current_item(state: &State, captured: &AppItem) -> Option<AppItem> {
+    resolve_from_index(state, captured)
+}
+
 /// 上下文菜单动作。
 pub(super) fn menu_action(state: &mut State, item: AppItem, action: MenuAction) -> Task<Message> {
-    state.menu = None;
+    // Keep the Query captured at panel-open time before close_menu clears it.
+    // Query-level forgetting must never follow text the user typed afterwards.
+    let captured_query = state.menu_query.clone();
+    let item = if needs_index_resolution(&item, action) {
+        let Some(current) = resolve_current_item(state, &item) else {
+            close_menu(state);
+            return flash(state, "目标已不在当前索引，未执行操作");
+        };
+        current
+    } else {
+        item
+    };
+    if !matches!(action, MenuAction::SetAlias) {
+        close_menu(state);
+    }
     match action {
         MenuAction::OpenFolder => {
             let r = app::actions::open_containing_folder(&item.target);
             state.qlog(|| format!("ctx open_folder err={r:?}"));
+            if let Err(error) = r {
+                return flash(state, &format!("打开所在文件夹失败：{error}"));
+            }
         }
         MenuAction::CopyPath => return iced::clipboard::write(item.target),
         MenuAction::CopyName => return iced::clipboard::write(item.display_name),
         MenuAction::TogglePin => {
-            if let Some(db) = &mut state.history {
-                let r = if state.pinned.contains(&item.id) {
-                    db.unpin_item(&item.id)
-                } else {
-                    db.pin_item(&item.id, storage::now_ts())
-                };
-                state.qlog(|| format!("ctx pin toggle ok={}", r.is_ok()));
+            let Some(db) = &mut state.history else {
+                return flash(state, "历史库不可用，无法修改固定状态");
+            };
+            let r = if state.pinned.contains(&item.id) {
+                db.unpin_item(&item.id)
+            } else {
+                db.pin_item(&item.id, storage::now_ts())
+            };
+            state.qlog(|| format!("ctx pin toggle ok={}", r.is_ok()));
+            if let Err(error) = r {
+                return flash(state, &format!("保存固定状态失败：{error}"));
             }
             state.invalidate_prefs_cache();
             state.refresh_results();
         }
         MenuAction::Demote | MenuAction::Undemote => {
-            if let Some(db) = &mut state.history {
-                let r = if matches!(action, MenuAction::Demote) {
-                    db.demote_item(&item.id, storage::now_ts())
-                } else {
-                    db.undemote_item(&item.id)
-                };
-                state.qlog(|| {
-                    format!(
-                        "ctx demote action={action:?} ok={} id={}",
-                        r.is_ok(),
-                        item.id
-                    )
-                });
+            let Some(db) = &mut state.history else {
+                return flash(state, "历史库不可用，无法修改优先级");
+            };
+            let r = if matches!(action, MenuAction::Demote) {
+                db.demote_item(&item.id, storage::now_ts())
+            } else {
+                db.undemote_item(&item.id)
+            };
+            state.qlog(|| {
+                format!(
+                    "ctx demote action={action:?} ok={} id={}",
+                    r.is_ok(),
+                    item.id
+                )
+            });
+            if let Err(error) = r {
+                return flash(state, &format!("保存优先级失败：{error}"));
             }
             state.invalidate_prefs_cache();
             state.refresh_results();
         }
+        MenuAction::SetAlias => {
+            if !is_app_entry(&item) {
+                return flash(state, "当前结果不支持 Alias");
+            }
+            state.action_alias_item = Some(item);
+            state.action_alias_input = state.menu_query.trim().to_string();
+            state.action_alias_conflict = None;
+            state.menu_selected = 0;
+            clamp_menu_height(state, 145.0);
+            return iced::widget::operation::focus(search_view::action_alias_input_id());
+        }
+        MenuAction::HideEntry => {
+            if !is_app_entry(&item) {
+                return flash(state, "当前结果不支持隐藏");
+            }
+            let Some(db) = state.history.as_mut() else {
+                return flash(state, "历史库不可用，无法隐藏入口");
+            };
+            match db.hide_item(&item, storage::now_ts()) {
+                Ok(()) => {
+                    load_hidden(state);
+                    let hidden_ids = state.hidden_ids.clone();
+                    state.results.retain(|result| {
+                        !hidden_ids.contains(&result.item.id)
+                            || !crate::model::is_hideable_application_source(
+                                &result.item.source,
+                            )
+                    });
+                    if state.results.is_empty() {
+                        state.selected = 0;
+                    } else {
+                        state.selected = state.selected.min(state.results.len() - 1);
+                    }
+                    state.invalidate_prefs_cache();
+                    state.refresh_results();
+                    return flash(state, "已隐藏此入口");
+                }
+                Err(error) => return flash(state, &format!("隐藏失败：{error}")),
+            }
+        }
+        MenuAction::ForgetQuery => {
+            let query_norm = search::normalize_for_index(captured_query.trim());
+            if query_norm.is_empty() {
+                return flash(state, "空查询没有可清除的学习记录");
+            }
+            let Some(db) = state.history.as_mut() else {
+                return flash(state, "历史库不可用，无法清除查询学习");
+            };
+            match db.clear_query_pairs(&query_norm) {
+                Ok(0) => return flash(state, "该查询没有可清除的学习记录"),
+                Ok(n) => {
+                    state.invalidate_prefs_cache();
+                    state.refresh_results();
+                    return flash(state, &format!("已清除该查询的 {n} 条学习记录"));
+                }
+                Err(error) => return flash(state, &format!("清除查询学习失败：{error}")),
+            }
+        }
+        MenuAction::AddToKite => {
+            if !is_registerable_path(&item.target) {
+                return flash(state, "该路径不是可登记的 exe 或 lnk");
+            }
+            let path = item.target.clone();
+            let name = std::path::Path::new(&path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(&item.display_name)
+                .to_string();
+            let task = open_settings(state);
+            state.settings_section = Section::Index;
+            state.manual_path_input = path;
+            state.manual_name_input = name;
+            return task;
+        }
     }
     Task::none()
+}
+
+pub(super) fn load_hidden(state: &mut State) {
+    let Some(db) = &state.history else {
+        state.hidden_items.clear();
+        state.hidden_ids.clear();
+        return;
+    };
+    match db.list_hidden_items() {
+        Ok(items) => {
+            state.hidden_ids = items.iter().map(|item| item.item_id.clone()).collect();
+            state.hidden_items = items;
+        }
+        Err(error) => state.qlog(|| format!("load hidden entries failed: {error}")),
+    }
+}
+
+pub(super) fn load_manual_apps(state: &mut State) {
+    let Some(db) = &state.history else {
+        state.manual_apps.clear();
+        state.manual_status.clear();
+        return;
+    };
+    match db.list_manual_apps() {
+        Ok(items) => {
+            state.manual_name_edits = items
+                .iter()
+                .map(|item| (item.id, item.display_name.clone()))
+                .collect();
+            state.manual_status = items
+                .iter()
+                .map(|item| {
+                    let status = crate::app::manual::validate_entry(&item.path, &item.display_name)
+                        .map(|_| "可用".to_string())
+                        .unwrap_or_else(|error| format!("暂不可用：{error}"));
+                    (item.id, status)
+                })
+                .collect();
+            state.manual_apps = items;
+        }
+        Err(error) => state.qlog(|| format!("load manual apps failed: {error}")),
+    }
+}
+
+pub(super) fn sync_manual_apps_to_scan_options(state: &mut State) {
+    let mut options = state
+        .scan_options
+        .write()
+        .unwrap_or_else(|error| error.into_inner());
+    options.manual_apps = state.manual_apps.clone();
 }
 
 /// 键盘：输入模式下 ↑↓ 进入结果导航，结果导航模式下 ↑↓←→ 选择，
@@ -70,6 +385,70 @@ pub(super) fn on_key(
         return Task::none();
     }
 
+    if state.menu.is_some() {
+        match key {
+            Key::Named(Named::Escape) if !state.ime_composing => {
+                if state.action_alias_item.is_some() {
+                    return cancel_action_alias(state);
+                } else {
+                    close_menu(state);
+                    return focus(search_view::input_id());
+                }
+            }
+            Key::Named(Named::ArrowUp) => {
+                let count = state
+                    .menu
+                    .as_ref()
+                    .map(|(item, _, _)| menu_entries(state, item).len())
+                    .unwrap_or(0);
+                if count > 0 {
+                    state.menu_selected = if state.menu_selected == 0 {
+                        count - 1
+                    } else {
+                        state.menu_selected - 1
+                    };
+                }
+                return Task::none();
+            }
+            Key::Named(Named::ArrowDown) => {
+                let count = state
+                    .menu
+                    .as_ref()
+                    .map(|(item, _, _)| menu_entries(state, item).len())
+                    .unwrap_or(0);
+                if count > 0 {
+                    state.menu_selected = (state.menu_selected + 1) % count;
+                }
+                return Task::none();
+            }
+            Key::Named(Named::Enter) if !state.ime_composing => {
+                if state.action_alias_item.is_some() {
+                    return super::update_search::handle(state, Message::ActionAliasSave);
+                }
+                let selected = state.menu_selected;
+                let chosen = state.menu.as_ref().and_then(|(item, _, _)| {
+                    menu_entries(state, item).get(selected).map(|(_, action)| *action)
+                });
+                if let (Some((item, _, _)), Some(action)) = (state.menu.clone(), chosen) {
+                    return menu_action(state, item, action);
+                }
+                return Task::none();
+            }
+            _ => return Task::none(),
+        }
+    }
+
+    if matches!(key, Key::Named(Named::F10))
+        && mods.shift()
+        && !mods.control()
+        && !mods.alt()
+        && !state.settings_open
+        && state.provider_mode.is_none()
+        && !state.ime_composing
+    {
+        return open_context_menu(state, state.selected);
+    }
+
     // Alt+1..9：兼容 modifiers.alt() / 本地 alt_down / 逻辑字符 / 物理 Digit|Numpad
     let alt_idx = alt_digit_index(&key, physical, mods, state.alt_down);
     if let Some(i) = alt_idx {
@@ -84,9 +463,10 @@ pub(super) fn on_key(
     match key {
         Key::Named(Named::Escape) if !state.ime_composing => {
             // 前端行为：菜单开着时 Esc 只关菜单；设置页开着时 Esc 回搜索
-            if state.menu.take().is_some() {
+            if state.menu.is_some() {
+                close_menu(state);
                 state.qlog(|| "ctx menu closed (esc)".to_owned());
-                return Task::none();
+                return focus(search_view::input_id());
             }
             // JSON 工具窗：Esc 关闭工具窗，主窗不动。
             if state.any_tool_open() {
@@ -432,7 +812,7 @@ pub(super) fn launch_selected(state: &mut State) -> Task<Message> {
         state.qlog(|| "enter with empty results; ignored".to_owned());
         return Task::none();
     };
-    state.menu = None;
+    close_menu(state);
     exec_result_action(state, result.action.clone())
 }
 
@@ -956,7 +1336,7 @@ pub(super) fn hide(state: &mut State) {
     state.alt_down = false;
     state.query_at_alt = None;
     state.alt_digit_consumed = false;
-    state.menu = None;
+    close_menu(state);
     state.query.clear();
     state.request_direct_path();
     state.invalidate_file_search();
@@ -1028,7 +1408,7 @@ pub(super) fn open_settings(state: &mut State) -> Task<Message> {
     // 设置在主窗口打开；JSON 工具窗独立，不在此关闭。
     state.hidden = false;
     state.settings_section = Section::General;
-    state.menu = None;
+    close_menu(state);
     if let Some(db) = &state.history {
         let s = db.load_settings();
         state.hide_on_blur = s.hide_on_blur;
@@ -1060,6 +1440,9 @@ pub(super) fn open_settings(state: &mut State) -> Task<Message> {
             .collect();
     }
     load_aliases(state);
+    load_hidden(state);
+    load_manual_apps(state);
+    sync_manual_apps_to_scan_options(state);
     state.qlog(|| "settings open".to_owned());
     let Some(id) = state.window_id else {
         return Task::none();
@@ -1085,6 +1468,8 @@ pub(super) fn close_settings(state: &mut State) -> Task<Message> {
     state.settings_open = false;
     state.flash = None;
     state.plugin_docs_open = None;
+    super::interaction::apply_pending_full(state);
+    state.refresh_results();
     // 工具面板是独立形态，不随设置关闭而打开。
     state.qlog(|| "settings close".to_owned());
     let Some(id) = state.window_id else {
@@ -1171,4 +1556,235 @@ pub(super) fn hotkey_record_key(state: &mut State, key: Key, mods: Modifiers) ->
     };
     super::update_settings::end_hotkey_record(state);
     Task::done(Message::ApplyHotkey(spec))
+}
+
+#[cfg(test)]
+mod result_panel_tests {
+    use super::*;
+    use crate::ui::test_support::{settings_result, test_state};
+    use crate::{model::SearchResult, storage::HistoryDb};
+    use iced::keyboard::key::Code;
+
+    fn temp_db(tag: &str) -> HistoryDb {
+        let path = std::env::temp_dir().join(format!(
+            "kite-ui-{tag}-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        HistoryDb::open(&path).expect("test history db")
+    }
+
+    fn app(id: &str) -> AppItem {
+        let mut item = AppItem::scanned(
+            id.into(),
+            format!("App {id}"),
+            format!(r"C:\Apps\{id}.exe"),
+            None,
+            None,
+            "manual",
+        );
+        item.attach_search_fields();
+        item
+    }
+
+    #[test]
+    fn shift_f10_opens_shared_panel_and_captures_query() {
+        let mut state = test_state("Visual");
+        state.hidden = false;
+        let _ = on_key(
+            &mut state,
+            Key::Named(Named::F10),
+            Physical::Code(Code::F10),
+            Modifiers::SHIFT,
+        );
+        let (item, _, _) = state.menu.clone().expect("Shift+F10 opens panel");
+        assert_eq!(item.id, "kite:settings");
+        assert_eq!(state.menu_query, "Visual");
+        assert_eq!(state.menu_selected, 0);
+    }
+
+    #[test]
+    fn panel_keeps_captured_target_when_results_reorder() {
+        let mut state = test_state("k");
+        state.hidden = false;
+        let mut second = state.results[0].clone();
+        second.item.id = "kite:other".into();
+        state.results.push(second);
+        let _ = open_context_menu(&mut state, 0);
+        let captured = state.menu.as_ref().map(|(item, _, _)| item.id.clone());
+        state.results.reverse();
+        assert_eq!(captured.as_deref(), Some("kite:settings"));
+        assert_eq!(
+            state.menu.as_ref().map(|(item, _, _)| item.id.as_str()),
+            Some("kite:settings")
+        );
+    }
+
+    #[test]
+    fn ime_composition_blocks_panel_enter() {
+        let mut state = test_state("k");
+        state.hidden = false;
+        let _ = open_context_menu(&mut state, 0);
+        state.ime_composing = true;
+        let _ = on_key(
+            &mut state,
+            Key::Named(Named::Enter),
+            Physical::Code(Code::Enter),
+            Modifiers::empty(),
+        );
+        assert!(state.menu.is_some(), "IME Enter must not execute or close panel");
+    }
+
+    #[test]
+    fn alt_text_fallback_cannot_launch_while_panel_is_open() {
+        let mut state = test_state("k");
+        state.hidden = false;
+        let _ = open_context_menu(&mut state, 0);
+        state.alt_down = true;
+        state.query_at_alt = Some("k".into());
+        let _ = super::super::update_search::handle(
+            &mut state,
+            Message::QueryChanged("k1".into()),
+        );
+        assert!(state.menu.is_some(), "Alt text fallback must not close the panel");
+        assert!(!state.settings_open, "Alt text fallback must not launch the target");
+    }
+
+    #[test]
+    fn alias_action_reports_conflict_before_replacing_existing_mapping() {
+        let mut state = test_state("vs");
+        state.hidden = false;
+        state.history = Some(temp_db("alias"));
+        let item = app("new");
+        let other = app("old");
+        state.index.lock().unwrap().apps = vec![item.clone(), other.clone()];
+        state.results = vec![SearchResult::scored(item.clone(), 1000, "exact")];
+        state
+            .history
+            .as_mut()
+            .unwrap()
+            .set_alias("vs", Some(&other.id), &other.display_name)
+            .unwrap();
+        load_aliases(&mut state);
+        let _ = open_context_menu(&mut state, 0);
+        let _ = menu_action(&mut state, item, MenuAction::SetAlias);
+        state.action_alias_input = "vs".into();
+        let _ = super::super::update_search::handle(&mut state, Message::ActionAliasSave);
+        assert!(state.action_alias_conflict.is_some());
+        assert_eq!(
+            state.history.as_ref().unwrap().alias_matches("vs")[0]
+                .target_id
+                .as_deref(),
+            Some("old")
+        );
+    }
+
+    #[test]
+    fn changing_alias_text_invalidates_old_conflict_confirmation() {
+        let mut state = test_state("vs");
+        state.hidden = false;
+        state.history = Some(temp_db("alias-edit"));
+        let item = app("new-edit");
+        let other = app("old-edit");
+        state.index.lock().unwrap().apps = vec![item.clone(), other.clone()];
+        state.results = vec![SearchResult::scored(item.clone(), 1000, "exact")];
+        state
+            .history
+            .as_mut()
+            .unwrap()
+            .set_alias("vs", Some(&other.id), &other.display_name)
+            .unwrap();
+        load_aliases(&mut state);
+        let _ = open_context_menu(&mut state, 0);
+        let _ = menu_action(&mut state, item, MenuAction::SetAlias);
+        let _ = super::super::update_search::handle(&mut state, Message::ActionAliasSave);
+        assert!(state.action_alias_conflict.is_some());
+        let _ = super::super::update_search::handle(
+            &mut state,
+            Message::ActionAliasInputChanged("another".into()),
+        );
+        let _ = super::super::update_search::handle(&mut state, Message::ActionAliasReplace);
+        assert!(state.action_alias_conflict.is_none());
+        assert_eq!(
+            state.history.as_ref().unwrap().alias_matches("vs")[0]
+                .target_id
+                .as_deref(),
+            Some(other.id.as_str())
+        );
+    }
+
+    #[test]
+    fn baseline_pin_actions_remain_for_plugin_and_system_entries() {
+        let mut state = test_state("");
+        state.hidden = false;
+        state.history = Some(temp_db("baseline-actions"));
+        let mut plugin = app("plugin-entry");
+        plugin.source = "plugin".into();
+        let mut builtin = app("builtin-entry");
+        builtin.source = "builtin".into();
+        state.index.lock().unwrap().system_entries = vec![builtin.clone()];
+
+        let plugin_entries = menu_entries(&state, &plugin);
+        assert!(plugin_entries
+            .iter()
+            .any(|(_, action)| *action == MenuAction::TogglePin));
+        assert!(!plugin_entries
+            .iter()
+            .any(|(_, action)| *action == MenuAction::SetAlias));
+        let builtin_entries = menu_entries(&state, &builtin);
+        assert!(builtin_entries
+            .iter()
+            .any(|(_, action)| *action == MenuAction::TogglePin));
+        let _ = menu_action(&mut state, builtin, MenuAction::TogglePin);
+        assert!(state
+            .history
+            .as_ref()
+            .unwrap()
+            .pinned_ids()
+            .contains(&"builtin-entry".to_string()));
+
+        // Kite's own settings/tools are synthesized command results rather
+        // than members of either scanned index. Their trusted IDs must still
+        // retain the baseline pin action without a stale-index lookup.
+        let settings = settings_result().item;
+        assert!(menu_entries(&state, &settings)
+            .iter()
+            .any(|(_, action)| *action == MenuAction::TogglePin));
+        let _ = menu_action(&mut state, settings, MenuAction::TogglePin);
+        assert!(state
+            .history
+            .as_ref()
+            .unwrap()
+            .pinned_ids()
+            .contains(&"kite:settings".to_string()));
+    }
+
+    #[test]
+    fn forget_query_uses_panel_snapshot_and_preserves_other_query() {
+        let mut state = test_state(" VS ");
+        state.hidden = false;
+        state.history = Some(temp_db("forget"));
+        state
+            .history
+            .as_mut()
+            .unwrap()
+            .record_launch("app", "vs", 1)
+            .unwrap();
+        state
+            .history
+            .as_mut()
+            .unwrap()
+            .record_launch("app", "code", 2)
+            .unwrap();
+        let item = app("app");
+        state.results = vec![SearchResult::scored(item.clone(), 1000, "exact")];
+        let _ = open_context_menu(&mut state, 0);
+        state.query = "later".into();
+        let _ = menu_action(&mut state, item, MenuAction::ForgetQuery);
+        assert!(state.history.as_ref().unwrap().query_pairs_for("vs").is_empty());
+        assert!(!state.history.as_ref().unwrap().query_pairs_for("code").is_empty());
+    }
 }

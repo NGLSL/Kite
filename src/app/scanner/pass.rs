@@ -98,6 +98,9 @@ impl ScanPass {
 pub struct ScanOptions {
     pub extra_scoop_shim_dirs: Vec<PathBuf>,
     pub portable_dirs: Vec<PathBuf>,
+    /// User-registered entries are revalidated on every pass so a changed
+    /// shortcut receives its current launch identity.
+    pub manual_apps: Vec<crate::storage::ManualApp>,
     /// 设置/托盘「重新扫描」：强制重枚举 UWP，忽略结果缓存 TTL。
     pub force_uwp_refresh: bool,
 }

@@ -22,9 +22,14 @@ pub(super) use text::truncate_display_label;
 pub const ROW_STEP: f32 = 64.0;
 pub const SCROLL_ID: &str = "poc-results";
 const INPUT_ID: &str = "poc-input";
+const ACTION_ALIAS_INPUT_ID: &str = "poc-action-alias-input";
 
 pub fn input_id() -> WidgetId {
     WidgetId::new(INPUT_ID)
+}
+
+pub(super) fn action_alias_input_id() -> WidgetId {
+    WidgetId::new(ACTION_ALIAS_INPUT_ID)
 }
 
 pub fn scroll_id() -> WidgetId {
@@ -64,12 +69,14 @@ pub fn view(state: &State) -> Element<'_, Message> {
     };
     let content: Element<'_, Message> = stack![root, overlay].into();
 
-    // 快捷提示 Toast（复制成功、状态通知等）
-    if let Some(msg) = &state.flash {
-        stack![content, overlays::toast(msg, tokens)].into()
-    } else {
-        content
-    }
+    // Keep the toast layer in the tree even when it is empty. Toggling an
+    // outer Stack would reparent the search input and discard its native
+    // TextInput focus when FlashClear arrives.
+    let toast: Element<'_, Message> = match &state.flash {
+        Some(msg) => overlays::toast(msg, tokens),
+        None => Space::new().width(Length::Fill).height(Length::Fill).into(),
+    };
+    stack![content, toast].into()
 }
 
 fn divider(tokens: ThemeTokens) -> Element<'static, Message> {

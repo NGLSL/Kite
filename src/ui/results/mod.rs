@@ -90,6 +90,7 @@ impl State {
                 usage: db.usage_all(),
                 pinned: db.pinned_ids().into_iter().collect(),
                 demoted: db.demoted_ids().into_iter().collect(),
+                hidden: db.hidden_ids().unwrap_or_default(),
             });
         }
         let cached = self.prefs_cache.clone().unwrap_or_default();
@@ -98,6 +99,7 @@ impl State {
             pairs: db.query_pairs_for(q_norm),
             pinned: cached.pinned,
             demoted: cached.demoted,
+            hidden: cached.hidden,
             now: storage::now_ts(),
             query_norm: q_norm.to_string(),
         })
@@ -419,12 +421,17 @@ impl State {
 
         self.app_search_worker.cancel_current();
 
+        // Fetch enough history rows for hidden entries to be discarded before
+        // the recent section's 16-item cap; filtering after the DB limit
+        // would let hidden identities consume the visible quota.
+        let hidden_ids = self.hidden_ids.clone();
+        let recent_limit = search::MAX_RESULTS.saturating_add(hidden_ids.len());
         let (recent_ids, pinned_ids) = self
             .history
             .as_ref()
             .map(|h| {
                 (
-                    h.recent_ids(search::MAX_RESULTS).unwrap_or_default(),
+                    h.recent_ids(recent_limit).unwrap_or_default(),
                     // 保持存储层顺序（pinned_at DESC），固定项截断才确定
                     h.pinned_ids(),
                 )
@@ -433,7 +440,15 @@ impl State {
 
         let index_apps = {
             let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
-            index.apps.clone()
+            index
+                .apps
+                .iter()
+                .filter(|app| {
+                    !hidden_ids.contains(&app.id)
+                        || !crate::model::is_hideable_application_source(&app.source)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
         };
 
         let lists = build_empty_query_lists(&recent_ids, &pinned_ids, &index_apps);

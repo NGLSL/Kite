@@ -1,6 +1,9 @@
 //! 窗口生命周期、热键、托盘、索引就绪与更新检查。
 
-use super::actions::{flash, hide, hide_task, on_key, open_settings, settings_window_task, show_launcher};
+use super::actions::{
+    flash, hide, hide_task, load_manual_apps, on_key, open_settings, settings_window_task,
+    show_launcher,
+};
 use super::interaction::apply_pending_full;
 use super::{plog, send_event, system, Message, State};
 use crate::app;
@@ -110,6 +113,9 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::FullIndexReady(n) => {
             plog(&format!("full index ready n={n}"));
             state.index_ready = true;
+            if state.settings_open {
+                load_manual_apps(state);
+            }
             // 活跃输入要立即看到新入口；结果导航中保留当前列表，等下一次查询或隐藏时采用。
             let active_query = !state.query.trim().is_empty()
                 && state.navigation_mode == super::NavigationMode::Input;
@@ -125,6 +131,9 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::BootstrapReady(n) => {
             plog(&format!("bootstrap index ready n={n}"));
             state.index_ready = true;
+            if state.settings_open {
+                load_manual_apps(state);
+            }
             state.index_generation = state.index_generation.wrapping_add(1);
             state.base_hit_cache.clear();
             state.invalidate_prefs_cache();

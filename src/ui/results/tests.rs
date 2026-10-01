@@ -11,6 +11,18 @@ use crate::system::everything::{self, Availability};
 use crate::ui::actions::menu_action;
 use crate::ui::MenuAction;
 
+fn test_history(tag: &str) -> crate::storage::HistoryDb {
+    let path = std::env::temp_dir().join(format!(
+        "kite-results-{tag}-{}-{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    crate::storage::HistoryDb::open(&path).unwrap()
+}
+
 fn grok_full_index() -> crate::model::AppIndex {
     use crate::model::{AppIndex, AppItem};
 
@@ -202,14 +214,63 @@ fn hiding_window_cancels_in_flight_app_search() {
 #[test]
 fn pin_toggle_on_non_empty_query_routes_through_worker() {
     let mut state = test_state("k");
+    state.history = Some(test_history("pin"));
     let item = state.results[0].item.clone();
+    let item_id = item.id.clone();
     let before = state.app_search_worker.latest_seq();
 
     let _ = menu_action(&mut state, item, MenuAction::TogglePin);
 
+    assert!(state.history.as_ref().unwrap().pinned_ids().contains(&item_id));
     assert!(
         state.app_search_worker.latest_seq() > before,
         "Pin 与 Demote 必须共用同一条刷新路径（worker）"
+    );
+}
+
+#[test]
+fn manual_removal_adopts_completed_index_while_settings_and_empty_query_are_open() {
+    use crate::ui::backend::{queue_pending_full_for_test, PENDING_FULL_TEST_LOCK};
+    use crate::ui::interaction::update;
+    use crate::ui::Message;
+
+    let _guard = PENDING_FULL_TEST_LOCK.lock().unwrap();
+    let mut state = test_state("");
+    state.hidden = false;
+    state.settings_open = true;
+    state.history = Some(test_history("manual-remove"));
+    let mut item = grok_full_index().apps.remove(0);
+    item.source = "manual".into();
+    let record_id = state
+        .history
+        .as_mut()
+        .unwrap()
+        .save_manual_app(&item.target, &item.display_name, &item.id)
+        .unwrap();
+    crate::ui::actions::load_manual_apps(&mut state);
+    state.index.lock().unwrap().apps = vec![item.clone()];
+    state.refresh_results();
+    assert!(state.results.iter().any(|result| result.item.id == item.id));
+
+    let _ = update(&mut state, Message::ManualRemove(record_id));
+    let mut completed = crate::model::AppIndex::empty();
+    completed.rebuild_retrieval();
+    queue_pending_full_for_test(completed);
+    let _ = update(&mut state, Message::FullIndexReady(0));
+    let _ = update(&mut state, Message::CloseSettings);
+
+    assert!(!state.settings_open);
+    assert!(state
+        .history
+        .as_ref()
+        .unwrap()
+        .list_manual_apps()
+        .unwrap()
+        .is_empty());
+    assert!(state.index.lock().unwrap().apps.is_empty());
+    assert!(
+        state.results.iter().all(|result| result.item.id != item.id),
+        "移除完成后回空查询首页必须采用新快照，不能继续提供旧启动结果"
     );
 }
 
@@ -548,6 +609,34 @@ fn empty_query_pinned_follow_storage_order_and_cap() {
         lists.pinned.iter().all(|h| h.item.id != "p8" && h.item.id != "p9"),
         "超出上限的固定项不得因哈希序挤入选中集合"
     );
+}
+
+#[test]
+fn empty_query_filters_hidden_before_filling_recent_slots() {
+    use crate::model::AppItem;
+
+    let mut state = test_state("");
+    let apps: Vec<_> = (0..17)
+        .map(|i| {
+            let mut item = AppItem::scanned(
+                format!("app-{i}"),
+                format!("App {i}"),
+                format!(r"C:\Apps\app-{i}.exe"),
+                None,
+                None,
+                "start-menu",
+            );
+            item.attach_search_fields();
+            item
+        })
+        .collect();
+    state.hidden_ids.insert("app-0".into());
+    state.index.lock().unwrap().apps = apps;
+    state.refresh_results();
+
+    assert_eq!(state.results.len(), 16);
+    assert!(state.results.iter().all(|result| result.item.id != "app-0"));
+    assert_eq!(state.results[0].item.id, "app-1");
 }
 
 #[test]

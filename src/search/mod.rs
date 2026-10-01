@@ -20,7 +20,10 @@ pub mod service;
 mod tests;
 pub mod url;
 
-pub use lists::{name_candidates, order_by_recent, rerank};
+pub use lists::{
+    name_candidates, name_candidates_with_hidden, order_by_recent, order_by_recent_with_hidden,
+    rerank,
+};
 pub use matcher::UserTarget;
 pub use retrieval::RetrievalIndex;
 

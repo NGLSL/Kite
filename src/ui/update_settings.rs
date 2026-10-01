@@ -1,6 +1,9 @@
 //! 设置页消息：开关、搜索引擎、别名、便携目录、热键录制入口。
 
-use super::actions::{close_settings, flash, load_aliases, open_settings, refresh_after_alias_change};
+use super::actions::{
+    close_settings, flash, load_aliases, load_hidden, load_manual_apps, open_settings,
+    refresh_after_alias_change, sync_manual_apps_to_scan_options,
+};
 use super::interaction::{persist_portable_dirs, request_rescan};
 use super::{search, system, Message, Section, State};
 use crate::storage::settings::UserAlias;
@@ -116,7 +119,9 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::ClearHistory => {
             if let Some(db) = &mut state.history {
-                let _ = db.clear_history();
+                if let Err(error) = db.clear_history() {
+                    return flash(state, &format!("清空使用历史失败：{error}"));
+                }
             }
             state.invalidate_prefs_cache();
             state.refresh_results();
@@ -156,7 +161,7 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 Vec::new()
             } else {
                 let index = state.index.lock().unwrap_or_else(|e| e.into_inner());
-                search::name_candidates(&index.apps, &s, 5)
+                search::name_candidates_with_hidden(&index.apps, &s, &state.hidden_ids, 5)
             };
             Task::none()
         }
@@ -176,8 +181,11 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
             let Some(pick) = state.alias_pick.clone() else {
                 return flash(state, "请先从候选中选择目标");
             };
-            if let Some(db) = &mut state.history {
-                let _ = db.set_alias(&alias, pick.target_id.as_deref(), &pick.target_name);
+            let Some(db) = &mut state.history else {
+                return flash(state, "历史库不可用，无法保存别名");
+            };
+            if let Err(error) = db.set_alias(&alias, pick.target_id.as_deref(), &pick.target_name) {
+                return flash(state, &format!("别名保存失败：{error}"));
             }
             state.alias_input.clear();
             state.alias_target_input.clear();
@@ -188,13 +196,45 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
             flash(state, "别名已保存")
         }
         Message::AliasRemove(alias) => {
-            if let Some(db) = &mut state.history {
-                let _ = db.remove_alias(&alias);
+            let Some(db) = &mut state.history else {
+                return flash(state, "历史库不可用，无法删除别名");
+            };
+            if let Err(error) = db.remove_alias(&alias) {
+                return flash(state, &format!("别名删除失败：{error}"));
             }
             load_aliases(state);
             refresh_after_alias_change(state);
             flash(state, "别名已删除")
         }
+        Message::RestoreHidden(item_id) => {
+            let Some(db) = state.history.as_mut() else {
+                return flash(state, "历史库不可用，无法恢复入口");
+            };
+            match db.restore_item(&item_id) {
+                Ok(()) => {
+                    load_hidden(state);
+                    state.invalidate_prefs_cache();
+                    state.refresh_results();
+                    flash(state, "入口已恢复")
+                }
+                Err(error) => flash(state, &format!("恢复入口失败：{error}")),
+            }
+        }
+        Message::ManualPathInputChanged(value) => {
+            state.manual_path_input = value;
+            Task::none()
+        }
+        Message::ManualNameInputChanged(value) => {
+            state.manual_name_input = value;
+            Task::none()
+        }
+        Message::ManualAdd => add_manual_app(state),
+        Message::ManualRenameInputChanged(id, value) => {
+            state.manual_name_edits.insert(id, value);
+            Task::none()
+        }
+        Message::ManualRename(id) => rename_manual_app(state, id),
+        Message::ManualRemove(id) => remove_manual_app(state, id),
         Message::PortableDirInputChanged(value) => {
             state.portable_dir_input = value;
             Task::none()
@@ -238,6 +278,107 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
         }
         _ => Task::none(),
     }
+}
+
+fn add_manual_app(state: &mut State) -> Task<Message> {
+    let path = state.manual_path_input.trim().trim_matches('"').to_string();
+    let name = state.manual_name_input.trim().to_string();
+    if path.is_empty() {
+        return flash(state, "请输入 exe 或 lnk 的绝对路径");
+    }
+    if name.is_empty() {
+        return flash(state, "请填写显示名称");
+    }
+    let validated = match crate::app::manual::validate_entry(&path, &name) {
+        Ok(value) => value,
+        Err(error) => return flash(state, &format!("无法添加应用：{error}")),
+    };
+    let Some(db) = state.history.as_mut() else {
+        return flash(state, "历史库不可用，无法添加应用");
+    };
+    // A shortcut may have been retargeted since it was registered. Refresh
+    // every saved identity immediately before duplicate detection so the old
+    // item_id cannot make a new target look like the same application.
+    let existing = match db.list_manual_apps() {
+        Ok(items) => items,
+        Err(error) => return flash(state, &format!("读取已登记应用失败：{error}")),
+    };
+    let identities = existing
+        .iter()
+        .map(|app| {
+            let identity = crate::app::manual::validate_entry(&app.path, &app.display_name)
+                .map(|value| value.item.id)
+                .unwrap_or_default();
+            (app.id, identity)
+        })
+        .collect::<Vec<_>>();
+    if let Err(error) = db.refresh_manual_app_identities(&identities) {
+        return flash(state, &format!("刷新已登记应用失败：{error}"));
+    }
+
+    let path_key = crate::app::scanner::util::normalize_path_key(&validated.path);
+    let existing_id = existing
+        .iter()
+        .zip(identities.iter())
+        .find(|(app, (_, identity))| {
+            (!identity.is_empty() && identity == &validated.item.id)
+                || crate::app::scanner::util::normalize_path_key(&app.path) == path_key
+        })
+        .map(|(app, _)| app.id);
+    let (id, already_registered) = match existing_id {
+        Some(id) => (id, true),
+        None => match db.save_manual_app(&validated.path, &name, &validated.item.id) {
+            Ok(id) => (id, false),
+            Err(error) => return flash(state, &format!("保存应用失败：{error}")),
+        },
+    };
+    load_manual_apps(state);
+    sync_manual_apps_to_scan_options(state);
+    state.manual_path_input.clear();
+    state.manual_name_input.clear();
+    state.rescan_pending = true;
+    request_rescan(state);
+    if already_registered || state.manual_apps.iter().any(|app| app.id == id) {
+        flash(state, "应用已登记，正在更新索引")
+    } else {
+        flash(state, "应用登记成功，正在更新索引")
+    }
+}
+
+fn rename_manual_app(state: &mut State, id: i64) -> Task<Message> {
+    let name = state
+        .manual_name_edits
+        .get(&id)
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default();
+    if name.is_empty() {
+        return flash(state, "显示名称不能为空");
+    }
+    let Some(db) = state.history.as_mut() else {
+        return flash(state, "历史库不可用，无法修改应用");
+    };
+    if let Err(error) = db.rename_manual_app(id, &name) {
+        return flash(state, &format!("修改名称失败：{error}"));
+    }
+    load_manual_apps(state);
+    sync_manual_apps_to_scan_options(state);
+    state.rescan_pending = true;
+    request_rescan(state);
+    flash(state, "名称已更新，正在重建索引")
+}
+
+fn remove_manual_app(state: &mut State, id: i64) -> Task<Message> {
+    let Some(db) = state.history.as_mut() else {
+        return flash(state, "历史库不可用，无法移除应用");
+    };
+    if let Err(error) = db.remove_manual_app(id) {
+        return flash(state, &format!("移除登记失败：{error}"));
+    }
+    load_manual_apps(state);
+    sync_manual_apps_to_scan_options(state);
+    state.rescan_pending = true;
+    request_rescan(state);
+    flash(state, "已移除登记，正在重建索引")
 }
 
 /// 退出录制态：清标志并通知热键线程注销吞键、恢复全局快捷键。

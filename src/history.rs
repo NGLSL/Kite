@@ -78,6 +78,8 @@ pub struct Personalization {
     pub pinned: HashSet<String>,
     /// 用户降权标记：非保护层候选扣分后移，可恢复。
     pub demoted: HashSet<String>,
+    /// 用户隐藏的应用启动身份；搜索结果过滤在归并与截断前执行。
+    pub hidden: HashSet<String>,
     pub now: i64,
     pub query_norm: String,
 }
@@ -96,6 +98,7 @@ pub fn apply_boosts(
         pairs,
         pinned: pinned.clone(),
         demoted: HashSet::new(),
+        hidden: HashSet::new(),
         now,
         query_norm: query_norm.to_string(),
     };

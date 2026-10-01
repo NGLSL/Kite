@@ -146,6 +146,15 @@ pub(super) fn alias_card<'a>(state: &'a State, tokens: ThemeTokens) -> Element<'
         .spacing(8.0);
         for a in &state.aliases {
             let alias = a.alias.clone();
+            let target_label = if a
+                .target_id
+                .as_ref()
+                .is_some_and(|target_id| state.hidden_ids.contains(target_id))
+            {
+                format!("{}（已隐藏）", a.target_name)
+            } else {
+                a.target_name.clone()
+            };
             list = list.push(
                 container(
                     row![
@@ -165,7 +174,7 @@ pub(super) fn alias_card<'a>(state: &'a State, tokens: ThemeTokens) -> Element<'
                             ..container::Style::default()
                         }),
                         text("→").size(12.0).color(tokens.text_muted),
-                        text(a.target_name.clone())
+                        text(target_label)
                             .size(13.0)
                             .color(tokens.text_muted)
                             .width(Length::Fill),

@@ -1,11 +1,11 @@
 //! 搜索页底部提示、Toast 与右键菜单浮层。
 
-use iced::widget::{button, column, container, row, space::Space, text};
+use iced::widget::{button, column, container, row, space::Space, text, text_input};
 use iced::{alignment, border, Background, Border, Color, Element, Length, Padding};
 
 use super::super::font::name_font;
 use super::super::theme::ThemeTokens;
-use super::super::{MenuAction, NavigationMode};
+use super::super::{actions, NavigationMode};
 use super::{Message, State};
 pub(super) fn footer_bar(state: &State, tokens: ThemeTokens) -> Element<'static, Message> {
     let hotkey_label = if state.hotkey_label.is_empty() {
@@ -142,49 +142,21 @@ pub(super) fn menu_overlay<'a>(
     y: f32,
     tokens: ThemeTokens,
 ) -> Element<'a, Message> {
-    let target_is_fs =
-        std::path::Path::new(&item.target).is_file() || std::path::Path::new(&item.target).is_dir();
-    let pinned = state.pinned.contains(&item.id);
-
-    let mut entries: Vec<(&'static str, MenuAction)> = Vec::new();
-    if target_is_fs {
-        entries.push(("打开所在文件夹", MenuAction::OpenFolder));
-        entries.push(("复制路径", MenuAction::CopyPath));
+    if state.action_alias_item.is_some() {
+        return action_alias_overlay(state, x, y, tokens);
     }
-    entries.push(("复制名称", MenuAction::CopyName));
-    if item.source != "everything-status" && item.source != "direct-path" {
-        entries.push((
-            if pinned { "取消固定" } else { "固定" },
-            MenuAction::TogglePin,
-        ));
-        let demoted = state
-            .history
-            .as_ref()
-            .map(|db| db.is_demoted(&item.id))
-            .unwrap_or(false);
-        entries.push((
-            if demoted {
-                "恢复优先级"
-            } else {
-                "降低此结果优先级"
-            },
-            if demoted {
-                MenuAction::Undemote
-            } else {
-                MenuAction::Demote
-            },
-        ));
-    }
+    let entries = actions::menu_entries(state, item);
 
     let mut col = column![].width(Length::Fill);
-    for (label, action) in entries {
+    for (index, (label, action)) in entries.into_iter().enumerate() {
+        let selected = state.menu_selected == index;
         col = col.push(
             button(text(label).size(13.0))
                 .width(Length::Fill)
                 .padding([7.0, 10.0])
                 .on_press(Message::MenuAction(item.clone(), action))
                 .style(move |_t, status| button::Style {
-                    background: if status == button::Status::Hovered {
+                    background: if selected || status == button::Status::Hovered {
                         Some(Background::Color(tokens.active_bg))
                     } else {
                         None
@@ -201,7 +173,7 @@ pub(super) fn menu_overlay<'a>(
     }
 
     let menu_box = container(col)
-        .width(180.0)
+        .width(240.0)
         .padding(4.0)
         .style(move |_t| container::Style {
             background: Some(Background::Color(tokens.bg_elevated)),
@@ -213,6 +185,108 @@ pub(super) fn menu_overlay<'a>(
             ..container::Style::default()
         });
 
+    container(menu_box)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(alignment::Alignment::Start)
+        .align_y(alignment::Alignment::Start)
+        .padding(Padding {
+            top: y,
+            left: x,
+            right: 0.0,
+            bottom: 0.0,
+        })
+        .into()
+}
+
+fn action_alias_overlay<'a>(
+    state: &'a State,
+    x: f32,
+    y: f32,
+    tokens: ThemeTokens,
+) -> Element<'a, Message> {
+    let Some(item) = state.action_alias_item.as_ref() else {
+        return Space::new().width(Length::Fill).height(Length::Fill).into();
+    };
+    let input = text_input("输入 Alias，如 vs", &state.action_alias_input)
+        .id(super::action_alias_input_id())
+        .on_input(Message::ActionAliasInputChanged)
+        .on_submit(Message::ActionAliasSave)
+        .padding([7.0, 9.0])
+        .width(Length::Fill)
+        .style(move |_t, _s| iced::widget::text_input::Style {
+            background: Background::Color(tokens.bg_input),
+            border: Border {
+                color: tokens.border_window,
+                width: 1.0,
+                radius: border::radius(7.0),
+            },
+            icon: tokens.text_muted,
+            placeholder: tokens.text_muted,
+            value: tokens.text_primary,
+            selection: Color { a: 0.25, ..tokens.accent },
+        });
+    let mut content = column![
+        text("设置 Alias").size(13.0).color(tokens.text_primary),
+        text(item.display_name.clone()).size(11.0).color(tokens.text_muted),
+        input,
+    ]
+    .spacing(7.0)
+    .width(220.0);
+    if let Some(conflict) = &state.action_alias_conflict {
+        content = content.push(
+            container(
+                column![
+                    text("该 Alias 已指向").size(11.0).color(tokens.text_muted),
+                    text(conflict.target_name.clone()).size(12.0).color(tokens.text_primary),
+                    text("确认后将替换原映射").size(11.0).color(tokens.text_muted),
+                    row![
+                        button(text("替换").size(12.0))
+                            .padding([5.0, 9.0])
+                            .on_press(Message::ActionAliasReplace),
+                        button(text("取消").size(12.0))
+                            .padding([5.0, 9.0])
+                            .on_press(Message::ActionAliasCancel),
+                    ]
+                    .spacing(6.0),
+                ]
+                .spacing(4.0),
+            )
+            .padding(7.0)
+            .style(move |_t| container::Style {
+                background: Some(Background::Color(Color { a: 0.09, ..tokens.accent })),
+                border: Border {
+                    color: tokens.active_border,
+                    width: 1.0,
+                    radius: border::radius(7.0),
+                },
+                ..container::Style::default()
+            }),
+        );
+    } else {
+        content = content.push(
+            row![
+                button(text("保存").size(12.0))
+                    .padding([5.0, 9.0])
+                    .on_press(Message::ActionAliasSave),
+                button(text("取消").size(12.0))
+                    .padding([5.0, 9.0])
+                    .on_press(Message::ActionAliasCancel),
+            ]
+            .spacing(6.0),
+        );
+    }
+    let menu_box = container(content)
+        .padding(10.0)
+        .style(move |_t| container::Style {
+            background: Some(Background::Color(tokens.bg_elevated)),
+            border: Border {
+                color: tokens.border_window,
+                width: 1.0,
+                radius: border::radius(10.0),
+            },
+            ..container::Style::default()
+        });
     container(menu_box)
         .width(Length::Fill)
         .height(Length::Fill)

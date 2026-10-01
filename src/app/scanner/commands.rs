@@ -362,7 +362,10 @@ mod tests {
         let names: HashSet<_> = out.iter().map(|(item, _)| item.name.as_str()).collect();
         assert!(names.contains("grok"), "user PATH CLI must be indexed");
         assert!(names.contains("codex"), "Codex Desktop CLI must be indexed");
-        assert!(!names.contains("cmd"), "Windows system commands must stay excluded");
+        assert!(
+            !names.contains("cmd"),
+            "Windows system commands must stay excluded"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

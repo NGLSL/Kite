@@ -275,6 +275,7 @@ pub fn legacy_item_id(target: &str, args: Option<&str>, source: &str) -> String 
 
 /// 常见扫描 source 枚举，覆盖旧 id 可能取值；新增 source 时同步。
 pub const KNOWN_SOURCES: &[&str] = &[
+    "manual",
     "start-menu",
     "desktop",
     "portable",

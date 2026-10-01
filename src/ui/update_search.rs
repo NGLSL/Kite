@@ -1,7 +1,10 @@
 //! 查询输入、结果选择与后台搜索结果落地。
 
-use super::actions::{flash, launch_alt_digit, launch_selected, menu_action, sync_scroll};
-use super::interaction::{apply_pending_full, capture_menu_item, request_rescan};
+use super::actions::{
+    close_menu, flash, launch_alt_digit, launch_selected, menu_action, open_context_menu,
+    sync_scroll,
+};
+use super::interaction::{apply_pending_full, request_rescan};
 use super::results;
 use super::{alt_digit_from_query_change, Message, NavigationMode, State};
 use iced::Task;
@@ -12,7 +15,14 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
             if state.hidden {
                 return Task::none();
             }
-            if state.alt_down && !state.hotkey_recording && !state.ime_composing {
+            if state.action_alias_item.is_some() {
+                return Task::none();
+            }
+            if state.alt_down
+                && state.menu.is_none()
+                && !state.hotkey_recording
+                && !state.ime_composing
+            {
                 if let Some(i) = state
                     .query_at_alt
                     .as_deref()
@@ -67,7 +77,7 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::LaunchIndex(i) => {
-            state.menu = None;
+            close_menu(state);
             state.selected = i;
             state.navigation_mode = NavigationMode::Results;
             launch_selected(state)
@@ -154,32 +164,37 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
             }
             if let Some((item, x, y)) = &state.menu {
                 let c = state.cursor.get();
-                let n = if std::path::Path::new(&item.target).is_file() {
-                    4
-                } else {
-                    2
-                };
-                let h = 8.0 + n as f32 * 33.0;
-                if c.x < *x || c.x > *x + 180.0 || c.y < *y || c.y > *y + h {
-                    state.menu = None;
+                let h = super::actions::menu_height(state, item);
+                if c.x < *x || c.x > *x + 240.0 || c.y < *y || c.y > *y + h {
+                    // Widget focus traverses all windows; do not unfocus a
+                    // standalone tool editor when dismissing the main menu.
+                    let restore_input =
+                        state.action_alias_item.is_some() && !state.any_tool_open();
+                    close_menu(state);
+                    if restore_input {
+                        return iced::widget::operation::focus(super::search_view::input_id());
+                    }
                 }
             }
             Task::none()
         }
         Message::ContextMenu(i) => {
-            if state.menu.is_some() {
-                state.menu = None;
-                state.qlog(|| "ctx menu closed (re-right-click)".to_owned());
-                return Task::none();
-            }
-            let c = state.cursor.get();
-            let x = c.x.min(640.0 - 200.0).max(8.0);
-            let y = c.y.min(420.0 - 180.0).max(8.0);
-            state.menu =
-                capture_menu_item(&state.results, i).map(|item| (item, x, y));
-            Task::none()
+            state.qlog(|| "ctx menu requested".to_owned());
+            open_context_menu(state, i)
         }
         Message::MenuAction(item, action) => menu_action(state, item, action),
+        Message::ActionAliasInputChanged(value) => {
+            state.action_alias_input = value;
+            // A conflict confirmation belongs to the exact alias text that
+            // produced it. Editing the text invalidates that confirmation.
+            state.action_alias_conflict = None;
+            Task::none()
+        }
+        Message::ActionAliasSave => handle_action_alias_save(state),
+        Message::ActionAliasReplace => handle_action_alias_replace(state),
+        Message::ActionAliasCancel => {
+            super::actions::cancel_action_alias(state)
+        }
         Message::Rescan => {
             state.qlog(|| "rescan requested from settings/tray".to_owned());
             state.rescan_pending = true;
@@ -195,4 +210,89 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
         }
         _ => Task::none(),
     }
+}
+
+fn handle_action_alias_save(state: &mut State) -> Task<Message> {
+    if state.ime_composing {
+        return Task::none();
+    }
+    let alias = state.action_alias_input.trim().to_lowercase();
+    if alias.is_empty() {
+        return flash(state, "请填写 Alias");
+    }
+    let Some(item) = state.action_alias_item.clone() else {
+        return Task::none();
+    };
+    let Some(current) = super::actions::resolve_current_item(state, &item) else {
+        return flash(state, "目标已不在当前索引或启动身份已变化，未保存 Alias");
+    };
+    if !super::actions::is_app_entry(&current) {
+        return flash(state, "当前目标不支持 Alias");
+    }
+    if let Some(existing) = state
+        .aliases
+        .iter()
+        .find(|candidate| candidate.alias == alias)
+        .cloned()
+    {
+        if existing.target_id.as_deref() != Some(item.id.as_str()) {
+            state.action_alias_conflict = Some(existing);
+            super::actions::clamp_menu_height(state, 220.0);
+            return flash(state, "Alias 已存在，请确认是否替换");
+        }
+    }
+    save_action_alias(state, &current, &alias)
+}
+
+fn handle_action_alias_replace(state: &mut State) -> Task<Message> {
+    if state.ime_composing {
+        return Task::none();
+    }
+    let Some(item) = state.action_alias_item.clone() else {
+        return Task::none();
+    };
+    let Some(conflict) = state.action_alias_conflict.clone() else {
+        return flash(state, "请先确认 Alias 冲突");
+    };
+    let alias = state.action_alias_input.trim().to_lowercase();
+    if alias.is_empty() {
+        return flash(state, "请填写 Alias");
+    }
+    let still_same_conflict = state.aliases.iter().any(|existing| {
+        existing.alias == conflict.alias
+            && existing.alias == alias
+            && existing.target_id == conflict.target_id
+            && existing.target_name == conflict.target_name
+    });
+    if !still_same_conflict {
+        state.action_alias_conflict = None;
+        return flash(state, "Alias 冲突已变化，请重新保存确认");
+    }
+    let Some(current) = super::actions::resolve_current_item(state, &item) else {
+        return flash(state, "目标已不在当前索引或启动身份已变化，未替换 Alias");
+    };
+    if !super::actions::is_app_entry(&current) {
+        return flash(state, "当前目标不支持 Alias");
+    }
+    save_action_alias(state, &current, &alias)
+}
+
+fn save_action_alias(
+    state: &mut State,
+    item: &crate::model::AppItem,
+    alias: &str,
+) -> Task<Message> {
+    let Some(db) = state.history.as_mut() else {
+        return flash(state, "历史库不可用，无法保存 Alias");
+    };
+    if let Err(error) = db.set_alias(alias, Some(&item.id), &item.display_name) {
+        return flash(state, &format!("Alias 保存失败：{error}"));
+    }
+    super::actions::load_aliases(state);
+    super::actions::refresh_after_alias_change(state);
+    super::actions::close_menu(state);
+    Task::batch([
+        flash(state, "Alias 已保存"),
+        iced::widget::operation::focus(super::search_view::input_id()),
+    ])
 }

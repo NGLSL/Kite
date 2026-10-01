@@ -12,14 +12,19 @@ pub(crate) fn dedupe(raw: Vec<RawItem>) -> Vec<RawItem> {
     use std::collections::hash_map::Entry;
 
     let rank = |source: &str| match source {
-        "start-menu" => 0,
-        "desktop" => 1,
-        "portable" => 2,
-        "uninstall" => 3,
-        "app-paths" => 4,
-        "uwp" | "apps-folder" => 5,
-        "commands" => 6,
-        _ => 7,
+        // An explicitly registered item is the user's chosen display name
+        // and launch metadata.  Keep it when an automatic source exposes the
+        // same target; `keep_shortcut_names` retains the automatic name as a
+        // searchable keyword.
+        "manual" => 0,
+        "start-menu" => 1,
+        "desktop" => 2,
+        "portable" => 3,
+        "uninstall" => 4,
+        "app-paths" => 5,
+        "uwp" | "apps-folder" => 6,
+        "commands" => 7,
+        _ => 8,
     };
 
     let mut best: HashMap<String, RawItem> = HashMap::new();
@@ -320,6 +325,38 @@ mod tests {
 
         assert_eq!(forward[0].0.name, reverse[0].0.name);
         assert_eq!(forward[0].0.name, "Alpha");
+    }
+
+    #[test]
+    fn manual_entry_wins_same_identity_and_keeps_automatic_name() {
+        let target = r"C:\Apps\editor.exe";
+        let automatic = AppItem::scanned(
+            "automatic".into(),
+            "Editor (Start Menu)".into(),
+            target.into(),
+            None,
+            Some(r"C:\Apps".into()),
+            "start-menu",
+        );
+        let manual = AppItem::scanned(
+            "manual".into(),
+            "我的编辑器".into(),
+            target.into(),
+            None,
+            None,
+            "manual",
+        );
+
+        let items = dedupe(vec![(automatic, None), (manual, Some(target.into()))]);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].0.source, "manual");
+        assert_eq!(items[0].0.name, "我的编辑器");
+        assert!(items[0]
+            .0
+            .search_keywords
+            .iter()
+            .any(|keyword| keyword == "Editor (Start Menu)"));
+        assert_eq!(items[0].0.working_dir, None);
     }
 
     #[test]

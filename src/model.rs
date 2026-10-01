@@ -297,7 +297,7 @@ impl AppIndex {
 
 /// 索引来源的产品分层（Tier）：用于空 Query 可见性与结果降噪，不表示删除索引。
 ///
-/// - **Tier A Formal**：Start Menu / Desktop / UWP / 用户 Portable
+/// - **Tier A Formal**：Start Menu / Desktop / UWP / 用户 Portable / Manual
 /// - **Tier B System**：Kite curated 系统入口
 /// - **Tier C**：`Supplemental`（App Paths / Uninstall）与 `CommandAlias`（包管理器命令）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,7 +316,9 @@ pub enum SourceLayer {
 /// 避免未来新扫描器忘记分类就变成正式应用。
 pub fn source_layer(source: &str) -> SourceLayer {
     match source {
-        "start-menu" | "desktop" | "uwp" | "apps-folder" | "portable" => SourceLayer::Formal,
+        "start-menu" | "desktop" | "uwp" | "apps-folder" | "portable" | "manual" => {
+            SourceLayer::Formal
+        }
         "builtin" | "builtin-system" | "win-settings" => SourceLayer::System,
         "app-paths" | "uninstall" => SourceLayer::Supplemental,
         "commands" | "scoop" => SourceLayer::CommandAlias,
@@ -330,9 +332,30 @@ pub fn is_discovery_source(source: &str) -> bool {
     matches!(source, "app-paths" | "uninstall")
 }
 
-/// 路径型正式入口：开始菜单 / 桌面 / 用户 Portable（不含 UWP）。
+/// 路径型正式入口：开始菜单 / 桌面 / 用户 Portable / Manual（不含 UWP）。
 pub fn is_path_formal_source(source: &str) -> bool {
-    matches!(source, "start-menu" | "desktop" | "portable")
+    matches!(source, "start-menu" | "desktop" | "portable" | "manual")
+}
+
+/// 是否允许应用「隐藏此入口」偏好作用于该索引来源。
+///
+/// 文件、路径直达、网页、内置、系统和插件结果使用自己的行为边界，不能因为
+/// 它们的来源字符串未被 `source_layer` 识别就被误当作可隐藏应用。
+pub fn is_hideable_application_source(source: &str) -> bool {
+    matches!(
+        source,
+        "start-menu"
+            | "desktop"
+            | "uwp"
+            | "apps-folder"
+            | "portable"
+            | "manual"
+            | "app-paths"
+            | "uninstall"
+            | "protocols"
+            | "commands"
+            | "scoop"
+    )
 }
 
 /// 空 Query 默认列表是否隐藏该来源（Pin/最近使用仍可覆盖）。

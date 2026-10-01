@@ -25,8 +25,8 @@ use crate::system::hotkey::parse_raw;
 use crate::{app, history, log, search, storage, system};
 
 mod actions;
-mod base64_tool;
 mod backend;
+mod base64_tool;
 mod font;
 mod hash_tool;
 mod interaction;
@@ -36,6 +36,11 @@ mod results;
 mod runtime;
 mod search_view;
 mod settings;
+#[cfg(test)]
+mod action_tests;
+#[cfg(test)]
+mod test_support;
+pub mod theme;
 mod tool_template;
 mod tools;
 mod tray;
@@ -43,9 +48,6 @@ mod update_plugins;
 mod update_search;
 mod update_settings;
 mod update_window;
-#[cfg(test)]
-mod test_support;
-pub mod theme;
 
 use interaction::update;
 use keyboard::{alt_digit_from_query_change, alt_digit_index};
@@ -63,6 +65,7 @@ pub(crate) struct CachedPrefs {
     pub usage: std::collections::HashMap<String, storage::UsageStats>,
     pub pinned: std::collections::HashSet<String>,
     pub demoted: std::collections::HashSet<String>,
+    pub hidden: std::collections::HashSet<String>,
 }
 
 /// boot 里生成的跨线程消息通道：后台线程 → iced runtime。
@@ -108,10 +111,7 @@ fn with_plugin_registry<T>(state: &State, f: impl FnOnce(&mut PluginRegistry) ->
 
 /// 在插件 Host 锁内执行。
 fn with_plugin_host<T>(state: &State, f: impl FnOnce(&mut PluginHost) -> T) -> T {
-    let mut host = state
-        .plugin_host
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut host = state.plugin_host.lock().unwrap_or_else(|e| e.into_inner());
     f(&mut host)
 }
 
@@ -229,6 +229,14 @@ enum Message {
     /// 上下文菜单动作。
     /// 右键动作携带点击时的条目快照，避免后台刷新后同一行号指向另一项。
     MenuAction(AppItem, MenuAction),
+    /// 结果面板中的 Alias 编辑输入。
+    ActionAliasInputChanged(String),
+    /// 保存结果面板中的 Alias。
+    ActionAliasSave,
+    /// 确认替换冲突 Alias。
+    ActionAliasReplace,
+    /// 取消结果面板中的 Alias 编辑/冲突确认。
+    ActionAliasCancel,
     /// 按住拖拽窗口（css data-tauri-drag-region）。
     DragWindow,
     // ── 设置页 ──
@@ -261,6 +269,19 @@ enum Message {
     AliasPick(usize),
     AliasAdd,
     AliasRemove(String),
+    /// 设置页隐藏项恢复。
+    RestoreHidden(String),
+    /// 设置页手动应用路径输入。
+    ManualPathInputChanged(String),
+    /// 设置页手动应用显示名称输入。
+    ManualNameInputChanged(String),
+    /// 保存手动应用登记。
+    ManualAdd,
+    /// 修改手动应用显示名称。
+    ManualRenameInputChanged(i64, String),
+    ManualRename(i64),
+    /// 移除手动应用登记（不触碰目标文件）。
+    ManualRemove(i64),
     PortableDirInputChanged(String),
     AddPortableDir,
     RemovePortableDir(usize),
@@ -344,6 +365,14 @@ enum MenuAction {
     Demote,
     /// 恢复被降权结果的默认优先级。
     Undemote,
+    /// 从当前结果直接打开 Alias 编辑。
+    SetAlias,
+    /// 隐藏当前应用启动身份。
+    HideEntry,
+    /// 清除当前 Query 的配对学习。
+    ForgetQuery,
+    /// 将可登记路径送入设置页表单。
+    AddToKite,
 }
 
 struct State {
@@ -391,6 +420,15 @@ struct State {
     app_search_worker: std::sync::Arc<search::service::AppSearchWorker>,
     /// 右键菜单：(点击时的条目快照, x, y)。
     menu: Option<(AppItem, f32, f32)>,
+    /// 菜单动作的键盘焦点；面板关闭时归零。
+    menu_selected: usize,
+    /// 打开面板时捕获的 Query，用于 Query 级清理，不随输入变化。
+    menu_query: String,
+    /// 面板内 Alias 编辑绑定的 AppItem 稳定身份。
+    action_alias_item: Option<AppItem>,
+    action_alias_input: String,
+    /// Alias 冲突时保存原映射，等待明确替换。
+    action_alias_conflict: Option<UserAlias>,
     pinned: std::collections::HashSet<String>,
     /// 最新光标（窗口逻辑坐标；Cell 写入不参与视图比较）。
     cursor: std::rc::Rc<std::cell::Cell<iced::Point>>,
@@ -420,6 +458,17 @@ struct State {
     alias_target_input: String,
     alias_candidates: Vec<SearchResult>,
     alias_pick: Option<UserAlias>,
+    /// 已隐藏入口管理列表；搜索过滤使用 hidden_ids。
+    hidden_items: Vec<storage::HiddenItem>,
+    hidden_ids: std::collections::HashSet<String>,
+    /// 手动登记列表和设置页输入。
+    manual_apps: Vec<storage::ManualApp>,
+    manual_path_input: String,
+    manual_name_input: String,
+    manual_name_edits: std::collections::HashMap<i64, String>,
+    /// Cached validation result for the settings list; refreshed on load/CRUD,
+    /// never recomputed during every render.
+    manual_status: std::collections::HashMap<i64, String>,
     portable_dirs: Vec<String>,
     portable_dir_input: String,
     /// 设置页提示条（css settings-toast）。

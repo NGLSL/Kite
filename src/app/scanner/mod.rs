@@ -42,6 +42,7 @@ pub use family::{
     is_shell_package, should_merge_family, strip_shell_target,
 };
 pub use icon_batch::{extract_icons_parallel, missing_icon_targets};
+pub(crate) use lnk::resolve_lnk;
 pub use pass::{ScanOptions, ScanPass};
 
 type RawItem = (AppItem, Option<String>);
@@ -65,6 +66,7 @@ pub fn scan_apps_pass(
             extra_scoop_shim_dirs: extra_scoop_shim_dirs.to_vec(),
             portable_dirs: Vec::new(),
             force_uwp_refresh: false,
+            manual_apps: Vec::new(),
         },
     )
 }
@@ -108,6 +110,12 @@ fn scan_apps_with_budget(
     let max_total = pass.max_total();
     let mut raw: Vec<RawItem> = Vec::new();
     let mut cache = cache::ScanCache::load(icon_dir);
+
+    // Manual registrations are a persisted source of truth.  Validate them
+    // before directory scanning and always include them in Bootstrap and Full
+    // snapshots; a fast-pass budget must not make an explicitly registered
+    // application disappear from the first result set.
+    collect_manual_apps(&options.manual_apps, &mut raw);
 
     let user_start = util::user_start_menu_dir()
         .or_else(|| dirs::data_dir().map(|d| d.join("Microsoft/Windows/Start Menu")))
@@ -452,6 +460,25 @@ fn scan_apps_with_budget(
     index
 }
 
+fn collect_manual_apps(manual_apps: &[crate::storage::ManualApp], out: &mut Vec<RawItem>) {
+    for manual in manual_apps {
+        match crate::app::manual::validate_entry(&manual.path, &manual.display_name) {
+            Ok(validated) => {
+                let icon_src = validated.item.icon_src.clone();
+                out.push((validated.item, icon_src));
+            }
+            Err(error) => {
+                // Keep the persisted record so settings can show it as
+                // unavailable; only the current index candidate is skipped.
+                crate::log::info(&format!(
+                    "skip invalid manual app path={} id={} error={error}",
+                    manual.path, manual.id
+                ));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,6 +552,55 @@ mod tests {
     }
 
     #[test]
+    fn manual_entries_are_available_in_bootstrap_and_skip_missing_records() {
+        let root = temp_dir("manual-entry");
+        let exe = root.join("Registered Editor.exe");
+        std::fs::write(&exe, b"fixture").unwrap();
+        let icon_dir = root.join("icons");
+        std::fs::create_dir_all(&icon_dir).unwrap();
+
+        let options = ScanOptions {
+            manual_apps: vec![
+                crate::storage::manual::ManualApp {
+                    id: 1,
+                    path: exe.to_string_lossy().into_owned(),
+                    display_name: "我的编辑器".into(),
+                    item_id: crate::app::scanner::util::stable_item_id(
+                        &exe.to_string_lossy(),
+                        None,
+                    ),
+                },
+                crate::storage::manual::ManualApp {
+                    id: 2,
+                    path: root
+                        .join("temporarily missing.exe")
+                        .to_string_lossy()
+                        .into_owned(),
+                    display_name: "不可用入口".into(),
+                    item_id: "missing-id".into(),
+                },
+            ],
+            ..ScanOptions::default()
+        };
+
+        let index = scan_apps_with_budget(&icon_dir, ScanPass::Bootstrap, &options, None);
+        let matches: Vec<_> = index
+            .retrieval
+            .as_ref()
+            .unwrap()
+            .search("我的编辑器", &[], 10)
+            .into_iter()
+            .filter(|hit| hit.item.source == "manual")
+            .collect();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].item.target, exe.to_string_lossy());
+        assert_eq!(matches[0].item.name, "我的编辑器");
+        assert!(!index.apps.iter().any(|item| item.name == "不可用入口"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn bootstrap_pass_skips_scoop_and_command_sources() {
         let root = temp_dir("bootstrap-skip");
         let shims = root.join("scoop").join("shims");
@@ -543,6 +619,7 @@ mod tests {
             extra_scoop_shim_dirs: vec![shims.clone()],
             portable_dirs: vec![portable.clone()],
             force_uwp_refresh: false,
+            manual_apps: Vec::new(),
         };
 
         // 来源集合与时间预算是两个契约；本测试固定前者，避免主机负载影响收录。

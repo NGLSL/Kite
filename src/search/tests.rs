@@ -766,6 +766,96 @@
     }
 
     #[test]
+    fn hidden_exact_match_is_filtered_before_top_n_and_fills_from_remaining() {
+        let hidden = sourced_item("Example", r"C:\Apps\Example\example.exe", "start-menu");
+        let visible = sourced_item("Example Helper", r"C:\Apps\Other\helper.exe", "start-menu");
+        let extra = sourced_item("Example Tools", r"C:\Apps\Other\tools.exe", "start-menu");
+        let index = RetrievalIndex::build(&[hidden.clone(), visible.clone(), extra.clone()], &[]);
+        let mut prefs = crate::history::Personalization::default();
+        prefs.hidden.insert(hidden.id.clone());
+
+        let hits = search_with_personalization(&index, "example", &[], Some(&prefs), 2);
+        assert_eq!(hits.len(), 2, "隐藏项不得消耗 Top N 名额");
+        assert!(!hits.iter().any(|hit| hit.item.id == hidden.id));
+        assert!(hits.iter().any(|hit| hit.item.id == visible.id));
+        assert!(hits.iter().any(|hit| hit.item.id == extra.id));
+    }
+
+    #[test]
+    fn hidden_user_alias_cannot_bypass_visibility_filter() {
+        let hidden = sourced_item("Hidden Tool", r"C:\Apps\hidden.exe", "start-menu");
+        let visible = sourced_item("Visible Tool", r"C:\Apps\visible.exe", "start-menu");
+        let index = RetrievalIndex::build(&[hidden.clone(), visible], &[]);
+        let mut prefs = crate::history::Personalization::default();
+        prefs.hidden.insert(hidden.id.clone());
+        let alias = UserTarget {
+            id: Some(hidden.id.clone()),
+            name: "Hidden Tool".into(),
+        };
+
+        let hits = search_with_personalization(&index, "tool", &[alias], Some(&prefs), TOP_N);
+        assert!(hits.iter().all(|hit| hit.item.id != hidden.id));
+    }
+
+    #[test]
+    fn hidden_pinned_group_member_does_not_replace_visible_group_identity() {
+        let target = r"C:\Program Files\Example\app.exe";
+        let menu = sourced_item("Example App", target, "start-menu");
+        let hidden_member = sourced_item("examplehelper", target, "app-paths");
+        let index = RetrievalIndex::build(&[menu.clone(), hidden_member.clone()], &[]);
+        let mut prefs = crate::history::Personalization::default();
+        prefs.hidden.insert(hidden_member.id.clone());
+        prefs.pinned.insert(hidden_member.id.clone());
+
+        let hits = search_with_personalization(&index, "example app", &[], Some(&prefs), TOP_N);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].item.id, menu.id);
+        assert_eq!(hits[0].item.source, "start-menu");
+        assert!(!hits[0].matched_by.contains("+pin"));
+    }
+
+    #[test]
+    fn hiding_static_group_representative_keeps_visible_alternate_identity() {
+        let target = r"C:\Program Files\Example\app.exe";
+        let hidden_menu = sourced_item("Example App", target, "start-menu");
+        let visible_helper = sourced_item("Example Helper", target, "app-paths");
+        let index = RetrievalIndex::build(&[hidden_menu.clone(), visible_helper.clone()], &[]);
+        let mut prefs = crate::history::Personalization::default();
+        prefs.hidden.insert(hidden_menu.id.clone());
+
+        let hits = search_with_personalization(&index, "example", &[], Some(&prefs), TOP_N);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].item.id, visible_helper.id);
+        assert_eq!(hits[0].item.source, "app-paths");
+    }
+
+    #[test]
+    fn hidden_group_member_history_does_not_lift_visible_peer() {
+        let target = r"C:\Program Files\Example\app.exe";
+        let visible = sourced_item("Example App", target, "start-menu");
+        let hidden_member = sourced_item("examplehelper", target, "app-paths");
+        let peer = sourced_item("Example Other", r"C:\Other\example.exe", "start-menu");
+        let index = RetrievalIndex::build(
+            &[visible.clone(), hidden_member.clone(), peer.clone()],
+            &[],
+        );
+        let mut prefs = crate::history::Personalization::default();
+        prefs.hidden.insert(hidden_member.id.clone());
+        prefs.pairs.insert(
+            hidden_member.id.clone(),
+            crate::storage::QueryPairStats {
+                count: 100,
+                last_used_at: 0,
+            },
+        );
+        prefs.query_norm = "example".into();
+
+        let hits = search_with_personalization(&index, "example", &[], Some(&prefs), TOP_N);
+        assert!(hits.iter().all(|hit| hit.item.id != hidden_member.id));
+        assert!(hits.iter().all(|hit| !hit.matched_by.contains("+history")));
+    }
+
+    #[test]
     fn pinned_rep_borrows_icon_from_static_group_members() {
         let target = r"C:\Program Files\Example\app.exe";
         let mut menu = sourced_item("Example App", target, "start-menu");
@@ -926,6 +1016,40 @@
     }
 
     #[test]
+    fn empty_query_hidden_pinned_or_recent_does_not_consume_slots() {
+        let hidden = sourced_item("Hidden Tool", r"C:\Apps\hidden.exe", "start-menu");
+        let visible = sourced_item("Visible Tool", r"C:\Apps\visible.exe", "start-menu");
+        let hidden_id = hidden.id.clone();
+        let apps = vec![hidden, visible.clone()];
+        let hidden_ids = [hidden_id.clone()].into_iter().collect();
+        let hits = crate::search::order_by_recent_with_hidden(
+            &apps,
+            &[hidden_id.clone()],
+            &[hidden_id],
+            &hidden_ids,
+            1,
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].item.id, visible.id);
+        assert_eq!(hits[0].matched_by, "default");
+    }
+
+    #[test]
+    fn hidden_alias_target_is_excluded_from_new_alias_candidates() {
+        let hidden = sourced_item("Hidden Tool", r"C:\Apps\hidden.exe", "start-menu");
+        let visible = sourced_item("Visible Tool", r"C:\Apps\visible.exe", "start-menu");
+        let hidden_ids = [hidden.id.clone()].into_iter().collect();
+        let hits = crate::search::name_candidates_with_hidden(
+            &[hidden, visible.clone()],
+            "tool",
+            &hidden_ids,
+            TOP_N,
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].item.id, visible.id);
+    }
+
+    #[test]
     fn exact_command_query_still_recalls_command_entry() {
         let formal = sourced_item(
             "7-Zip File Manager",
@@ -1004,12 +1128,16 @@
 
     #[test]
     fn source_layer_classifies_formal_supplemental_and_commands() {
-        use crate::model::{is_discovery_source, is_path_formal_source, source_layer, SourceLayer};
+        use crate::model::{
+            is_discovery_source, is_hideable_application_source, is_path_formal_source,
+            source_layer, SourceLayer,
+        };
         assert_eq!(source_layer("start-menu"), SourceLayer::Formal);
         assert_eq!(source_layer("desktop"), SourceLayer::Formal);
         assert_eq!(source_layer("uwp"), SourceLayer::Formal);
         assert_eq!(source_layer("apps-folder"), SourceLayer::Formal);
         assert_eq!(source_layer("portable"), SourceLayer::Formal);
+        assert_eq!(source_layer("manual"), SourceLayer::Formal);
         assert_eq!(source_layer("app-paths"), SourceLayer::Supplemental);
         assert_eq!(source_layer("uninstall"), SourceLayer::Supplemental);
         assert_eq!(source_layer("commands"), SourceLayer::CommandAlias);
@@ -1025,7 +1153,11 @@
         assert!(!is_discovery_source("unknown-future"));
         assert!(is_path_formal_source("start-menu"));
         assert!(is_path_formal_source("portable"));
+        assert!(is_path_formal_source("manual"));
         assert!(!is_path_formal_source("uwp"));
+        assert!(is_hideable_application_source("manual"));
+        assert!(!is_hideable_application_source("everything"));
+        assert!(!is_hideable_application_source("direct-path"));
     }
 
     #[test]

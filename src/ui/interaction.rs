@@ -24,6 +24,10 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
         | Message::MousePressed(..)
         | Message::ContextMenu(..)
         | Message::MenuAction(..)
+        | Message::ActionAliasInputChanged(..)
+        | Message::ActionAliasSave
+        | Message::ActionAliasReplace
+        | Message::ActionAliasCancel
         | Message::Rescan => update_search::handle(state, message),
 
         Message::OpenSettings
@@ -45,6 +49,13 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
         | Message::AliasPick(..)
         | Message::AliasAdd
         | Message::AliasRemove(..)
+        | Message::RestoreHidden(..)
+        | Message::ManualPathInputChanged(..)
+        | Message::ManualNameInputChanged(..)
+        | Message::ManualAdd
+        | Message::ManualRenameInputChanged(..)
+        | Message::ManualRename(..)
+        | Message::ManualRemove(..)
         | Message::PortableDirInputChanged(..)
         | Message::AddPortableDir
         | Message::RemovePortableDir(..)
@@ -104,6 +115,9 @@ pub(super) fn apply_pending_full(state: &mut State) -> bool {
         }
         state.pinned = db.pinned_ids().into_iter().collect();
     }
+    // Identity migration may have updated hidden records along with the
+    // other preferences; keep the empty-query UI cache in sync with storage.
+    super::actions::load_hidden(state);
     state.invalidate_prefs_cache();
     state.index_generation = state.index_generation.wrapping_add(1);
     state.base_hit_cache.clear();

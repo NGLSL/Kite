@@ -104,6 +104,12 @@ pub fn personalize_base_hits(
         return base;
     };
     let mut hits = base;
+    // Keep the cache independent of preference changes: replay the latest hidden
+    // set on every hit instead of invalidating the base candidate cache.
+    hits.retain(|hit| {
+        !crate::model::is_hideable_application_source(&hit.item.source)
+            || !prefs.hidden.contains(&hit.item.id)
+    });
     crate::history::apply_personalization(&mut hits, prefs);
     hits
 }
@@ -426,6 +432,96 @@ mod tests {
         prefs.now = 1_700_000_000;
         let ranked = personalize_base_hits(base, Some(&prefs));
         assert_eq!(ranked[0].item.id, "used");
+    }
+
+    #[test]
+    fn hidden_preference_replays_on_cached_base_without_changing_candidates() {
+        let app_hit = |id: &str| {
+            SearchResult::scored(
+                AppItem::scanned(
+                    id.into(),
+                    id.into(),
+                    format!(r"C:\{id}.exe"),
+                    None,
+                    None,
+                    "start-menu",
+                ),
+                500,
+                "base",
+            )
+        };
+        let base = vec![app_hit("hidden"), app_hit("visible")];
+        let mut prefs = Personalization::default();
+        prefs.hidden.insert("hidden".into());
+        let filtered = personalize_base_hits(base.clone(), Some(&prefs));
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|hit| hit.item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["visible"]
+        );
+
+        prefs.hidden.clear();
+        let restored = personalize_base_hits(base, Some(&prefs));
+        assert_eq!(restored.len(), 2, "恢复隐藏后应重放同一基础候选");
+    }
+
+    #[test]
+    fn hidden_preference_replays_on_hot_base_cache_without_invalidation() {
+        let make_item = |id: &str| {
+            let mut item = AppItem::scanned(
+                id.into(),
+                format!("{id} Tool"),
+                format!(r"C:\{id}.exe"),
+                None,
+                None,
+                "start-menu",
+            );
+            item.attach_search_fields();
+            item
+        };
+        let hidden = make_item("hidden");
+        let visible = make_item("visible");
+        let index = Arc::new(RetrievalIndex::build(&[hidden.clone(), visible.clone()], &[]));
+        let cache = Arc::new(BaseHitCache::new(4));
+
+        let run_with_prefs = |prefs: Personalization| -> Vec<String> {
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let sink = captured.clone();
+            let job = AppSearchJob {
+                generation: 1,
+                index_generation: 1,
+                query: "tool".into(),
+                q_norm: "tool".into(),
+                user_targets: vec![],
+                prefs: Some(prefs),
+                source: IndexSource::Prebuilt(index.clone()),
+                cache: cache.clone(),
+                cache_epoch: cache.epoch(),
+                on_done: Arc::new(move |_, _, hits, _| {
+                    let mut guard = sink.lock().unwrap_or_else(|e| e.into_inner());
+                    *guard = hits.into_iter().map(|hit| hit.item.id).collect();
+                }),
+            };
+            let mut scratch = MatcherScratch::new();
+            run_job(job, &SearchRun::new(&|| false), &mut scratch);
+            let output = captured.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            output
+        };
+
+        let mut hidden_prefs = Personalization::default();
+        hidden_prefs.hidden.insert(hidden.id.clone());
+        let first = run_with_prefs(hidden_prefs);
+        let epoch = cache.epoch();
+        let entries = cache.len();
+        assert_eq!(first, vec![visible.id.clone()]);
+        assert_eq!(entries, 1, "首个查询应写入未个性化基础候选");
+
+        let restored = run_with_prefs(Personalization::default());
+        assert_eq!(restored.len(), 2, "恢复隐藏后应重放同一热缓存候选");
+        assert_eq!(cache.len(), entries, "隐藏切换不得清空基础候选缓存");
+        assert_eq!(cache.epoch(), epoch, "隐藏切换不得推进基础缓存代际");
     }
 
     #[test]

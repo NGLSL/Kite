@@ -6,6 +6,7 @@ pub mod builtin;
 mod control_panel;
 pub mod index_health;
 mod launcher;
+pub mod manual;
 pub mod scanner;
 pub mod snapshot;
 pub mod uwp;

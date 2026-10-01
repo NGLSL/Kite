@@ -93,12 +93,17 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
         .as_ref()
         .map(HistoryDb::load_settings)
         .unwrap_or_default();
+    let manual_apps = history_db
+        .as_ref()
+        .and_then(|db| db.list_manual_apps().ok())
+        .unwrap_or_default();
     let scan_options = std::sync::Arc::new(std::sync::RwLock::new(app::scanner::ScanOptions {
         portable_dirs: saved_settings
             .portable_dirs
             .iter()
             .map(PathBuf::from)
             .collect(),
+        manual_apps: manual_apps.clone(),
         ..app::scanner::ScanOptions::default()
     }));
 
@@ -109,7 +114,31 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
     spawn_tray();
     spawn_activation_listener();
 
-    let mut state = build_state(data_dir, icon_dir, history_db, index, scan_options, index_ready);
+    let mut state = build_state(
+        data_dir,
+        icon_dir,
+        history_db,
+        index,
+        scan_options,
+        index_ready,
+    );
+    state.manual_apps = manual_apps;
+    state.manual_name_edits = state
+        .manual_apps
+        .iter()
+        .map(|app| (app.id, app.display_name.clone()))
+        .collect();
+    state.manual_status = state
+        .manual_apps
+        .iter()
+        .map(|app| {
+            let status = crate::app::manual::validate_entry(&app.path, &app.display_name)
+                .map(|_| "可用".to_string())
+                .unwrap_or_else(|error| format!("暂不可用：{error}"));
+            (app.id, status)
+        })
+        .collect();
+    super::actions::load_hidden(&mut state);
     spawn_idle_sweep(&state.plugin_host);
     apply_saved_settings(&mut state, saved_settings);
     state.refresh_results();
@@ -424,6 +453,11 @@ fn build_state(
         base_hit_cache: std::sync::Arc::new(search::service::BaseHitCache::default()),
         app_search_worker: std::sync::Arc::new(search::service::AppSearchWorker::spawn()),
         menu: None,
+        menu_selected: 0,
+        menu_query: String::new(),
+        action_alias_item: None,
+        action_alias_input: String::new(),
+        action_alias_conflict: None,
         pinned: Default::default(),
         cursor: Default::default(),
         settings_open: false,
@@ -445,6 +479,13 @@ fn build_state(
         alias_target_input: String::new(),
         alias_candidates: Vec::new(),
         alias_pick: None,
+        hidden_items: Vec::new(),
+        hidden_ids: Default::default(),
+        manual_apps: Vec::new(),
+        manual_path_input: String::new(),
+        manual_name_input: String::new(),
+        manual_name_edits: Default::default(),
+        manual_status: Default::default(),
         portable_dirs: saved_settings.portable_dirs.clone(),
         portable_dir_input: String::new(),
         flash: None,

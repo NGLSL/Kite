@@ -100,6 +100,7 @@ fn app_key(key: &Key, physical: Physical, mods: Modifiers) -> bool {
             | Named::ArrowLeft
             | Named::ArrowRight
             | Named::Enter
+            | Named::F10
             | Named::Alt
             | Named::Backspace,
         ) => true,

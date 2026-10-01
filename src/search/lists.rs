@@ -1,5 +1,7 @@
 //! 空 Query 列表与 Alias 选择器等辅助入口，不参与多路召回评分。
 
+use std::collections::HashSet;
+
 use crate::model::{AppItem, SearchResult};
 
 use super::normalizer;
@@ -13,6 +15,19 @@ pub fn order_by_recent(
     pinned_ids: &[String],
     top_n: usize,
 ) -> Vec<SearchResult> {
+    order_by_recent_with_hidden(apps, recent_ids, pinned_ids, &HashSet::new(), top_n)
+}
+
+/// 空 Query 列表的隐藏感知入口，供 UI 实际组装最近/固定/补满区时使用。
+/// 隐藏项在三段中都不占名额；未隐藏项仍按原有固定、最近、默认顺序补齐。
+pub fn order_by_recent_with_hidden(
+    apps: &[AppItem],
+    recent_ids: &[String],
+    pinned_ids: &[String],
+    hidden_ids: &HashSet<String>,
+    top_n: usize,
+) -> Vec<SearchResult> {
+    let has_hidden = !hidden_ids.is_empty();
     let mut hits: Vec<SearchResult> = Vec::with_capacity(top_n.min(apps.len()));
     let push_hit =
         |id: &str, score: i32, matched_by: &'static str, hits: &mut Vec<SearchResult>| -> bool {
@@ -20,6 +35,12 @@ pub fn order_by_recent(
                 return false;
             }
             if let Some(item) = apps.iter().find(|a| a.id == id) {
+                if has_hidden
+                    && hidden_ids.contains(id)
+                    && crate::model::is_hideable_application_source(&item.source)
+                {
+                    return false;
+                }
                 hits.push(SearchResult::scored(item.clone(), score, matched_by));
                 return true;
             }
@@ -44,6 +65,12 @@ pub fn order_by_recent(
         if hits.iter().any(|h| h.item.id == item.id) {
             continue;
         }
+        if has_hidden
+            && hidden_ids.contains(&item.id)
+            && crate::model::is_hideable_application_source(&item.source)
+        {
+            continue;
+        }
         if crate::model::is_hidden_on_empty_fill(&item.source, &item.target) {
             continue;
         }
@@ -55,6 +82,16 @@ pub fn order_by_recent(
 /// Alias 目标选择器用：按名称/拼音从索引挑候选，Top N。
 /// 轻量实现（前缀 > 包含，短名优先），不走完整评分管线。
 pub fn name_candidates(apps: &[AppItem], query: &str, top_n: usize) -> Vec<SearchResult> {
+    name_candidates_with_hidden(apps, query, &HashSet::new(), top_n)
+}
+
+/// Alias 目标选择器的隐藏感知入口；隐藏项保留在原 Alias 存储中，但不再作为新目标候选。
+pub fn name_candidates_with_hidden(
+    apps: &[AppItem],
+    query: &str,
+    hidden_ids: &HashSet<String>,
+    top_n: usize,
+) -> Vec<SearchResult> {
     fn norm<'a>(precomputed: &'a str, raw: &'a str) -> std::borrow::Cow<'a, str> {
         if precomputed.is_empty() {
             std::borrow::Cow::Owned(normalizer::normalize_name(raw))
@@ -67,8 +104,15 @@ pub fn name_candidates(apps: &[AppItem], query: &str, top_n: usize) -> Vec<Searc
     if q.is_empty() {
         return Vec::new();
     }
+    let has_hidden = !hidden_ids.is_empty();
     let mut hits: Vec<SearchResult> = Vec::new();
     for item in apps {
+        if has_hidden
+            && hidden_ids.contains(&item.id)
+            && crate::model::is_hideable_application_source(&item.source)
+        {
+            continue;
+        }
         let name = norm(&item.normalized_name, &item.name);
         let display = norm(&item.normalized_display, &item.display_name);
         let mut score = 0i32;

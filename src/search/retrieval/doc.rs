@@ -652,6 +652,15 @@ impl RetrievalIndex {
         max_results: usize,
     ) -> Vec<RankedHit> {
         let mut ranked = base;
+        // Hidden is a visibility preference, so remove the exact launch identity
+        // before personalization, launch-group collapse, and Top N truncation.
+        // This keeps hidden exact/alias/pinned/history candidates from consuming a
+        // slot or lending evidence to another identity in the same display group.
+        if let Some(prefs) = personalization {
+            if !prefs.hidden.is_empty() {
+                ranked.retain(|hit| !self.is_hidden_doc(hit.doc_id, &prefs.hidden));
+            }
+        }
         if let Some(prefs) = personalization {
             self.apply_personalization_boosts(&mut ranked, prefs);
         }
@@ -769,7 +778,7 @@ impl RetrievalIndex {
             let Some(doc) = self.doc(hit.doc_id) else {
                 continue;
             };
-            let demoted = self.group_is_demoted(hit.doc_id, &prefs.demoted);
+            let demoted = self.group_is_demoted(hit.doc_id, &prefs.demoted, &prefs.hidden);
             let adj =
                 preference_adjust_with_demote(prefs, &doc.item.id, hit.quality_tier, demoted);
             let base = hit.score;
@@ -797,17 +806,40 @@ impl RetrievalIndex {
         &self,
         doc_id: DocId,
         demoted: &std::collections::HashSet<String>,
+        hidden: &std::collections::HashSet<String>,
     ) -> bool {
         let members = self.group_members_of(self.group_rep_of(doc_id));
         if members.is_empty() {
             return self
                 .doc(doc_id)
-                .is_some_and(|d| demoted.contains(&d.item.id));
+                .is_some_and(|d| {
+                    !self.is_hidden_doc(doc_id, hidden) && demoted.contains(&d.item.id)
+                });
         }
         members
             .iter()
             .copied()
-            .any(|id| self.doc(id).is_some_and(|d| demoted.contains(&d.item.id)))
+            .any(|id| {
+                !self.is_hidden_doc(id, hidden)
+                    && self.doc(id).is_some_and(|d| demoted.contains(&d.item.id))
+            })
+    }
+
+    /// A hidden preference is keyed by launch identity, while groups may contain
+    /// several distinct identities.  Only an application/command source is
+    /// hideable; files, paths, web, system, and plugin results remain actionable.
+    fn is_hidden_doc(
+        &self,
+        doc_id: DocId,
+        hidden: &std::collections::HashSet<String>,
+    ) -> bool {
+        if hidden.is_empty() {
+            return false;
+        }
+        self.doc(doc_id).is_some_and(|doc| {
+            crate::model::is_hideable_application_source(&doc.item.source)
+                && hidden.contains(&doc.item.id)
+        })
     }
 
     /// 按预计算等价组折叠：组内相关性用统一比较器，启动配置固定主入口。
@@ -830,13 +862,35 @@ impl RetrievalIndex {
             members.sort_by(cmp_ranked_hit);
             let best = members[0].clone();
 
-            // 用户绑定：组内钉选成员优先，且不要求本条查询恰好召回它
-            let mut launch_doc_id = static_rep;
+            // Hidden removes one launch identity, not the whole display family.
+            // The precomputed member order is the same source priority used for
+            // the static representative, so use its first visible member when
+            // the static representative itself is hidden.
+            let has_hidden = personalization.is_some_and(|prefs| !prefs.hidden.is_empty());
+            let hidden = |id| {
+                has_hidden
+                    && personalization.is_some_and(|prefs| self.is_hidden_doc(id, &prefs.hidden))
+            };
+            let group = self.group_members_of(static_rep);
+            let visible_static_rep = if has_hidden {
+                group
+                    .iter()
+                    .copied()
+                    .find(|id| !hidden(*id))
+                    .unwrap_or(static_rep)
+            } else {
+                static_rep
+            };
+
+            // 用户绑定：组内钉选成员优先，且不要求本条查询恰好召回它。
+            // Hidden member 的 Pin 不能把已隐藏身份重新选作代表。
+            let mut launch_doc_id = visible_static_rep;
             if let Some(prefs) = personalization {
-                let group = self.group_members_of(static_rep);
                 let group_pinned = group.iter().copied().find(|id| {
-                    self.doc(*id)
-                        .is_some_and(|d| prefs.pinned.contains(&d.item.id))
+                    !self.is_hidden_doc(*id, &prefs.hidden)
+                        && self
+                            .doc(*id)
+                            .is_some_and(|d| prefs.pinned.contains(&d.item.id))
                 });
                 let hit_pinned = members
                     .iter()
@@ -849,7 +903,7 @@ impl RetrievalIndex {
 
             // 钉选落到 uninstall 时回退静态主入口
             let launch_doc_id = match self.doc(launch_doc_id) {
-                Some(d) if d.item.source == "uninstall" => static_rep,
+                Some(d) if d.item.source == "uninstall" => visible_static_rep,
                 _ => launch_doc_id,
             };
 
@@ -875,14 +929,12 @@ impl RetrievalIndex {
 
             // 图标：启动代表缓存 → 组内其他成员缓存；无缓存则保留主入口提取源
             if !rep.has_icon {
-                let group = self.group_members_of(static_rep);
                 let icon_hit = group
                     .iter()
                     .copied()
                     .chain(std::iter::once(launch_doc_id))
-                    .find(|id| {
-                        self.doc(*id).is_some_and(|d| d.item.icon.is_some())
-                    });
+                    .filter(|id| !hidden(*id))
+                    .find(|id| self.doc(*id).is_some_and(|d| d.item.icon.is_some()));
                 if let Some(icon_id) = icon_hit {
                     rep.icon_doc_id = icon_id;
                     rep.has_icon = true;
