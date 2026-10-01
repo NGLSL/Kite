@@ -4,7 +4,7 @@ Status: claimed
 Category: enhancement
 Target version: v0.5.0
 Baseline: 当前仓库 v0.4.3
-Scope: 版本功能规格；用户已授权按本规格实施并依 implement skill 在当前分支提交，不修改版本号或发布。
+Scope: 版本功能规格；实施和本地提交已完成。用户随后明确授权新增版本并发布，当前按 v0.5.0 执行发布流程；未完成的实机验收仍单独记录。
 
 ## Problem Statement
 

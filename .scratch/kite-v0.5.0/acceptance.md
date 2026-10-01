@@ -1,6 +1,6 @@
 # Kite 下一版实施验收
 
-状态：01–06 功能实现完成，07 集成验收部分通过、桌面及安装项待续。本文只记录有证据的结果；目标版本 v0.5.0 尚未修改版本号、发布或推送。
+状态：01–06 功能实现完成，07 集成验收部分通过、桌面及安装项待续。用户已进一步授权新增版本并发布，源码版本已更新为 v0.5.0；本文记录发布准备时的本地证据，线上发布状态以对应 GitHub CI/Release 记录为准，不据发布成功补勾尚未执行的实机项。
 
 ## 验收口径
 
@@ -34,14 +34,21 @@
 - 新文件 rustfmt 检查与全部 staged/worktree `git diff --check` 通过；保留未涉及区域原有格式。
 - 最终 `scripts/build-installer.ps1` 通过，包含 `cargo build --release`、官方插件 workspace 14 项测试及 NSIS 构建。实机候选运行锁曾导致一次 exe 覆盖失败，停止对应候选后重建成功；不是编译错误。
 
-## 当前产物（含插件页布局追加优化）
+## 本地 v0.5.0 产物（发布准备时）
 
 | 产物 | 字节数 | SHA-256 |
 | --- | ---: | --- |
-| `target/release/kite.exe` 与 `artifacts/kite.exe` | 10432512 | `5DA73C43E0A5A6AE212F529F89C63CFA430E96BB17EC6F3506B0A4A17242F180` |
-| `artifacts/kite-setup.exe` | 5436862 | `415E5E96C3E0ABF49DEC280D7443EC45EB0F5C1892AE2A3A52A448408DBE100E` |
+| `target/release/kite.exe` 与 `artifacts/kite.exe` | 10432512 | `73C25F380AFBAA102858AF8B9FD32FE04F9793C67D3FD44B71EF2A4B6995CBF7` |
+| `artifacts/kite-setup.exe` | 5436765 | `33530A5EE83D793549F14F9C654A87AFD0B43237B465812C3664F1FF04CC5877` |
 
-PE FileDescription / ProductName 均为 `Kite`，文件版本仍为 0.4.3。主程序与安装器打包的 exe 哈希一致，最新清单见 `artifacts/plugin-layout-artifacts.json`；`candidate-artifacts-final.json` 保留此前 D72 的历史清单。最终安装后的运行路径/哈希另行核对，不能据打包文件直接宣称安装版通过。此前 A69F/D72 的证据不改记为当前 5DA 实机证据。
+PE FileDescription / ProductName 均为 `Kite`，文件版本为 0.5.0。主程序与安装器打包的 exe 哈希一致，版本清单见 `artifacts/v050-local-release-artifacts.json`；`plugin-layout-artifacts.json`、`candidate-artifacts-final.json` 保留此前 5DA/D72 的历史清单。GitHub 发布安装器由独立 CI 环境构建，其大小及 SHA 以线上构建报告和独立下载校验为准，不混用本地哈希。最终安装后的运行路径/哈希另行核对，不能据打包文件直接宣称安装版通过。此前 A69F/D72/5DA 的证据不改记为 v0.5.0 实机证据。
+
+## 版本发布准备
+
+- 按用户明确指令发布 v0.5.0，版本与 Cargo.lock 已同步；现有功能提交先 fast-forward 到 dev，在 dev 准备版本后再将相同候选推进 main，不重写历史。
+- 版本后的 `cargo check`、全套 `cargo test`（622 passed / 11 ignored）及 `build-installer.ps1` 通过，PE 版本和名称核对一致；本轮日志为 `v050-release-check.txt`、`v050-release-tests.txt`、`v050-versioned-installer-build.txt`。
+- 维护者发布说明在 `docs/releases/v0.5.0.md`，独立只读复核升级/回退和验证措辞，无阻止发布的错误声明。
+- 仅在 main 精确候选提交的 CI 成功后创建 annotated tag；GitHub Release 由该 tag 构建，完成后独立下载安装器对比报告 SHA。线上成功不替代下面保留的 Windows 实机验收项目。
 
 ## 插件页布局追加优化
 
@@ -103,7 +110,7 @@ PE FileDescription / ProductName 均为 `Kite`，文件版本仍为 0.4.3。主�
 ## 未验证项
 
 - 最终产物的安装器实际执行、受控覆盖安装、安装后运行路径/哈希和各功能的安装版复验；Windows UAC 尚未启动。
-- 当前 5DA 二进制的稳定空闲采样及外点取消 Alias 后实际输入；已有空闲数据来自之前的 52D 候选，保存后焦点证据来自 A69F。插件页离屏预览不代替安装版窗口交互。
+- 最终 v0.5.0 二进制的稳定空闲采样及外点取消 Alias 后实际输入；已有空闲数据来自之前的 52D 候选，保存后焦点证据来自 A69F。插件页离屏预览不代替安装版窗口交互。
 - 目标缺失期间搜索中旧 EXE/LNK 身份不能再启动的实际证明；已有管理页不可用/恢复证据不能代替此项。
 - Hash / JSON 双栏长文本的真实视觉检查；Base64 已通过。
 - 多屏和不同 DPI 环境：本机仅一个 1920×1080、100% 缩放显示器，未擅自改变用户显示配置。
