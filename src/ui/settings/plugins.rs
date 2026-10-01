@@ -259,20 +259,21 @@ fn plugin_card(
     .spacing(5.0)
     .width(Length::Fill);
 
-    if !examples.is_empty() {
-        let mut chips = row![].spacing(6.0).align_y(alignment::Alignment::Center);
-        for ex in examples.iter().take(2) {
-            chips = chips.push(example_chip(ex.clone(), tokens));
-        }
-        body = body.push(chips);
+    let mut chips = row![].spacing(6.0).align_y(alignment::Alignment::Center);
+    for ex in examples.iter().take(2) {
+        chips = chips.push(example_chip(ex.clone(), tokens));
     }
 
-    // 列表只保留高频动作：说明 / 重载。目录·日志·卸载进详情页。
+    // 示例与管理动作共用一行；长示例在可用宽度内换行。
     body = body.push(
         row![
-            Space::new().width(Length::Fill),
-            ghost_button("说明".into(), Message::PluginToggleDocs(id.clone()), false, tokens),
-            ghost_button("重载".into(), Message::PluginReload(id), false, tokens),
+            chips.width(Length::Fill).wrap(),
+            row![
+                ghost_button("说明".into(), Message::PluginToggleDocs(id.clone()), false, tokens),
+                ghost_button("重载".into(), Message::PluginReload(id), false, tokens),
+            ]
+            .spacing(6.0)
+            .align_y(alignment::Alignment::Center),
         ]
         .spacing(8.0)
         .align_y(alignment::Alignment::Center)

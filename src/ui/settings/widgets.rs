@@ -162,6 +162,7 @@ pub(super) fn toggle(
         })
         .align_y(alignment::Alignment::Center),
     )
+    .padding(0)
     .on_press(on_press)
     .style(move |_t, _s| button::Style {
         background: Some(Background::Color(bg_color)),

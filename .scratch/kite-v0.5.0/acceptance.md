@@ -34,14 +34,22 @@
 - 新文件 rustfmt 检查与全部 staged/worktree `git diff --check` 通过；保留未涉及区域原有格式。
 - 最终 `scripts/build-installer.ps1` 通过，包含 `cargo build --release`、官方插件 workspace 14 项测试及 NSIS 构建。实机候选运行锁曾导致一次 exe 覆盖失败，停止对应候选后重建成功；不是编译错误。
 
-## 最终产物
+## 当前产物（含插件页布局追加优化）
 
 | 产物 | 字节数 | SHA-256 |
 | --- | ---: | --- |
-| `target/release/kite.exe` 与 `artifacts/kite.exe` | 10432512 | `D72B01AE5A5164DCBA3C36E321813CB632A7470FC31822E87219749A7961E711` |
-| `artifacts/kite-setup.exe` | 5436687 | `6DCD6F4764A7A7D90103CACBE8198ADF2B0DA1899BC0061D902C52E4B71EBD7E` |
+| `target/release/kite.exe` 与 `artifacts/kite.exe` | 10432512 | `5DA73C43E0A5A6AE212F529F89C63CFA430E96BB17EC6F3506B0A4A17242F180` |
+| `artifacts/kite-setup.exe` | 5436862 | `415E5E96C3E0ABF49DEC280D7443EC45EB0F5C1892AE2A3A52A448408DBE100E` |
 
-PE FileDescription / ProductName 均为 `Kite`，文件版本仍为 0.4.3。主程序与安装器打包的 exe 哈希一致，清单见 `candidate-artifacts-final.json`；最终安装后的运行路径/哈希另行核对，不能据打包文件直接宣称安装版通过。此前 A69F 运行证据不改记为最终 D72 实机证据。
+PE FileDescription / ProductName 均为 `Kite`，文件版本仍为 0.4.3。主程序与安装器打包的 exe 哈希一致，最新清单见 `artifacts/plugin-layout-artifacts.json`；`candidate-artifacts-final.json` 保留此前 D72 的历史清单。最终安装后的运行路径/哈希另行核对，不能据打包文件直接宣称安装版通过。此前 A69F/D72 的证据不改记为当前 5DA 实机证据。
+
+## 插件页布局追加优化
+
+- 用户截图中开关实为 60×32，原因是 40×22 内部控件叠加 Iced Button 默认 padding；显式 `.padding(0)` 后恢复 40×22，共用设置开关保持一致。
+- 插件卡片的示例与「说明 / 重载」并为同一底行，取消管理动作独占行。长示例在留给示例的宽度内换行，管理按钮保持独立宽度；动作消息和插件执行流程不变。
+- 用实际 `settings_view`、官方插件 manifest、系统 Noto Sans SC 字体及 tiny-skia Headless 渲染器，按截图相同的 718×518 尺寸生成深浅色预览并人工检查。每张官方卡片从 139.1 px 降为 101.2 px，减少约 27%；三张卡片完整显示，下方维护区可见。另检查长中英文示例自动分行且按钮无裁切。
+- 证据保留于 `artifacts/`：`plugin-layout-before.txt`、`plugin-layout-after.txt`、`plugin-layout-long.txt`、`plugin-layout-after-dark.png`、`plugin-layout-after-light.png`、`plugin-layout-long-dark.png` 和 `plugin-layout-long-light.png`。这是原生代码的离屏渲染，未称实际安装窗口截图；临时采证模块已移除，不增加产品依赖或永久测试。
+- `cargo check`、97 项 UI 回归、最终全套 622 passed / 11 ignored 均通过；`build-installer.ps1` 再次完成 release、14 项官方插件测试与 NSIS，最新安装器 5436862 字节。没有覆盖当前用户安装或执行安装器，没有推送/发布。
 
 ## Standards
 
@@ -95,7 +103,7 @@ PE FileDescription / ProductName 均为 `Kite`，文件版本仍为 0.4.3。主�
 ## 未验证项
 
 - 最终产物的安装器实际执行、受控覆盖安装、安装后运行路径/哈希和各功能的安装版复验；Windows UAC 尚未启动。
-- 最终 D72 二进制的稳定空闲采样及外点取消 Alias 后实际输入；已有空闲数据来自之前的 52D 候选，保存后焦点证据来自 A69F。
+- 当前 5DA 二进制的稳定空闲采样及外点取消 Alias 后实际输入；已有空闲数据来自之前的 52D 候选，保存后焦点证据来自 A69F。插件页离屏预览不代替安装版窗口交互。
 - 目标缺失期间搜索中旧 EXE/LNK 身份不能再启动的实际证明；已有管理页不可用/恢复证据不能代替此项。
 - Hash / JSON 双栏长文本的真实视觉检查；Base64 已通过。
 - 多屏和不同 DPI 环境：本机仅一个 1920×1080、100% 缩放显示器，未擅自改变用户显示配置。
