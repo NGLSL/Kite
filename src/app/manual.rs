@@ -131,6 +131,12 @@ mod tests {
         dir
     }
 
+    fn canonical_fixture_path(path: &Path) -> PathBuf {
+        let canonical = std::fs::canonicalize(path).unwrap();
+        let canonical = canonical.to_string_lossy();
+        PathBuf::from(canonical.strip_prefix(r"\\?\").unwrap_or(&canonical))
+    }
+
     #[test]
     fn validates_exe_and_uses_stem_when_name_is_empty() {
         let dir = temp_dir("exe");
@@ -228,7 +234,7 @@ mod tests {
 
     #[test]
     fn validates_real_lnk_metadata_and_recomputes_identity_after_retarget() {
-        let dir = temp_dir("real-lnk");
+        let dir = canonical_fixture_path(&temp_dir("real-lnk"));
         let first_target = dir.join("first-target.exe");
         let second_target = dir.join("second-target.exe");
         let first_cwd = dir.join("first-cwd");
