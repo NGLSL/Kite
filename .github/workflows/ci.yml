@@ -6,12 +6,33 @@ on:
 jobs:
   check:
     runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: Kite
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: Kite
+      - name: Read Loci engine revision
+        shell: pwsh
+        run: |
+          $revision = (Get-Content scripts/loci-revision.txt -Raw).Trim()
+          if ($revision -notmatch '^[0-9a-f]{40}$') { throw 'Invalid Loci revision' }
+          "LOCI_REVISION=$revision" >> $env:GITHUB_ENV
+      - name: Checkout Loci engine
+        uses: actions/checkout@v4
+        with:
+          repository: NGLSL/Loci
+          ref: ${{ env.LOCI_REVISION }}
+          path: Loci
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.0
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: .
+          workspaces: |
+            Kite -> target
+            Kite/official-plugins -> target
       - name: Build official plugins
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-official-plugins.ps1
       - name: Rust tests

@@ -52,11 +52,11 @@ fn poc_theme(state: &State, _window: window::Id) -> Option<Theme> {
     }
 }
 
-/// 定位 resources（含 Everything64.dll / open.wav）。
+/// 定位 resources（含 open.wav / official-plugins）。
 fn resource_dir() -> Option<PathBuf> {
     if let Ok(env) = std::env::var("KITE_POC_RESOURCES") {
         let p = PathBuf::from(env);
-        if p.join("Everything64.dll").exists() || p.join("open.wav").exists() {
+        if p.join("open.wav").is_file() || p.join("official-plugins").is_dir() {
             return Some(p);
         }
     }
@@ -68,7 +68,7 @@ fn resource_dir() -> Option<PathBuf> {
         exe_dir.join("../../../resources"),
     ]
     .into_iter()
-    .find(|p| p.join("Everything64.dll").exists() || p.join("open.wav").exists())
+    .find(|p| p.join("open.wav").is_file() || p.join("official-plugins").is_dir())
 }
 
 fn boot_entry() -> (State, Task<Message>) {
@@ -351,9 +351,9 @@ fn spawn_index_builders(
 fn init_resources() {
     if let Some(rd) = resource_dir() {
         system::resources::init(rd);
-        plog("resources initialized (Everything64.dll located)");
+        plog("resources initialized");
     } else {
-        plog("resources dir not found; file search disabled");
+        plog("resources dir not found; bundled sound and plugins unavailable");
     }
 }
 
@@ -441,8 +441,9 @@ fn build_state(
         index_ready,
         rescan_pending: false,
         files_mode: false,
-        file_filter: system::everything::FileFilter::All,
+        file_filter: system::file_filter::FileFilter::All,
         file_query_generation: 0,
+        file_search_worker: std::sync::Arc::new(results::FileSearchWorker::spawn()),
         file_results: Vec::new(),
         direct_path_generation: 0,
         direct_path_latest: Default::default(),

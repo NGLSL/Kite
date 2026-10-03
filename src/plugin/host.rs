@@ -11,8 +11,8 @@ use super::manifest::PLUGIN_API_V1;
 use super::panel::PanelData;
 use super::process::{PluginProcess, ProcessBackend};
 use super::protocol::{
-    parse_host_call, parse_query_result, plugin_execute, plugin_initialize, plugin_query,
-    HostCall, QueryResult,
+    parse_host_call, parse_query_result, plugin_execute, plugin_initialize, plugin_query, HostCall,
+    QueryResult,
 };
 use super::registry::{PluginRegistry, RuntimePhase};
 
@@ -274,7 +274,9 @@ impl PluginHost {
         // crash loop 抑制
         if let Some(entry) = self.entries.get_mut(plugin_id) {
             let now = Instant::now();
-            entry.crashes.retain(|t| now.duration_since(*t) < CRASH_LOOP_WINDOW);
+            entry
+                .crashes
+                .retain(|t| now.duration_since(*t) < CRASH_LOOP_WINDOW);
             if entry.crashes.len() >= CRASH_LOOP_THRESHOLD {
                 entry.state = PluginRuntimeState::Faulted {
                     reason: "crash loop".into(),
@@ -319,16 +321,14 @@ impl PluginHost {
             entry.process = None;
             entry.state = PluginRuntimeState::Dormant;
         }
-        if entry.state == PluginRuntimeState::Disabled || entry.state == PluginRuntimeState::Incompatible
+        if entry.state == PluginRuntimeState::Disabled
+            || entry.state == PluginRuntimeState::Incompatible
         {
             return Err(HostError::Disabled(plugin_id.to_string()));
         }
 
         entry.state = PluginRuntimeState::Starting;
-        match self
-            .backend
-            .spawn(plugin_id, &command, &args, &workdir)
-        {
+        match self.backend.spawn(plugin_id, &command, &args, &workdir) {
             Ok(mut proc) => {
                 let data_dir = self
                     .data_dir
@@ -343,19 +343,19 @@ impl PluginHost {
                 let body = String::from_utf8_lossy(&body).to_string();
                 // strip framing - send_frame wants body? send full frame via encode
                 // PluginProcess::send_frame expects body JSON; Stdio encodes frame
-                let init_json = serde_json::to_string(&init).map_err(|e| HostError::Protocol(e.to_string()))?;
+                let init_json =
+                    serde_json::to_string(&init).map_err(|e| HostError::Protocol(e.to_string()))?;
                 proc.send_frame(&init_json).map_err(|e| {
                     if let Some(ent) = self.entries.get_mut(plugin_id) {
                         ent.crashes.push(Instant::now());
-                        ent.state = PluginRuntimeState::Faulted {
-                            reason: e.clone(),
-                        };
+                        ent.state = PluginRuntimeState::Faulted { reason: e.clone() };
                     }
                     HostError::Spawn(e)
                 })?;
                 let _ = body;
                 // 读 initialize 响应（允许短等待循环）
-                let deadline = Instant::now() + Duration::from_millis(startup_timeout.min(INITIALIZE_HARD_TIMEOUT_MS));
+                let deadline = Instant::now()
+                    + Duration::from_millis(startup_timeout.min(INITIALIZE_HARD_TIMEOUT_MS));
                 let mut init_ok = false;
                 let mut protocol_err = None;
                 while Instant::now() < deadline {
@@ -366,8 +366,7 @@ impl PluginHost {
                                     if msg.get("result").is_some() {
                                         init_ok = true;
                                     } else if msg.get("error").is_some() {
-                                        protocol_err =
-                                            Some(msg["error"].to_string());
+                                        protocol_err = Some(msg["error"].to_string());
                                     }
                                     break;
                                 }
@@ -407,9 +406,7 @@ impl PluginHost {
             }
             Err(e) => {
                 if let Some(ent) = self.entries.get_mut(plugin_id) {
-                    ent.state = PluginRuntimeState::Faulted {
-                        reason: e.clone(),
-                    };
+                    ent.state = PluginRuntimeState::Faulted { reason: e.clone() };
                 }
                 Err(HostError::Spawn(e))
             }
@@ -458,9 +455,7 @@ impl PluginHost {
                     p.kill();
                 }
                 ent.process = None;
-                ent.state = PluginRuntimeState::Faulted {
-                    reason: e.clone(),
-                };
+                ent.state = PluginRuntimeState::Faulted { reason: e.clone() };
             }
             HostError::Spawn(e)
         })?;
@@ -488,9 +483,7 @@ impl PluginHost {
                     if let Some(ent) = self.entries.get_mut(&activation.plugin_id) {
                         ent.crashes.push(Instant::now());
                         ent.process = None;
-                        ent.state = PluginRuntimeState::Faulted {
-                            reason: e.clone(),
-                        };
+                        ent.state = PluginRuntimeState::Faulted { reason: e.clone() };
                     }
                     HostError::Spawn(e)
                 })?
@@ -500,15 +493,14 @@ impl PluginHost {
                     if let Ok(msg) = serde_json::from_str::<Value>(&body) {
                         if let Some((reply_id, call)) = host_call_from_msg(&msg) {
                             {
-                                let entry = self
-                                    .entries
-                                    .get_mut(&activation.plugin_id)
-                                    .ok_or_else(|| {
-                                        HostError::PluginNotFound(activation.plugin_id.clone())
-                                    })?;
-                                let proc = entry.process.as_mut().ok_or_else(|| {
-                                    HostError::Spawn("no process".into())
-                                })?;
+                                let entry =
+                                    self.entries.get_mut(&activation.plugin_id).ok_or_else(
+                                        || HostError::PluginNotFound(activation.plugin_id.clone()),
+                                    )?;
+                                let proc = entry
+                                    .process
+                                    .as_mut()
+                                    .ok_or_else(|| HostError::Spawn("no process".into()))?;
                                 Self::reply_host_call(proc, reply_id);
                             }
                             self.note_host_call(&activation.plugin_id, call);
@@ -592,9 +584,7 @@ impl PluginHost {
                     p.kill();
                 }
                 ent.process = None;
-                ent.state = PluginRuntimeState::Faulted {
-                    reason: e.clone(),
-                };
+                ent.state = PluginRuntimeState::Faulted { reason: e.clone() };
             }
             HostError::Spawn(e)
         })?;
@@ -614,9 +604,7 @@ impl PluginHost {
                     if let Some(ent) = self.entries.get_mut(plugin_id) {
                         ent.crashes.push(Instant::now());
                         ent.process = None;
-                        ent.state = PluginRuntimeState::Faulted {
-                            reason: e.clone(),
-                        };
+                        ent.state = PluginRuntimeState::Faulted { reason: e.clone() };
                     }
                     HostError::Spawn(e)
                 })?
@@ -628,12 +616,11 @@ impl PluginHost {
                             let entry = self
                                 .entries
                                 .get_mut(plugin_id)
-                                .ok_or_else(|| {
-                                    HostError::PluginNotFound(plugin_id.to_string())
-                                })?;
-                            let proc = entry.process.as_mut().ok_or_else(|| {
-                                HostError::Spawn("no process".into())
-                            })?;
+                                .ok_or_else(|| HostError::PluginNotFound(plugin_id.to_string()))?;
+                            let proc = entry
+                                .process
+                                .as_mut()
+                                .ok_or_else(|| HostError::Spawn("no process".into()))?;
                             Self::reply_host_call(proc, reply_id);
                         }
                         self.note_host_call(plugin_id, call);
@@ -716,7 +703,7 @@ pub fn list_item_to_search_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::activation::{route_query, Trigger, ResponseMode};
+    use crate::plugin::activation::{route_query, ResponseMode, Trigger};
     use crate::plugin::manifest::{
         CommandAction, Compatibility, Contributions, PluginCommand, PluginIdentity, PluginManifest,
         PluginProvider, RuntimeSpec,
@@ -799,13 +786,19 @@ mod tests {
 
         // 普通搜索不 spawn：尚未 query
         assert_eq!(host.spawn_count("com.kite.calculator"), 0);
-        assert_eq!(host.state("com.kite.calculator"), PluginRuntimeState::Dormant);
+        assert_eq!(
+            host.state("com.kite.calculator"),
+            PluginRuntimeState::Dormant
+        );
 
         let gen = host.current_generation;
         let out = host.query(&reg, &act, gen).expect("query");
         match out {
             QueryOutcome::Panel { panel, .. } => {
-                assert_eq!(panel.default_native_action(), Some(NativeAction::CopyText("3".into())));
+                assert_eq!(
+                    panel.default_native_action(),
+                    Some(NativeAction::CopyText("3".into()))
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -816,7 +809,10 @@ mod tests {
         let out2 = host.query(&reg, &act2, gen).expect("q2");
         match out2 {
             QueryOutcome::Panel { panel, .. } => {
-                assert_eq!(panel.default_native_action(), Some(NativeAction::CopyText("6".into())));
+                assert_eq!(
+                    panel.default_native_action(),
+                    Some(NativeAction::CopyText("6".into()))
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -842,7 +838,10 @@ mod tests {
         let (host, _) = host_mem();
         assert!(route_query("chrome", &reg).is_none());
         assert_eq!(host.spawn_count("com.kite.calculator"), 0);
-        assert_eq!(host.state("com.kite.calculator"), PluginRuntimeState::Dormant);
+        assert_eq!(
+            host.state("com.kite.calculator"),
+            PluginRuntimeState::Dormant
+        );
     }
 
     #[test]
@@ -891,7 +890,10 @@ mod tests {
         // 至少 host 未 panic
         assert!(matches!(
             host.state("com.kite.calculator"),
-            PluginRuntimeState::Ready | PluginRuntimeState::Faulted { .. } | PluginRuntimeState::Dormant | PluginRuntimeState::Starting
+            PluginRuntimeState::Ready
+                | PluginRuntimeState::Faulted { .. }
+                | PluginRuntimeState::Dormant
+                | PluginRuntimeState::Starting
         ));
     }
 
@@ -909,7 +911,15 @@ mod tests {
         ));
         // 再次查询可尝试重启（非 crash loop 时）
         let out = host.query(&reg, &act, 0);
-        assert!(out.is_ok() || matches!(out, Err(HostError::CrashLoop(_)) | Err(HostError::Spawn(_)) | Err(HostError::Timeout(_))));
+        assert!(
+            out.is_ok()
+                || matches!(
+                    out,
+                    Err(HostError::CrashLoop(_))
+                        | Err(HostError::Spawn(_))
+                        | Err(HostError::Timeout(_))
+                )
+        );
     }
 
     #[test]
@@ -937,7 +947,10 @@ mod tests {
             e.idle_timeout_ms = 15_000;
         }
         host.idle_sweep();
-        assert_eq!(host.state("com.kite.calculator"), PluginRuntimeState::Dormant);
+        assert_eq!(
+            host.state("com.kite.calculator"),
+            PluginRuntimeState::Dormant
+        );
         assert!(!proc.lock().unwrap().alive);
     }
 
@@ -992,7 +1005,9 @@ mod tests {
         assert!(out.is_ok(), "{out:?}");
         let calls = host.drain_host_calls();
         assert!(
-            calls.iter().any(|(_, c)| matches!(c, HostCall::ClipboardWrite(t) if t == "copied")),
+            calls
+                .iter()
+                .any(|(_, c)| matches!(c, HostCall::ClipboardWrite(t) if t == "copied")),
             "{calls:?}"
         );
         assert!(
@@ -1020,7 +1035,10 @@ mod tests {
             }),
         };
         let hit = list_item_to_search_result("com.kite.window-switcher", "switch", &item);
-        assert!(matches!(hit.source, crate::model::ResultSource::Plugin { .. }));
+        assert!(matches!(
+            hit.source,
+            crate::model::ResultSource::Plugin { .. }
+        ));
         match hit.action {
             crate::model::ResultAction::Plugin { action_id, .. } => {
                 assert_eq!(action_id, "activate_window");
@@ -1058,12 +1076,16 @@ mod tests {
                         PluginProvider {
                             id: "uuid".into(),
                             response_mode: "panel".into(),
-                            triggers: vec![Trigger::Keyword { value: "uuid".into() }],
+                            triggers: vec![Trigger::Keyword {
+                                value: "uuid".into(),
+                            }],
                         },
                         PluginProvider {
                             id: "hash".into(),
                             response_mode: "panel".into(),
-                            triggers: vec![Trigger::Keyword { value: "hash".into() }],
+                            triggers: vec![Trigger::Keyword {
+                                value: "hash".into(),
+                            }],
                         },
                     ],
                 },
@@ -1140,6 +1162,7 @@ mod tests {
             "com.kite.calculator",
             "com.kite.devtools",
             "com.kite.window-switcher",
+            "com.kite.loci",
         ] {
             let p = registry
                 .get_mut(id)
@@ -1160,6 +1183,7 @@ mod tests {
             ("com.kite.calculator", "calculate", "1+2"),
             ("com.kite.devtools", "uuid", ""),
             ("com.kite.window-switcher", "switch", ""),
+            ("com.kite.loci", "files", ""),
         ];
         for (plugin_id, provider_id, q) in cases {
             let act = Activation {
@@ -1188,6 +1212,114 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore = "requires installed, running LociIndex service and rebuilt official Loci plugin"]
+    fn loci_service_drives_ordinary_file_search_filters_and_native_rename() {
+        use crate::system::file_filter::FileFilter;
+        use std::sync::{Arc, Mutex};
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources/official-plugins/com.kite.loci");
+        assert!(
+            source.join("kite-plugin-loci.exe").is_file(),
+            "build official plugins first"
+        );
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "kite-loci-service-host-{}-{unique}",
+            std::process::id()
+        ));
+        let root = dir.join("selected R&D 100%");
+        std::fs::create_dir_all(&root).unwrap();
+        for index in 0..60 {
+            std::fs::write(root.join(format!("a-document-{index:03}.txt")), "fixture").unwrap();
+        }
+        std::fs::write(root.join("z-image.png"), "fixture").unwrap();
+        std::fs::write(root.join("status.txt"), "fixture").unwrap();
+        let plugins = dir.join("plugins");
+        crate::plugin::install::import_plugin_dir(&source, &plugins).unwrap();
+        let mut registry = super::super::registry::load_registry_from_dir(&plugins);
+        let plugin = registry.get_mut("com.kite.loci").unwrap();
+        plugin.enabled = true;
+        plugin.phase = RuntimePhase::Dormant;
+        let registry = Arc::new(Mutex::new(registry));
+        let data_dir = dir.join("data");
+        let host = Arc::new(Mutex::new(PluginHost::new(
+            Box::new(super::super::process::StdioBackend::new(data_dir.clone())),
+            data_dir,
+            env!("CARGO_PKG_VERSION"),
+        )));
+        let search = |text: &str, filter: FileFilter| {
+            crate::ui::build_file_results(text, &dir.join("icons"), filter, &registry, &host)
+        };
+        let wait_file = |text: &str, filter: FileFilter, expected: &str| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let results = search(text, filter);
+                if let Some(result) = results
+                    .iter()
+                    .find(|result| result.item.display_name == expected)
+                {
+                    assert_eq!(result.item.source, "loci");
+                    assert_eq!(
+                        result.action,
+                        crate::model::ResultAction::OpenFile {
+                            path: root.join(expected).to_string_lossy().into_owned()
+                        }
+                    );
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "running service did not find {expected}: {results:?}"
+                );
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        };
+        // More than 50 other matching paths precede this image: filtering must happen in
+        // the service before Top-N, not after plugin/host truncation.
+        wait_file(&root.to_string_lossy(), FileFilter::Images, "z-image.png");
+        wait_file(
+            &root.join("status.txt").to_string_lossy(),
+            FileFilter::Documents,
+            "status.txt",
+        );
+        std::fs::rename(root.join("status.txt"), root.join("renamed.txt")).unwrap();
+        wait_file(
+            &root.join("renamed.txt").to_string_lossy(),
+            FileFilter::Documents,
+            "renamed.txt",
+        );
+        assert!(
+            !search(&root.join("status.txt").to_string_lossy(), FileFilter::All)
+                .iter()
+                .any(|result| result.item.display_name == "status.txt")
+        );
+        assert_eq!(
+            host.lock().unwrap().spawn_count("com.kite.loci"),
+            1,
+            "ordinary searches share one plugin process"
+        );
+        drop(host);
+        assert!(dir.starts_with(std::env::temp_dir()));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::PermissionDenied
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                Err(error) => panic!("plugin fixture cleanup failed: {error}"),
+            }
+        }
     }
 
     #[test]
@@ -1227,7 +1359,9 @@ mod tests {
                     providers: vec![PluginProvider {
                         id: "switch".into(),
                         response_mode: "list".into(),
-                        triggers: vec![Trigger::Keyword { value: "win".into() }],
+                        triggers: vec![Trigger::Keyword {
+                            value: "win".into(),
+                        }],
                     }],
                 },
             },
@@ -1244,10 +1378,15 @@ mod tests {
         let mut host = PluginHost::new(Box::new(backend), PathBuf::from("d"), "0.3.0");
         let act = route_query("win kite", &reg).unwrap();
         match host.query(&reg, &act, 1).expect("list") {
-            QueryOutcome::List { items, plugin_id, .. } => {
+            QueryOutcome::List {
+                items, plugin_id, ..
+            } => {
                 assert!(!items.is_empty());
                 let hit = list_item_to_search_result(&plugin_id, &act.provider_id, &items[0]);
-                assert!(matches!(hit.action, crate::model::ResultAction::Plugin { .. }));
+                assert!(matches!(
+                    hit.action,
+                    crate::model::ResultAction::Plugin { .. }
+                ));
             }
             other => panic!("{other:?}"),
         }

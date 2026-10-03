@@ -5,6 +5,7 @@ members = [
     "calculator",
     "window-switcher",
     "devtools",
+    "loci",
 ]
 
 [workspace.package]

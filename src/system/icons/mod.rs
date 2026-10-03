@@ -360,7 +360,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn cache_shell_namespace_icon() {
         let dir = std::env::temp_dir().join(format!("kite-shell-icon-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -394,7 +393,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn transparent_cached_icon_is_rebuilt() {
         let dir = std::env::temp_dir().join(format!("kite-bad-icon-cache-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -478,7 +476,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn control_panel_shell_icon_matches_windows_control_panel_resource() {
         let dir =
             std::env::temp_dir().join(format!("kite-control-panel-icon-{}", std::process::id()));

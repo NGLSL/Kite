@@ -1361,7 +1361,7 @@ Kite 启动
 搜索启动器稳定后再考虑：
 
 ```text
-Everything 文件搜索
+Loci 后台服务文件搜索
 文件夹启动
 URL
 网页搜索
@@ -1373,25 +1373,13 @@ URL
 
 ---
 
-# 53. Everything
+# 53. Loci 文件搜索
 
-文件搜索不要自行重新实现 NTFS 全盘索引。
+LociIndex 独立 Windows 服务以 LocalSystem 索引固定 NTFS 卷；安装／启用由管理员授权，正常 Kite 保持普通权限。普通文件模式、显式 `loci` 插件和独立 CLI 通过只读本机 named pipe 查询同一索引；插件不配置目录、不自建索引。`loci status` 显示服务状态及安装指引。
 
-优先评估：
+NTFS 后端采用 MFT 全卷对象枚举、目录批次名称／硬链接补齐、USN 增量和原子 checkpoint。NTFS 内部元数据及精确 `%ProgramData%\Loci` 子树排除。原有目录验证引擎的 4096 条目限制不作为全盘服务产品上限。
 
-```text
-Everything IPC / SDK
-```
-
-Kite 只负责：
-
-```text
-Query
-↓
-调用 Everything
-↓
-统一 Ranking / 展示
-```
+百万合成库已有运行证据；真实服务安装、全卷／真实百万文件、长期运行及普通权限查询还须验证，不能宣称性能已经对齐 Everything。当前 JSON 输出跳过无法安全表示的 UTF-16 名称，保留索引身份并报告结果不完整，不能有损转换后打开错误路径。
 
 ---
 

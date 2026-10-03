@@ -1,4 +1,4 @@
-//! 捆绑资源定位（Everything64.dll / open.wav 等共用）。
+//! 捆绑资源定位（open.wav 等）。
 //! 统一查找顺序，新增捆绑文件只需一个名字，不再各写一套 candidates。
 
 use std::path::PathBuf;
@@ -46,7 +46,6 @@ mod tests {
     #[test]
     fn bundled_files_locatable() {
         init(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-        assert!(locate("Everything64.dll").is_some(), "DLL 应可定位");
         assert!(locate("open.wav").is_some(), "音效应可定位");
         assert!(locate("no-such-bundled.bin").is_none());
     }

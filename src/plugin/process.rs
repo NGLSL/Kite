@@ -54,7 +54,6 @@ impl ProcessBackend for StdioBackend {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         // GUI 宿主拉起控制台子进程：隐藏窗口，避免闪烁/焦点抢夺。
-        #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;

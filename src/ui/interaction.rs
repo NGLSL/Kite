@@ -66,6 +66,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
         | Message::PluginHostCall(..)
         | Message::PluginSetEnabled(..)
         | Message::PluginReload(..)
+        | Message::PluginManagementReady(..)
         | Message::PluginOpenDir(..)
         | Message::PluginOpenLog(..)
         | Message::PluginUninstall(..)
@@ -139,7 +140,12 @@ pub(super) fn apply_plugin_import_results(
     for r in results {
         match r {
             Ok(out) => {
-                super::with_plugin_host(state, |host| host.reload(&out.plugin_id));
+                super::update_plugins::reload_plugin_in_background(
+                    state,
+                    out.plugin_id.clone(),
+                    "重新加载",
+                    Ok(()),
+                );
                 let reg_result = super::with_plugin_registry(state, |reg| {
                     plugin::apply_import_to_registry(reg, &out.dest)
                 });

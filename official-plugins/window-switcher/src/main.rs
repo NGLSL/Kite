@@ -55,34 +55,19 @@ fn enum_windows_or_mock() -> Vec<(i64, String)> {
 }
 
 fn enum_windows() -> Vec<(i64, String)> {
-    #[cfg(windows)]
-    {
-        windows_enum::enum_visible()
-    }
-    #[cfg(not(windows))]
-    {
-        Vec::new()
-    }
+    windows_enum::enum_visible()
 }
 
 fn activate_window(payload: &Value) -> Value {
     let Some(hwnd) = payload.get("hwnd").and_then(|v| v.as_i64()) else {
         return json!({"ok": false, "reason": "missing hwnd"});
     };
-    #[cfg(windows)]
-    {
-        if windows_enum::activate(hwnd) {
-            return json!({"ok": true, "hwnd": hwnd});
-        }
-        return json!({"ok": false, "reason": "activate failed"});
+    if windows_enum::activate(hwnd) {
+        return json!({"ok": true, "hwnd": hwnd});
     }
-    #[cfg(not(windows))]
-    {
-        json!({"ok": false, "reason": "no win32 window", "hwnd": hwnd})
-    }
+    json!({"ok": false, "reason": "activate failed"})
 }
 
-#[cfg(windows)]
 mod windows_enum {
     use windows::core::BOOL;
     use windows::Win32::Foundation::{HWND, LPARAM, TRUE};

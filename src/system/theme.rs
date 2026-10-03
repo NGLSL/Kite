@@ -2,9 +2,8 @@
 //! 仅在 Windows 平台通过系统注册表轻量读取，无多余外部依赖。
 
 /// 读取 Windows 注册表判断当前系统是否为深色模式（AppsUseLightTheme == 0）。
-/// 若键不存在或非 Windows 平台，安全回退到深色模式（true）。
+/// 若键不存在，安全回退到深色模式（true）。
 pub fn is_windows_dark_mode() -> bool {
-    #[cfg(windows)]
     {
         use windows::core::w;
         use windows::Win32::System::Registry::{

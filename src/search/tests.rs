@@ -1156,7 +1156,7 @@
         assert!(is_path_formal_source("manual"));
         assert!(!is_path_formal_source("uwp"));
         assert!(is_hideable_application_source("manual"));
-        assert!(!is_hideable_application_source("everything"));
+        assert!(!is_hideable_application_source("loci"));
         assert!(!is_hideable_application_source("direct-path"));
     }
 

@@ -8,11 +8,27 @@ jobs:
     permissions:
       contents: write
     runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: Kite
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           fetch-tags: true
+          path: Kite
+      - name: Read Loci engine revision
+        shell: pwsh
+        run: |
+          $revision = (Get-Content scripts/loci-revision.txt -Raw).Trim()
+          if ($revision -notmatch '^[0-9a-f]{40}$') { throw 'Invalid Loci revision' }
+          "LOCI_REVISION=$revision" >> $env:GITHUB_ENV
+      - name: Checkout Loci engine
+        uses: actions/checkout@v4
+        with:
+          repository: NGLSL/Loci
+          ref: ${{ env.LOCI_REVISION }}
+          path: Loci
       - name: Verify tag commit is on main
         shell: pwsh
         run: |
@@ -45,9 +61,13 @@ jobs:
             throw "Tag commit $tagCommit has no successful CI run. Push main, wait for ci.yml to pass, then tag that commit."
           }
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.0
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: .
+          workspaces: |
+            Kite -> target
+            Kite/official-plugins -> target
       - name: Install NSIS
         run: choco install nsis -y
       - name: Build official plugins
@@ -63,5 +83,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/kite-setup.exe
-          body_path: release-body.md
+            Kite/artifacts/kite-setup.exe
+          body_path: Kite/release-body.md

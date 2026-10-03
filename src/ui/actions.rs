@@ -61,7 +61,7 @@ pub(super) fn is_app_entry(item: &AppItem) -> bool {
 /// narrower application-source check above, while file, web and plugin
 /// results may still carry their existing preference actions.
 fn can_personalize_entry(item: &AppItem) -> bool {
-    item.source != "everything-status" && item.source != "direct-path"
+    item.source != "loci-status" && item.source != "direct-path"
 }
 
 fn resolve_from_index(state: &State, captured: &AppItem) -> Option<AppItem> {
@@ -547,7 +547,7 @@ pub(super) fn on_key(
                     return focus(search_view::input_id());
                 } else if state.files_mode {
                     state.files_mode = false;
-                    state.file_filter = system::everything::FileFilter::All;
+                    state.file_filter = system::file_filter::FileFilter::All;
                     state.request_file_search();
                     state.refresh_results();
                     return Task::batch([sync_scroll(state), focus(search_view::input_id())]);
@@ -889,7 +889,7 @@ pub(super) fn exec_result_action(
             if item.id == "kite:action:files" {
                 state.files_mode = !state.files_mode;
                 if !state.files_mode {
-                    state.file_filter = system::everything::FileFilter::All;
+                    state.file_filter = system::file_filter::FileFilter::All;
                 }
                 state.request_file_search();
                 state.refresh_results();
@@ -899,17 +899,13 @@ pub(super) fn exec_result_action(
             if item.id == super::json_tool::CONFIRM_RESULT_ID {
                 return super::tools::confirm_open(state);
             }
-            if let Some(url) = everything_download_url(&item.id) {
-                let result = app::uwp::launch_shell_path(url);
-                state.qlog(|| format!("open Everything download err={result:?}"));
-                return if result.is_ok() {
-                    launch_and_hide(state)
-                } else {
-                    flash(state, "无法打开 Everything 官方下载页")
-                };
-            }
-            if item.id == system::everything::NOT_RUNNING_RESULT_ID {
-                return flash(state, "请先启动 Everything，再使用文件搜索");
+            if item.id == "loci:configure" {
+                return exec_plugin_action(
+                    state,
+                    "com.kite.loci",
+                    "enter_provider",
+                    serde_json::json!({"provider": "files"}),
+                );
             }
             if let Some((kind, browser_id, payload)) = app::web::parse_id(&item.id) {
                 let t0 = Instant::now();
@@ -1053,6 +1049,7 @@ fn exec_plugin_action(
                 true,
             );
         }
+        prepare_loci_provider(state, plugin_id);
         state.provider_mode = Some(act);
         state.plugin_panel = None;
         state.refresh_results();
@@ -1117,6 +1114,7 @@ fn exec_plugin_action(
                     false,
                 );
             }
+            prepare_loci_provider(state, plugin_id);
             state.provider_mode = Some(act.clone());
             state.plugin_panel = None;
             state.navigation_mode = NavigationMode::Input;
@@ -1130,6 +1128,8 @@ fn exec_plugin_action(
                 )
             });
             state.refresh_results();
+        } else if plugin_id == "com.kite.loci" {
+            return flash(state, "请在设置的插件页安装并启用 Loci，再使用文件搜索");
         }
         return focus(search_view::input_id());
     }
@@ -1141,8 +1141,20 @@ fn exec_plugin_action(
     let aid = action_id.to_string();
     std::thread::spawn(move || {
         let host_calls = {
-            let reg = registry.lock().unwrap_or_else(|e| e.into_inner());
             let mut host = host.lock().unwrap_or_else(|e| e.into_inner());
+            // Recheck after waiting for an in-flight RPC: settings may have
+            // disabled, removed or replaced the plugin while this action waited.
+            let plugin = registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&pid)
+                .filter(|plugin| plugin.enabled)
+                .cloned();
+            let Some(plugin) = plugin else {
+                return;
+            };
+            let mut reg = plugin::PluginRegistry::new();
+            reg.insert_loaded(plugin);
             let _ = host.execute(&reg, &pid, &aid, payload);
             host.drain_host_calls()
         };
@@ -1153,24 +1165,109 @@ fn exec_plugin_action(
     Task::none()
 }
 
-fn everything_download_url(item_id: &str) -> Option<&'static str> {
-    (item_id == system::everything::DOWNLOAD_RESULT_ID).then_some(system::everything::DOWNLOAD_URL)
+fn prepare_loci_provider(state: &mut State, plugin_id: &str) {
+    if plugin_id == "com.kite.loci" {
+        state.files_mode = false;
+        state.file_filter = system::file_filter::FileFilter::All;
+        state.file_query_generation = state.file_query_generation.wrapping_add(1);
+        state.file_search_worker.cancel_current();
+        state.file_results.clear();
+    }
 }
 
 #[cfg(test)]
-mod everything_action_tests {
+mod loci_action_tests {
+    use super::super::test_support::test_state;
     use super::*;
 
+    fn configure_state(enabled: Option<bool>) -> State {
+        let mut state = test_state("report");
+        state.files_mode = true;
+        state.file_filter = system::file_filter::FileFilter::Documents;
+        state.results = vec![SearchResult::scored(
+            AppItem::scanned(
+                "loci:configure".into(),
+                "配置 Loci".into(),
+                "loci:configure".into(),
+                None,
+                None,
+                "loci-status",
+            ),
+            1000,
+            "loci-status",
+        )];
+        if let Some(enabled) = enabled {
+            let manifest = plugin::manifest::parse_manifest(include_str!(
+                "../../official-plugins/loci/plugin.json"
+            ))
+            .unwrap();
+            state.plugin_registry.lock().unwrap().insert_loaded(
+                plugin::registry::RegisteredPlugin {
+                    manifest,
+                    root: std::env::temp_dir(),
+                    enabled,
+                    phase: if enabled {
+                        plugin::registry::RuntimePhase::Dormant
+                    } else {
+                        plugin::registry::RuntimePhase::Disabled
+                    },
+                    last_error: None,
+                },
+            );
+        }
+        state
+    }
+
     #[test]
-    fn missing_dependency_result_targets_official_download_page() {
-        assert_eq!(
-            everything_download_url(system::everything::DOWNLOAD_RESULT_ID),
-            Some("https://www.voidtools.com/downloads/")
+    fn loci_status_click_opens_management_provider_and_exits_file_mode() {
+        let mut state = configure_state(Some(true));
+        let _ = launch_selected(&mut state);
+        let activation = state
+            .provider_mode
+            .as_ref()
+            .expect("Loci provider activated");
+        assert_eq!(activation.plugin_id, "com.kite.loci");
+        assert_eq!(activation.provider_id, "files");
+        assert!(!state.files_mode);
+        assert_eq!(state.file_filter, system::file_filter::FileFilter::All);
+        assert!(state.query.starts_with("loci"));
+        assert!(!state.hidden);
+    }
+
+    #[test]
+    fn loci_trigger_entry_exits_file_mode_and_invalidates_pending_files() {
+        let mut state = configure_state(Some(true));
+        state.query = "loci status".into();
+        state.file_results = state.results.clone();
+        let before = state.file_query_generation;
+        let _ = exec_plugin_action(
+            &mut state,
+            "com.kite.loci",
+            "enter_trigger_provider",
+            serde_json::json!({"provider": "files"}),
         );
+        assert!(!state.files_mode);
+        assert_eq!(state.file_filter, system::file_filter::FileFilter::All);
+        assert!(state.file_results.is_empty());
+        assert!(state.file_query_generation != before);
         assert_eq!(
-            everything_download_url(system::everything::NOT_RUNNING_RESULT_ID),
-            None
+            state.provider_mode.as_ref().unwrap().effective_query,
+            "status"
         );
+    }
+
+    #[test]
+    fn loci_status_click_explains_missing_or_disabled_plugin() {
+        for enabled in [None, Some(false)] {
+            let mut state = configure_state(enabled);
+            let _ = launch_selected(&mut state);
+            assert!(state.provider_mode.is_none());
+            assert!(state
+                .flash
+                .as_deref()
+                .is_some_and(|text| text.contains("安装并启用 Loci")));
+            assert!(!state.hidden);
+        }
     }
 }
 

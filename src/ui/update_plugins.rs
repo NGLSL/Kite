@@ -4,9 +4,7 @@ use super::actions::{
     close_settings, flash, launch_and_hide, open_path_and_hide, open_url_and_hide,
     settings_window_task, sync_scroll,
 };
-use super::{
-    plog, plugin, system, with_plugin_host, with_plugin_registry, Message, Section, State,
-};
+use super::{plog, plugin, with_plugin_registry, Message, Section, State};
 use crate::app;
 use iced::Task;
 
@@ -33,7 +31,8 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::PluginSetEnabled(id, enabled) => {
             with_plugin_registry(state, |reg| reg.set_enabled(&id, enabled));
             if !enabled {
-                with_plugin_host(state, |host| host.reload(&id));
+                cancel_plugin_queries(state);
+                reload_plugin_in_background(state, id.clone(), "禁用", Ok(()));
             }
             state.qlog(|| format!("plugin set_enabled id={id} enabled={enabled}"));
             state.refresh_results();
@@ -47,10 +46,18 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
             )
         }
         Message::PluginReload(id) => {
+            cancel_plugin_queries(state);
             let result = with_plugin_registry(state, |reg| reg.reload_from_disk(&id));
             state.qlog(|| format!("plugin reload id={id} err={result:?}"));
-            with_plugin_host(state, |host| host.reload(&id));
-            flash(state, "插件已重新加载")
+            reload_plugin_in_background(state, id, "重新加载", result);
+            flash(state, "正在重新加载插件…")
+        }
+        Message::PluginManagementReady(operation, result) => {
+            state.refresh_results();
+            match result {
+                Ok(()) => flash(state, &format!("插件已{operation}")),
+                Err(error) => flash(state, &format!("插件{operation}失败：{error}")),
+            }
         }
         Message::PluginOpenDir(id) => {
             let root = with_plugin_registry(state, |reg| reg.get(&id).map(|p| p.root.clone()));
@@ -73,12 +80,21 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::PluginUninstall(id) => {
+            cancel_plugin_queries(state);
             let plugins_dir = plugin::default_plugins_dir(&state.data_dir);
-            with_plugin_host(state, |host| host.reload(&id));
-            let r = with_plugin_registry(state, |reg| reg.uninstall(&id, &plugins_dir));
-            state.qlog(|| format!("plugin uninstall id={id} err={r:?}"));
+            with_plugin_registry(state, |reg| reg.set_enabled(&id, false));
+            let host = state.plugin_host.clone();
+            let registry = state.plugin_registry.clone();
+            std::thread::spawn(move || {
+                host.lock().unwrap_or_else(|e| e.into_inner()).reload(&id);
+                let result = registry
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .uninstall(&id, &plugins_dir);
+                super::send_event(Message::PluginManagementReady("卸载".into(), result));
+            });
             state.refresh_results();
-            flash(state, "插件已卸载")
+            flash(state, "正在卸载插件…")
         }
         Message::PluginImportPathChanged(v) => {
             state.plugin_import_path = v;
@@ -146,9 +162,155 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::PluginCancelToolConfirm => super::tools::cancel_confirm(state),
         Message::Tool(kind, op) => super::tools::handle_op(state, kind, op),
         Message::ToolWindowClosed(id) => super::tools::handle_window_closed(state, id),
-        _ => {
-            let _ = system::everything::FileFilter::All;
-            Task::none()
+        _ => Task::none(),
+    }
+}
+
+// Waiting for an in-flight plugin RPC must never block the UI thread.
+fn cancel_plugin_queries(state: &mut State) {
+    state.plugin_query_generation = state.plugin_query_generation.wrapping_add(1);
+    state.plugin_query_worker.cancel_current();
+    state.file_query_generation = state.file_query_generation.wrapping_add(1);
+    state.file_search_worker.cancel_current();
+    state.file_results.clear();
+}
+
+pub(super) fn reload_plugin_in_background(
+    state: &State,
+    id: String,
+    operation: &'static str,
+    result: Result<(), String>,
+) {
+    let host = state.plugin_host.clone();
+    std::thread::spawn(move || {
+        host.lock().unwrap_or_else(|e| e.into_inner()).reload(&id);
+        super::send_event(Message::PluginManagementReady(operation.into(), result));
+    });
+}
+
+#[cfg(test)]
+mod management_tests {
+    use super::super::test_support::test_state;
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn management_messages_return_while_host_rpc_lock_is_held_and_reload_eventually_runs() {
+        for message in [
+            Message::PluginSetEnabled("com.kite.loci".into(), false),
+            Message::PluginReload("com.kite.loci".into()),
+            Message::PluginUninstall("com.kite.loci".into()),
+        ] {
+            let mut state = test_state("chrome");
+            let host = state.plugin_host.clone();
+            let (locked_tx, locked_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let holder = std::thread::spawn(move || {
+                let mut host = host.lock().unwrap();
+                host.note_crash("com.kite.loci", "held RPC fixture");
+                locked_tx.send(()).unwrap();
+                let _ = release_rx.recv_timeout(Duration::from_secs(1));
+            });
+            locked_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            let started = Instant::now();
+            let _ = handle(&mut state, message);
+            let elapsed = started.elapsed();
+            release_tx.send(()).ok();
+            holder.join().unwrap();
+            assert!(
+                elapsed < Duration::from_millis(250),
+                "UI waited for host lock: {elapsed:?}"
+            );
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while state.plugin_host.lock().unwrap().state("com.kite.loci")
+                != plugin::PluginRuntimeState::Dormant
+            {
+                assert!(Instant::now() < deadline, "queued host reload did not run");
+                std::thread::sleep(Duration::from_millis(5));
+            }
         }
+    }
+
+    #[test]
+    fn uninstall_disables_registry_immediately_and_deletes_package_after_host_stops() {
+        let mut state = test_state("chrome");
+        state.data_dir = std::env::temp_dir().join(format!(
+            "kite-managed-uninstall-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let plugins_dir = plugin::default_plugins_dir(&state.data_dir);
+        let root = plugins_dir.join("com.kite.loci");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("owned-fixture.txt"), b"fixture").unwrap();
+        state
+            .plugin_registry
+            .lock()
+            .unwrap()
+            .insert_loaded(plugin::registry::RegisteredPlugin {
+                manifest: plugin::manifest::parse_manifest(include_str!(
+                    "../../official-plugins/loci/plugin.json"
+                ))
+                .unwrap(),
+                root: root.clone(),
+                enabled: true,
+                phase: plugin::registry::RuntimePhase::Dormant,
+                last_error: None,
+            });
+        let host = state.plugin_host.clone();
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _host = host.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(Duration::from_secs(1));
+        });
+        locked_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let _ = handle(&mut state, Message::PluginUninstall("com.kite.loci".into()));
+        assert!(
+            !state
+                .plugin_registry
+                .lock()
+                .unwrap()
+                .get("com.kite.loci")
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            root.exists(),
+            "package must remain until host shutdown finishes"
+        );
+        release_tx.send(()).ok();
+        holder.join().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while state
+            .plugin_registry
+            .lock()
+            .unwrap()
+            .get("com.kite.loci")
+            .is_some()
+        {
+            assert!(Instant::now() < deadline, "queued uninstall did not finish");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!root.exists());
+        std::fs::remove_dir_all(&state.data_dir).unwrap();
+    }
+
+    #[test]
+    fn management_completion_reports_failure() {
+        let mut state = test_state("");
+        let _ = handle(
+            &mut state,
+            Message::PluginManagementReady("卸载".into(), Err("permission denied".into())),
+        );
+        assert!(state
+            .flash
+            .as_deref()
+            .is_some_and(|text| text.contains("卸载失败") && text.contains("permission denied")));
     }
 }

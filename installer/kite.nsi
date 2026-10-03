@@ -37,7 +37,7 @@ Section "-关闭旧版 Kite" SEC_CLOSE_OLD
   ExecWait '"$SYSDIR\taskkill.exe" /F /IM kite.exe'
   ; 插件是独立子进程，旧版宿主退出异常时可能仍占用待覆盖的官方插件文件。
   ; 这里只结束 Kite 官方插件进程，不影响用户启动的其他程序或第三方插件。
-  ExecWait '"$SYSDIR\taskkill.exe" /F /IM kite-plugin-calculator.exe /IM kite-plugin-window-switcher.exe /IM kite-plugin-devtools.exe'
+  ExecWait '"$SYSDIR\taskkill.exe" /F /IM kite-plugin-calculator.exe /IM kite-plugin-window-switcher.exe /IM kite-plugin-devtools.exe /IM kite-plugin-loci.exe'
   Sleep 300
 SectionEnd
 
@@ -47,11 +47,12 @@ SectionEnd
 
 Section "Kite 主程序" SEC_MAIN
   SectionIn RO
+  ; 覆盖升级清理已移除的旧文件搜索资源；不触碰用户目录与插件索引。
+  Delete "$INSTDIR\resources\Everything64.dll"
+  Delete "$INSTDIR\THIRD_PARTY_NOTICES.txt"
   SetOutPath "$INSTDIR"
   File "..\target\release\kite.exe"
-  File "..\THIRD_PARTY_NOTICES.txt"
   SetOutPath "$INSTDIR\resources"
-  File "..\resources\Everything64.dll"
   File "..\resources\open.wav"
   SetOutPath "$INSTDIR\resources\official-plugins"
   File /r "..\resources\official-plugins\*"
@@ -60,6 +61,35 @@ Section "Kite 主程序" SEC_MAIN
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Kite" "DisplayName" "Kite"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Kite" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Kite" "UninstallString" "$INSTDIR\uninstall.exe"
+SectionEnd
+
+; 默认选中，可在组件页取消；服务独立于 Kite 与插件进程运行。
+Section "Loci 全盘文件索引服务" SEC_LOCI_SERVICE
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  File /oname=install-loci-service.ps1 "..\resources\loci\install-service.ps1"
+  ; 新脚本先核实服务归属，再等待服务正常停止；失败时不得覆盖运行中的文件。
+  StrCpy $0 1
+  ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\install-loci-service.ps1" -ExecutablePath "$INSTDIR\resources\loci\loci-service.exe" -StopOnly' $0
+  ${If} $0 != 0
+    DetailPrint "Loci 服务检查或停止失败（退出码 $0），未覆盖服务文件。"
+    MessageBox MB_ICONSTOP|MB_OK "无法安全更新 Loci 服务。服务可能属于其他安装目录，或停止超时。请检查服务状态后重试。"
+    SetErrorLevel 1
+    Abort
+  ${EndIf}
+  SetOutPath "$INSTDIR\resources\loci"
+  File "..\resources\loci\loci-service.exe"
+  File "..\resources\loci\loci.exe"
+  File "..\resources\loci\install-service.ps1"
+  StrCpy $0 1
+  ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\resources\loci\install-service.ps1" -ExecutablePath "$INSTDIR\resources\loci\loci-service.exe"' $0
+  ${If} $0 != 0
+    DetailPrint "Loci 服务安装或启动失败（退出码 $0），文件搜索尚不可用。"
+    MessageBox MB_ICONSTOP|MB_OK "Kite 文件已安装，但 Loci 服务未能启动，文件搜索尚不可用。请检查服务权限或在系统服务中查看错误后重试。"
+    SetErrorLevel 1
+    Abort
+  ${EndIf}
+  DetailPrint "Loci 全盘文件索引服务已启动。"
 SectionEnd
 
 Section "开始菜单快捷方式" SEC_START
@@ -72,6 +102,28 @@ Section "桌面快捷方式" SEC_DESKTOP
 SectionEnd
 
 Section "Uninstall"
+  ; 脚本只操作 ImagePath 精确归属本安装目录的固定名称服务，不删除第三方服务。
+  IfFileExists "$INSTDIR\resources\loci\install-service.ps1" loci_uninstall_service loci_uninstall_no_script
+  loci_uninstall_service:
+    StrCpy $0 1
+    ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\resources\loci\install-service.ps1" -ExecutablePath "$INSTDIR\resources\loci\loci-service.exe" -Uninstall' $0
+    ${If} $0 != 0
+      DetailPrint "Loci 服务卸载失败（退出码 $0），保留安装文件。"
+      MessageBox MB_ICONSTOP|MB_OK "Loci 服务未能安全停止或删除，安装文件已保留。请处理服务错误后重新卸载。"
+      SetErrorLevel 1
+      Abort
+    ${EndIf}
+    Goto loci_uninstall_done
+  loci_uninstall_no_script:
+    IfFileExists "$INSTDIR\resources\loci\loci-service.exe" 0 loci_uninstall_done
+    MessageBox MB_ICONSTOP|MB_OK "缺少 Loci 服务卸载脚本，无法安全删除服务文件。请重新安装后再卸载。"
+    SetErrorLevel 1
+    Abort
+  loci_uninstall_done:
+  Delete "$INSTDIR\resources\loci\loci-service.exe"
+  Delete "$INSTDIR\resources\loci\loci.exe"
+  Delete "$INSTDIR\resources\loci\install-service.ps1"
+  RMDir "$INSTDIR\resources\loci"
   Delete "$DESKTOP\Kite.lnk"
   Delete "$SMPROGRAMS\Kite\Kite.lnk"
   RMDir "$SMPROGRAMS\Kite"

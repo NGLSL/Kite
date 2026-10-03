@@ -56,7 +56,7 @@ impl ResultSource {
     pub fn from_item(item: &AppItem, matched_by: &str) -> Self {
         match matched_by {
             "file" => return ResultSource::File,
-            "everything-status" => return ResultSource::Builtin,
+            "loci-status" => return ResultSource::Builtin,
             "websearch" | "url" => return ResultSource::Web,
             "builtin" | "win-settings" | "builtin-system" => return ResultSource::Builtin,
             _ => {}
@@ -74,9 +74,9 @@ impl ResultSource {
         }
 
         match item.source.as_str() {
-            "everything" => return ResultSource::File,
+            "loci" => return ResultSource::File,
             "websearch" | "url" | "browser" => return ResultSource::Web,
-            "builtin" | "builtin-system" | "win-settings" | "everything-status" => {
+            "builtin" | "builtin-system" | "win-settings" | "loci-status" => {
                 return ResultSource::Builtin
             }
             _ => {}
@@ -424,7 +424,7 @@ mod result_expand_tests {
 
     #[test]
     fn file_result_gets_open_file_action() {
-        let item = app_item("file:c:\\a\\b.txt", r"C:\A\B.txt", "everything");
+        let item = app_item("file:c:\\a\\b.txt", r"C:\A\B.txt", "loci");
         let hit = SearchResult::scored(item, 400, "file");
         assert_eq!(hit.source, ResultSource::File);
         assert_eq!(
@@ -505,7 +505,7 @@ mod result_expand_tests {
 
     #[test]
     fn with_quality_tier_preserves_tier_and_derives_source() {
-        let item = app_item("file:c:\\x.md", r"C:\X.md", "everything");
+        let item = app_item("file:c:\\x.md", r"C:\X.md", "loci");
         let hit = SearchResult::with_quality_tier(item, 400, "file", 7);
         assert_eq!(hit.quality_tier, 7);
         assert_eq!(hit.source, ResultSource::File);

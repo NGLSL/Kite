@@ -1,8 +1,10 @@
-# Kite 性能分析报告
+# Kite 历史性能分析报告
+
+> 以下为 0.3.7 的历史测量。当时的文件搜索 SDK、注入客户端与降级测试已移除；相关数值和源码路径仅记录旧版本事实，不能作为当前 Loci 文件模式的性能或恢复证明。当前文件搜索范围见 [LOCI-PLUGIN.md](LOCI-PLUGIN.md)。
 
 **0.3.7 代码级基线** · **测量日期：2026-09-27** · **Windows 11 教育版 10.0.26200** · **Intel i5-13490F** · **32 GB RAM** · **rustc 1.97.1** · **crate version 0.3.6（0.3.7 基线批次）**
 
-本版默认性能基线**不主动唤起 Kite 窗口**，改为通过代码路径压测热路径、故障恢复与升级兼容。真 UI 唤起延迟（Alt+Space）降级为发布抽检，沿用 `scripts/measure-performance.ps1`；其历史数据见文末附录，**不与本轮代码基线混比**。
+当时默认性能基线**不主动唤起 Kite 窗口**，改为通过代码路径压测热路径、故障恢复与升级兼容。真 UI 唤起延迟（Alt+Space）降级为发布抽检，沿用 `scripts/measure-performance.ps1`；其历史数据见文末附录，**不与本轮代码基线混比**。
 
 > 口径：所有延迟单位为 **µs**（除非注明 ms）；来自本机 `cargo test --release`，是基线数据，不代表所有硬件环境。
 
@@ -19,7 +21,7 @@
 | 存储升级 | 旧 `user_version=1` fixture → 当前 `HistoryDb::open`；快照 Warm/Cold；原子写 |
 | 原始输出 | [`performance-code-baseline-037.txt`](performance-code-baseline-037.txt) |
 
-复现：
+当前通用代码基线检查（输出以当前代码为准，不再包含旧文件搜索后端）：
 
 ```powershell
 cargo test --release report_perf_baseline -- --ignored --nocapture
@@ -65,7 +67,7 @@ cargo test --release report_perf_baseline -- --ignored --nocapture
 
 要点：故障路径正确且超时上界约等于 `QUERY_HARD_TIMEOUT_MS`（800 ms 量级）。
 
-## 4. Everything 降级 / 系统脉冲恢复
+## 4. 历史文件搜索降级 / 系统脉冲恢复
 
 | 场景 | p50 | p95 | max | 不变量 |
 |---|---:|---:|---:|---|
