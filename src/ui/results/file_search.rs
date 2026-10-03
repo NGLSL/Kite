@@ -53,7 +53,7 @@ fn build_file_results_if_current(
             .get("com.kite.loci")
             .cloned();
         match &plugin {
-            None => return vec![loci_status_result("Loci 文件搜索未安装，点击配置")],
+            None => return vec![loci_status_result("Loci 插件未安装，请在插件设置中导入")],
             Some(plugin) if !plugin.enabled => {
                 return vec![loci_status_result(
                     "Loci 文件搜索已禁用，请在插件设置中启用",

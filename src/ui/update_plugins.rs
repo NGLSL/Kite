@@ -18,6 +18,27 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::PluginExecuteReady(plugin_id, generation, result) => {
+            if generation != state.plugin_query_generation
+                || !state
+                    .provider_mode
+                    .as_ref()
+                    .is_some_and(|activation| activation.plugin_id == plugin_id)
+                || !with_plugin_registry(state, |registry| {
+                    registry
+                        .get(&plugin_id)
+                        .is_some_and(|plugin| plugin.enabled)
+                })
+            {
+                return Task::none();
+            }
+            // Actions can change service status; query again without requiring new input.
+            state.refresh_results();
+            match result {
+                Ok(()) => Task::none(),
+                Err(error) => flash(state, &format!("插件操作失败：{error}")),
+            }
+        }
         Message::PluginHostCall(plugin_id, call) => {
             state.qlog(|| format!("plugin host call {plugin_id} {call:?}"));
             use plugin::HostCall;
@@ -253,7 +274,7 @@ mod management_tests {
             .unwrap()
             .insert_loaded(plugin::registry::RegisteredPlugin {
                 manifest: plugin::manifest::parse_manifest(include_str!(
-                    "../../official-plugins/loci/plugin.json"
+                    "../plugin/testdata/loci.json"
                 ))
                 .unwrap(),
                 root: root.clone(),
@@ -299,6 +320,72 @@ mod management_tests {
         }
         assert!(!root.exists());
         std::fs::remove_dir_all(&state.data_dir).unwrap();
+    }
+
+    #[test]
+    fn action_completion_refreshes_status_and_reports_failure_only_for_current_provider() {
+        let mut state = test_state("loci status");
+        state
+            .plugin_registry
+            .lock()
+            .unwrap()
+            .insert_loaded(plugin::registry::RegisteredPlugin {
+                manifest: plugin::manifest::parse_manifest(include_str!(
+                    "../plugin/testdata/loci.json"
+                ))
+                .unwrap(),
+                root: std::env::temp_dir(),
+                enabled: true,
+                phase: plugin::registry::RuntimePhase::Dormant,
+                last_error: None,
+            });
+        state.provider_mode =
+            plugin::route_query("loci status", &state.plugin_registry.lock().unwrap());
+        let generation = state.plugin_query_generation;
+        let _ = handle(
+            &mut state,
+            Message::PluginExecuteReady(
+                "com.kite.loci".into(),
+                generation,
+                Err("Missing bundled installer".into()),
+            ),
+        );
+        assert!(
+            state.plugin_query_generation > generation,
+            "status must be queried again without typing"
+        );
+        assert!(state
+            .flash
+            .as_deref()
+            .unwrap()
+            .contains("Missing bundled installer"));
+        let current = state.plugin_query_generation;
+        state.flash = None;
+        let _ = handle(
+            &mut state,
+            Message::PluginExecuteReady(
+                "com.kite.loci".into(),
+                generation,
+                Err("stale error".into()),
+            ),
+        );
+        assert_eq!(state.plugin_query_generation, current);
+        assert!(state.flash.is_none());
+        let _ = handle(
+            &mut state,
+            Message::PluginExecuteReady("different.plugin".into(), current, Ok(())),
+        );
+        assert_eq!(state.plugin_query_generation, current);
+        state
+            .plugin_registry
+            .lock()
+            .unwrap()
+            .set_enabled("com.kite.loci", false);
+        let _ = handle(
+            &mut state,
+            Message::PluginExecuteReady("com.kite.loci".into(), current, Ok(())),
+        );
+        assert_eq!(state.plugin_query_generation, current);
     }
 
     #[test]

@@ -72,33 +72,9 @@ if ($source -notmatch 'DeleteRegKey\s+HKLM\s+"Software\\Microsoft\\Windows\\Curr
     $failures.Add("Uninstalling leaves the Kite entry in Programs and Features.")
 }
 
-# Service updates must stop through the ownership-checking script before overwrite.
-$serviceSection = [regex]::Match($source, '(?s)Section\s+"Loci[^"\r\n]*"\s+SEC_LOCI_SERVICE(?<body>.*?)SectionEnd')
-if (-not $serviceSection.Success) {
-    $failures.Add("The installer does not offer the Loci service component.")
-} else {
-    $serviceBody = $serviceSection.Groups['body'].Value
-    $stopOffset = $serviceBody.IndexOf('-StopOnly')
-    $copyOffset = $serviceBody.IndexOf('File "..\resources\loci\loci-service.exe"')
-    if ($stopOffset -lt 0 -or $copyOffset -lt 0 -or $stopOffset -gt $copyOffset) {
-        $failures.Add("The installer must stop the owned Loci service before copying its executable.")
-    }
-    if ($serviceBody -match 'SectionIn\s+RO') {
-        $failures.Add("The Loci service must remain an optional component.")
-    }
-    if ($serviceBody -notmatch 'ExecWait[^\r\n]+install-service\.ps1[^\r\n]+-ExecutablePath') {
-        $failures.Add("The service component must use the shared service lifecycle script.")
-    }
-    if ([regex]::Matches($serviceBody, 'SetErrorLevel\s+1\s+Abort').Count -lt 2) {
-        $failures.Add("Stopping and starting failures must abort the service component with a failure exit code.")
-    }
-}
-$uninstallSection = [regex]::Match($source, '(?s)Section\s+"Uninstall"(?<body>.*?)SectionEnd')
-if (-not $uninstallSection.Success -or $uninstallSection.Groups['body'].Value -notmatch 'ExecWait[^\r\n]+install-service\.ps1[^\r\n]+-Uninstall') {
-    $failures.Add("Uninstall must remove the owned Loci service through the shared lifecycle script.")
-}
-if ($source -match '(?i)taskkill[^\r\n]+loci-service\.exe') {
-    $failures.Add("The Loci service must stop through SCM, never through taskkill.")
+# Kite owns only its client plugin; Loci is installed independently.
+if ($source -match 'SEC_LOCI_SERVICE|install-service\.ps1|loci-service\.exe|resources\\loci') {
+    $failures.Add("Kite must not install, overwrite, stop, or uninstall the independent Loci service.")
 }
 
 if ($failures.Count -gt 0) {

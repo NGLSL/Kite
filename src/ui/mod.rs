@@ -35,11 +35,11 @@ mod keyboard;
 mod results;
 #[cfg(test)]
 pub(crate) use results::build_file_results;
+#[cfg(test)]
+mod action_tests;
 mod runtime;
 mod search_view;
 mod settings;
-#[cfg(test)]
-mod action_tests;
 #[cfg(test)]
 mod test_support;
 pub mod theme;
@@ -312,6 +312,7 @@ enum Message {
     PluginQueryReady(u64, PluginQueryPayload),
     /// 插件→宿主 host/* 调用（clipboard/open_url/open_path/hide_kite）。
     PluginHostCall(String, plugin::HostCall),
+    PluginExecuteReady(String, u64, Result<(), String>),
     /// 设置页：启用/禁用插件。
     PluginSetEnabled(String, bool),
     /// 设置页：重新加载插件进程。

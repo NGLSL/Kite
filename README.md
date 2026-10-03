@@ -66,7 +66,7 @@ Kite 是面向 Windows 的原生应用启动器：按下快捷键，输入你记
 
 - Windows 10 / 11 x64
 - 无需安装 WebView2 或 Node.js
-- 文件搜索：安装／启用 LociIndex 服务需要管理员授权；服务以 LocalSystem 索引固定 NTFS 卷，Kite 日常以普通权限查询
+- 文件搜索：先导入独立发布的 [Loci 插件包](https://github.com/NGLSL/Loci/releases)，点击安装服务；安装／启用 LociIndex 服务需要管理员授权；服务以 LocalSystem 索引固定 NTFS 卷，Kite 日常以普通权限查询
 
 ## 下载与安装
 
@@ -160,4 +160,4 @@ Kite 不会把本地索引、启动历史或日志发给维护者。用户主动
 
 [Apache License 2.0](LICENSE)
 
-4096 条目是原有目录验证引擎的限制，不是全盘服务的产品上限。百万合成库已实际运行；真实服务安装、全卷长时间运行及安装后普通权限查询仍需验证，尚无与 Everything 对齐的性能证明。Kite 固定引用包含服务实现的 Loci 提交；远端 CI 需在该提交推送后复验。
+4096 条目是原有目录验证引擎的限制，不是全盘服务的产品上限。百万合成库已实际运行；真实服务安装、全卷长时间运行及安装后普通权限查询仍需验证，尚无与 Everything 对齐的性能证明。Loci 独立发布插件包，导入后点击安装服务；Kite 构建无需 Loci 源码，安装器不捆绑 Loci。

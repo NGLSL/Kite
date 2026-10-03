@@ -4,13 +4,20 @@ Kite 的普通文件模式和官方 `com.kite.loci` 插件共用 **LociIndex** W
 
 ## 使用
 
-安装／启用 LociIndex 服务需要管理员授权；日常运行 Kite 和搜索无需管理员权限。通过管理员安装程序启用服务，服务不可用时结果中显示状态及安装指引。开发者也可在管理员 PowerShell 中调用 Loci 仓库的安装脚本，必须指定服务可执行文件：
+Loci 独立发布为 Kite 插件包。用户从 [Loci 发布页](https://github.com/NGLSL/Loci/releases) 下载 `loci-kite-plugin.zip`，解压后在 Kite 的插件设置中导入含 `plugin.json` 的目录。Kite 当前导入的是文件夹，不能直接选 ZIP。随后输入 `loci`，点击“安装服务”，接受一次管理员授权，在安装向导中完成安装。安装器会将服务和 CLI 安装到独立的 Program Files\Loci 目录并启动 LociIndex 服务；完成后用 `loci status` 查看状态。
+
+插件包包含查询插件和 `loci-setup.exe`。只有用户点击安装按钮才唤起管理员授权；Kite 和插件日常以普通权限运行。服务与插件进程独立，关闭 Kite、禁用或卸载插件都不会停止或删除 Loci 服务。服务由独立 Loci 卸载入口管理，卸载保留索引数据。
+
+Kite 安装器只包含 Kite 自己的官方插件，不捆绑 Loci 服务或 Loci 插件。没有导入 Loci 时，文件搜索显示导入指引；构建 Kite 不需要 Loci 源码或已安装的服务。插件通过 `\\.\pipe\Loci.Search.v1` 的 v1 协议只读连接后台服务。
+
+独立 Loci 安装后的 CLI 可用绝对路径调用：
 
 ```powershell
-.\scripts\install-service.ps1 -ExecutablePath D:\Project\Loci\target\release\loci-service.exe
+& "$env:ProgramFiles\Loci\loci.exe" status
+& "$env:ProgramFiles\Loci\loci.exe" query --type documents --limit 50 report
 ```
 
-上面命令从 Loci 仓库执行。安装脚本注册后台服务并启动；需要验证真实安装、停止、升级与权限行为，不能用编译或协议测试代替。
+默认安装到 Program Files\Loci；自定义目录时使用实际路径。服务安装、停止、升级和权限行为仍须实机验收，编译和协议测试不能替代。
 
 普通文件模式直接发送查询，无需 `loci` 前缀，文件类型筛选随请求交给服务。显式插件入口支持 `loci 关键词` 和 `loci status`；`loci` 空输入显示服务状态及安装指引。`root`／`save`／`rebuild` 不再是插件管理动作。服务维护保存和恢复，普通客户端不能改变索引范围或触发特权写入。插件查询最多返回 50 条路径，Enter 由 Kite 打开结果；插件请求期限为 500 ms，超时显示服务状态。
 
@@ -33,14 +40,11 @@ NTFS 后端通过 MFT 全卷枚举取得对象，再以 `FILE_ID_BOTH_DIR_INFO` 
 
 ## 开发与构建
 
-Kite 与 Loci 仓库放在同一父目录；官方插件通过 `../../../Loci` 的 Cargo path dependency 复用服务协议客户端，服务独立拥有 NTFS 后端。无需复制引擎源码。
+只需克隆或 fork Kite，Loci 插件源码和打包由 Loci 仓库维护，Kite 通过插件 API 接入，不依赖 Loci 源码。CI 和 release workflow 不 checkout Loci，Kite 安装器不管理独立 Loci 服务。
 
 ```powershell
-cargo +1.99.0 test --manifest-path official-plugins/Cargo.toml -p kite-plugin-loci --locked
 .\scripts\build-official-plugins.ps1
-cargo test stdio_backend_spawns_real_official_plugins --locked -- --nocapture
+.\scripts\build-installer.ps1
 ```
 
-构建输出包含 `resources/official-plugins/com.kite.loci/` 的插件清单／exe，以及 `resources/loci/` 中的 `loci-service.exe`、`loci.exe` 和 `install-service.ps1`。运行安装脚本及管理员授权属于服务安装阶段，构建不会替代安装验收。
-
-CI／release workflow 使用并列仓库和 `scripts/loci-revision.txt` 固定 Loci 提交。当前 pin `476937db24fb8c690d76bd5ab4b9f8c747aadec9` 包含新服务 API，已在本地提交。远端构建需要先推送该 Loci 提交，再验证对应的精确提交 CI；本地构建通过不能替代远端 CI 验证。
+Kite 安装器输出为 `artifacts/kite-setup.exe`。Loci 插件包和安装器由 Loci 仓库的 `scripts/build-installer.ps1` 独立生成。源码构建和协议测试无需安装后台服务；真正的文件搜索端到端测试需要单独安装服务。

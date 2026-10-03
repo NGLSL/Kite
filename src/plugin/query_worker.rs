@@ -238,10 +238,8 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let manifest = crate::plugin::manifest::parse_manifest(include_str!(
-            "../../official-plugins/loci/plugin.json"
-        ))
-        .unwrap();
+        let manifest =
+            crate::plugin::manifest::parse_manifest(include_str!("testdata/loci.json")).unwrap();
         std::fs::write(root.join(&manifest.runtime.command), b"MZ").unwrap();
         let mut registry = PluginRegistry::new();
         registry.insert_loaded(RegisteredPlugin {
@@ -323,10 +321,8 @@ mod tests {
         )));
         let mut registry = PluginRegistry::new();
         registry.insert_loaded(RegisteredPlugin {
-            manifest: crate::plugin::manifest::parse_manifest(include_str!(
-                "../../official-plugins/loci/plugin.json"
-            ))
-            .unwrap(),
+            manifest: crate::plugin::manifest::parse_manifest(include_str!("testdata/loci.json"))
+                .unwrap(),
             root: std::env::temp_dir(),
             enabled: true,
             phase: RuntimePhase::Dormant,

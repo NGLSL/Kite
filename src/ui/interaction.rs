@@ -64,6 +64,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
 
         Message::PluginQueryReady(..)
         | Message::PluginHostCall(..)
+        | Message::PluginExecuteReady(..)
         | Message::PluginSetEnabled(..)
         | Message::PluginReload(..)
         | Message::PluginManagementReady(..)
@@ -875,7 +876,12 @@ mod plugin_ui_tests {
     }
 
     #[allow(dead_code)]
-    fn _silence_unused(activation: Activation, mode: ResponseMode, action: ResultAction, src: ResultSource) {
+    fn _silence_unused(
+        activation: Activation,
+        mode: ResponseMode,
+        action: ResultAction,
+        src: ResultSource,
+    ) {
         let _ = (activation, mode, action, src);
     }
 }

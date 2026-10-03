@@ -453,10 +453,8 @@ fn ordinary_file_search_uses_loci_provider_and_keeps_rpc_generation() {
     use std::sync::{Arc, Mutex};
     let mut registry = PluginRegistry::new();
     registry.insert_loaded(RegisteredPlugin {
-        manifest: crate::plugin::parse_manifest(include_str!(
-            "../../../official-plugins/loci/plugin.json"
-        ))
-        .unwrap(),
+        manifest: crate::plugin::parse_manifest(include_str!("../../plugin/testdata/loci.json"))
+            .unwrap(),
         root: std::env::temp_dir(),
         enabled: true,
         phase: RuntimePhase::Dormant,
@@ -519,10 +517,8 @@ fn file_worker_refreshes_pending_without_typing_and_skips_obsolete_requests() {
     use std::time::Duration;
     let mut registry = PluginRegistry::new();
     registry.insert_loaded(RegisteredPlugin {
-        manifest: crate::plugin::parse_manifest(include_str!(
-            "../../../official-plugins/loci/plugin.json"
-        ))
-        .unwrap(),
+        manifest: crate::plugin::parse_manifest(include_str!("../../plugin/testdata/loci.json"))
+            .unwrap(),
         root: std::env::temp_dir(),
         enabled: true,
         phase: RuntimePhase::Dormant,

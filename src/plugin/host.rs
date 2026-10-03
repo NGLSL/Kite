@@ -627,6 +627,15 @@ impl PluginHost {
                         continue;
                     }
                     if msg.get("id").and_then(|i| i.as_u64()) == Some(req_id) {
+                        if let Some(error) = msg.get("error").filter(|error| !error.is_null()) {
+                            return Err(HostError::Protocol(
+                                error
+                                    .get("message")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("Plugin action failed")
+                                    .to_string(),
+                            ));
+                        }
                         return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
                     }
                 }
@@ -1141,6 +1150,23 @@ mod tests {
         assert!(sent.iter().any(|s| s.contains("activate_window")));
     }
 
+    #[test]
+    fn execute_propagates_rpc_error_instead_of_reporting_success() {
+        let reg = registry();
+        let (mut host, process) = host_mem();
+        host.ensure_ready(&reg, "com.kite.calculator").unwrap();
+        let request_id = host.entries.get("com.kite.calculator").unwrap().next_id;
+        process.lock().unwrap().push_response(
+            json!({"jsonrpc":"2.0","id":request_id,
+            "error":{"code":-32602,"message":"Missing bundled installer"}})
+            .to_string(),
+        );
+        let error = host
+            .execute(&reg, "com.kite.calculator", "install_service", json!({}))
+            .unwrap_err();
+        assert!(error.to_string().contains("Missing bundled installer"));
+    }
+
     /// 真实 stdio 子进程：对 resources/official-plugins 走完整 initialize/query。
     /// 用于抓“插件全部崩溃”类问题（路径、帧协议、超时、进程退出）。
     #[test]
@@ -1162,7 +1188,6 @@ mod tests {
             "com.kite.calculator",
             "com.kite.devtools",
             "com.kite.window-switcher",
-            "com.kite.loci",
         ] {
             let p = registry
                 .get_mut(id)
@@ -1183,7 +1208,6 @@ mod tests {
             ("com.kite.calculator", "calculate", "1+2"),
             ("com.kite.devtools", "uuid", ""),
             ("com.kite.window-switcher", "switch", ""),
-            ("com.kite.loci", "files", ""),
         ];
         for (plugin_id, provider_id, q) in cases {
             let act = Activation {
@@ -1215,15 +1239,88 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires installed, running LociIndex service and rebuilt official Loci plugin"]
+    #[ignore = "requires LOCI_PLUGIN_DIR pointing to an extracted independent Loci package; does not install a service"]
+    fn independent_loci_package_imports_queries_and_rejects_install_parameters() {
+        let source =
+            PathBuf::from(std::env::var_os("LOCI_PLUGIN_DIR").expect("set LOCI_PLUGIN_DIR"));
+        let root = std::env::temp_dir().join(format!(
+            "kite-loci-package-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let plugins = root.join("plugins");
+        crate::plugin::install::import_plugin_dir(&source, &plugins).unwrap();
+        assert!(
+            plugins.join("com.kite.loci/loci-setup.exe").is_file(),
+            "import must retain service installer"
+        );
+        let mut registry = super::super::registry::load_registry_from_dir(&plugins);
+        registry.set_enabled("com.kite.loci", true);
+        let data = root.join("data");
+        let mut host = PluginHost::new(
+            Box::new(super::super::process::StdioBackend::new(data.clone())),
+            data,
+            env!("CARGO_PKG_VERSION"),
+        );
+        let activation = route_query("loci status", &registry).unwrap();
+        let outcome = host
+            .query(&registry, &activation, host.current_generation())
+            .unwrap();
+        let QueryOutcome::Panel { panel, .. } = outcome else {
+            panic!("status must render a panel")
+        };
+        assert!(panel
+            .actions
+            .iter()
+            .any(|action| action.id == "install_service"));
+        assert!(panel
+            .actions
+            .iter()
+            .any(|action| action.id == "show_status"));
+        assert!(host
+            .execute(&registry, "com.kite.loci", "show_status", json!({}))
+            .is_ok());
+        let error = host
+            .execute(
+                &registry,
+                "com.kite.loci",
+                "install_service",
+                json!({"path":"C:\\evil.exe"}),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("不接受"));
+        drop(host);
+        // Windows releases executable mappings after the killed child exits.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match std::fs::remove_dir_all(&root) {
+                Ok(()) => break,
+                Err(error)
+                    if Instant::now() < deadline
+                        && error.kind() == std::io::ErrorKind::PermissionDenied =>
+                {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                Err(error) => panic!("package fixture cleanup failed: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires running LociIndex service and LOCI_PLUGIN_DIR pointing to the extracted Loci plugin package"]
     fn loci_service_drives_ordinary_file_search_filters_and_native_rename() {
         use crate::system::file_filter::FileFilter;
         use std::sync::{Arc, Mutex};
-        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("resources/official-plugins/com.kite.loci");
+        let source = PathBuf::from(
+            std::env::var_os("LOCI_PLUGIN_DIR")
+                .expect("set LOCI_PLUGIN_DIR to the extracted Loci plugin package"),
+        );
         assert!(
             source.join("kite-plugin-loci.exe").is_file(),
-            "build official plugins first"
+            "LOCI_PLUGIN_DIR must contain the independently built Loci plugin"
         );
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

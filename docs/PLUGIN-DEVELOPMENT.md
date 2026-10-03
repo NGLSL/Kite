@@ -291,9 +291,8 @@ Dormant ──(首次 Trigger/Command 需要进程)──► Starting ──init
 | `kite-plugin-calculator` | `=` | Panel，Enter 复制 |
 | `kite-plugin-window-switcher` | `win` | List，Enter 激活窗口 |
 | `kite-plugin-devtools` | `uuid`/`hash`/`ts`/`json` | 单进程多 Provider；`hash` 和 `json` 入口打开宿主独立工具窗 |
-| `kite-plugin-loci` | `loci` | 只读查询 LociIndex 服务；普通权限，Enter 打开文件 |
 
-Loci 插件的范围、配置和双仓库构建见 [LOCI-PLUGIN.md](LOCI-PLUGIN.md)。普通文件模式和显式 `loci` 插件复用 LociIndex 服务维护的同一 NTFS 卷索引。插件只读 query／status；管理员安装程序负责服务安装及启用，Core 和插件不维护第二套索引。
+Loci 插件由 Loci 仓库独立发布和维护，不在上述官方插件 workspace 中。插件导入后点击安装服务，日常只读查询；其范围、独立安装和构建见 [LOCI-PLUGIN.md](LOCI-PLUGIN.md)。普通文件模式和显式 `loci` 插件复用 LociIndex 服务维护的同一 NTFS 卷索引。插件只读 query／status；管理员安装程序负责服务安装及启用，Core 和插件不维护第二套索引。
 
 构建并打包到 `resources/official-plugins/`：
 

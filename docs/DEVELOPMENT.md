@@ -33,7 +33,7 @@ Kite 是 Windows x64 原生桌面应用，使用 Rust 2021、Iced 0.14 和 tiny-
 
 ## 验证与打包
 
-官方插件构建需要 Rust 1.99.0，以及与 Kite 并列的 Loci 仓库（Cargo path dependency）。CI 使用 `scripts/loci-revision.txt` 固定提交；现有 pin 不含新服务 API，须待实现提交发布后更新并复验。构建还生成 `resources/loci/` 的服务、CLI 和安装脚本；本地工作树布局与插件验证见 [LOCI-PLUGIN.md](LOCI-PLUGIN.md)。
+官方插件构建需要 Rust 1.99.0，只需 Kite 仓库。Loci 插件及安装器由 Loci 仓库独立打包，Kite 无 Loci 源码依赖；导入 Loci 插件包后点击安装服务即可启用文件搜索。Kite 构建只生成 `resources/official-plugins/`；说明见 [LOCI-PLUGIN.md](LOCI-PLUGIN.md)。
 
 ```powershell
 cargo check
