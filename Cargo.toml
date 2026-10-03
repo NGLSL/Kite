@@ -35,6 +35,7 @@ ib-pinyin = "0.3"
 nucleo-matcher = "0.3"
 fixedbitset = "0.5"
 roxmltree = "0.20"
+zip = { version = "2.4", default-features = false, features = ["deflate-flate2", "flate2"] }
 
 [profile.release]
 codegen-units = 1

@@ -327,8 +327,9 @@ enum Message {
     PluginUninstall(String),
     /// 设置页：导入路径输入。
     PluginImportPathChanged(String),
-    /// 设置页：从路径导入插件文件夹。
+    /// 设置页：从路径导入插件 ZIP 或文件夹。
     PluginImportFromPath,
+    PluginImportReady(Vec<Result<plugin::ImportOutcome, String>>),
     /// 设置页：安装捆绑的官方示例插件。
     PluginInstallOfficial,
     /// 设置页：打开全局插件目录。

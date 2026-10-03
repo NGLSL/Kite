@@ -72,6 +72,7 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
         | Message::PluginOpenLog(..)
         | Message::PluginUninstall(..)
         | Message::PluginImportPathChanged(..)
+        | Message::PluginImportReady(..)
         | Message::PluginImportFromPath
         | Message::PluginInstallOfficial
         | Message::PluginOpenPluginsDir

@@ -1239,7 +1239,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires LOCI_PLUGIN_DIR pointing to an extracted independent Loci package; does not install a service"]
+    #[ignore = "requires LOCI_PLUGIN_DIR pointing to the independent Loci ZIP or extracted package; does not install a service"]
     fn independent_loci_package_imports_queries_and_rejects_install_parameters() {
         let source =
             PathBuf::from(std::env::var_os("LOCI_PLUGIN_DIR").expect("set LOCI_PLUGIN_DIR"));
@@ -1252,7 +1252,9 @@ mod tests {
                 .as_nanos()
         ));
         let plugins = root.join("plugins");
-        crate::plugin::install::import_plugin_dir(&source, &plugins).unwrap();
+        let imports = crate::plugin::install::import_from_path(&source, &plugins);
+        assert_eq!(imports.len(), 1);
+        imports.into_iter().next().unwrap().unwrap();
         assert!(
             plugins.join("com.kite.loci/loci-setup.exe").is_file(),
             "import must retain service installer"
@@ -1292,6 +1294,23 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.to_string().contains("不接受"));
+        let replacements =
+            crate::plugin::install::import_from_path_with_pre_replace(&source, &plugins, |id| {
+                host.reload(id);
+                Ok(())
+            });
+        assert_eq!(replacements.len(), 1);
+        let replacement = replacements.into_iter().next().unwrap().unwrap();
+        assert!(
+            replacement.replaced,
+            "a running plugin must be safely replaceable"
+        );
+        crate::plugin::install::apply_import_to_registry(&mut registry, &replacement.dest).unwrap();
+        assert!(
+            host.query(&registry, &activation, host.current_generation())
+                .is_ok(),
+            "replacement package must initialize and query again"
+        );
         drop(host);
         // Windows releases executable mappings after the killed child exits.
         let deadline = Instant::now() + Duration::from_secs(2);

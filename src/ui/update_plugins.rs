@@ -117,6 +117,9 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
             state.refresh_results();
             flash(state, "正在卸载插件…")
         }
+        Message::PluginImportReady(results) => {
+            super::interaction::apply_plugin_import_results(state, results)
+        }
         Message::PluginImportPathChanged(v) => {
             state.plugin_import_path = v;
             Task::none()
@@ -124,10 +127,30 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::PluginImportFromPath => {
             let path = state.plugin_import_path.trim().to_string();
             if path.is_empty() {
-                return flash(state, "请先粘贴插件文件夹路径");
+                return flash(state, "请先粘贴插件 ZIP 或文件夹路径");
             }
             let plugins_dir = plugin::default_plugins_dir(&state.data_dir);
             let source = std::path::PathBuf::from(&path);
+            if source.is_file() {
+                cancel_plugin_queries(state);
+                let host = state.plugin_host.clone();
+                std::thread::spawn(move || {
+                    // Serialize validation/replacement against RPC and stop only
+                    // the validated target before replacing its mapped executable.
+                    let mut host = host.lock().unwrap_or_else(|error| error.into_inner());
+                    let results = plugin::install::import_from_path_with_pre_replace(
+                        &source,
+                        &plugins_dir,
+                        |id| {
+                            host.reload(id);
+                            Ok(())
+                        },
+                    );
+                    drop(host);
+                    super::send_event(Message::PluginImportReady(results));
+                });
+                return flash(state, "正在导入插件包…");
+            }
             let results = plugin::import_from_path(&source, &plugins_dir);
             super::interaction::apply_plugin_import_results(state, results)
         }

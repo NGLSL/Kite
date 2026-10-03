@@ -87,7 +87,7 @@ fn plugins_list_page<'a>(state: &'a State, tokens: ThemeTokens) -> Element<'a, M
     }
 
     let import_input = text_input(
-        r"插件文件夹路径（含 plugin.json）",
+        r"插件 ZIP 或文件夹路径（含 plugin.json）",
         &state.plugin_import_path,
     )
     .on_input(Message::PluginImportPathChanged)

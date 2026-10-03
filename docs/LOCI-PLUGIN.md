@@ -4,7 +4,7 @@ Kite 的普通文件模式和官方 `com.kite.loci` 插件共用 **LociIndex** W
 
 ## 使用
 
-Loci 独立发布为 Kite 插件包。用户从 [Loci 发布页](https://github.com/NGLSL/Loci/releases) 下载 `loci-kite-plugin.zip`，解压后在 Kite 的插件设置中导入含 `plugin.json` 的目录。Kite 当前导入的是文件夹，不能直接选 ZIP。随后输入 `loci`，点击“安装服务”，接受一次管理员授权，在安装向导中完成安装。安装器会将服务和 CLI 安装到独立的 Program Files\Loci 目录并启动 LociIndex 服务；完成后用 `loci status` 查看状态。
+Loci 独立发布为 Kite 插件包。用户从 [Loci 发布页](https://github.com/NGLSL/Loci/releases) 下载 `loci-kite-plugin.zip`，在支持 ZIP 导入的 Kite 构建中，在插件设置粘贴下载的 ZIP 路径并点击导入，无需手动解压。旧版仅支持目录导入时，先解压再导入含 `plugin.json` 的目录。随后输入 `loci`，点击“安装服务”，接受一次管理员授权，在安装向导中完成安装。安装器会将服务和 CLI 安装到独立的 Program Files\Loci 目录并启动 LociIndex 服务；完成后用 `loci status` 查看状态。
 
 插件包包含查询插件和 `loci-setup.exe`。只有用户点击安装按钮才唤起管理员授权；Kite 和插件日常以普通权限运行。服务与插件进程独立，关闭 Kite、禁用或卸载插件都不会停止或删除 Loci 服务。服务由独立 Loci 卸载入口管理，卸载保留索引数据。
 
@@ -47,4 +47,4 @@ NTFS 后端通过 MFT 全卷枚举取得对象，再以 `FILE_ID_BOTH_DIR_INFO` 
 .\scripts\build-installer.ps1
 ```
 
-Kite 安装器输出为 `artifacts/kite-setup.exe`。Loci 插件包和安装器由 Loci 仓库的 `scripts/build-installer.ps1` 独立生成。源码构建和协议测试无需安装后台服务；真正的文件搜索端到端测试需要单独安装服务。
+Kite 安装器输出为 `artifacts/kite-setup.exe`。Loci 插件包和安装器由 Loci 仓库的 `scripts/build-installer.ps1` 独立生成。Kite ZIP 直接导入、普通文件模式接入及安装操作后刷新状态需要包含这些修改的 Kite 构建，旧版不会自动获得宿主功能。源码构建和协议测试无需安装后台服务；真正的文件搜索端到端测试需要单独安装服务。

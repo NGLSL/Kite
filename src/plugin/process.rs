@@ -158,7 +158,11 @@ impl PluginProcess for ThreadedStdioProcess {
     }
 
     fn kill(&mut self) {
-        let _ = self.child.kill();
+        if self.child.kill().is_ok() {
+            // TerminateProcess is asynchronous; reap before an importer replaces
+            // the executable so Windows has released its mapped image.
+            let _ = self.child.wait();
+        }
     }
 }
 
