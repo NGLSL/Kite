@@ -15,7 +15,7 @@ if (!$Nsis) {
 }
 if (!$Nsis) { throw "NSIS not found. Install with: winget install NSIS.NSIS" }
 Write-Host "Building NSIS installer..."
-& $Nsis /INPUTCHARSET UTF8 (Join-Path $root "installer\kite.nsi")
+& $Nsis (Join-Path $root "installer\kite.nsi")
 if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
 $exe = Join-Path $root "target\release\kite.exe"
 Copy-Item $exe (Join-Path $artifacts "kite.exe") -Force

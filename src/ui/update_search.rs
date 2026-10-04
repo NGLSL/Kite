@@ -85,7 +85,7 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::ToggleFiles => {
             state.files_mode = !state.files_mode;
             if !state.files_mode {
-                state.file_filter = crate::system::file_filter::FileFilter::All;
+                state.file_filter = crate::system::everything::FileFilter::All;
             }
             state.navigation_mode = NavigationMode::Input;
             state.qlog(|| format!("files toggle -> {}", state.files_mode));

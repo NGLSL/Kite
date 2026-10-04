@@ -197,7 +197,7 @@ fn synthetic_apps(n: usize) -> Vec<AppItem> {
         "Microsoft Edge",
         "Notepad++",
         "7-Zip File Manager",
-        "Loci",
+        "Everything",
         "PowerToys",
     ];
     const CN: &[&str] = &["微信", "企业微信", "网易云音乐", "钉钉", "腾讯会议", "向日葵"];

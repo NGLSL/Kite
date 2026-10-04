@@ -14,18 +14,19 @@ $ws = Join-Path $root "official-plugins"
 if (-not (Test-Path (Join-Path $ws "Cargo.toml"))) {
     throw "official-plugins workspace not found: $ws"
 }
+
 Push-Location $ws
 try {
     if ($Release) {
-        cargo +1.99.0 build --release --locked
+        cargo build --release
         if ($LASTEXITCODE -ne 0) { throw "official plugins cargo build failed with exit code $LASTEXITCODE" }
         $outDir = Join-Path $ws "target\release"
     } else {
-        cargo +1.99.0 build --locked
+        cargo build
         if ($LASTEXITCODE -ne 0) { throw "official plugins cargo build failed with exit code $LASTEXITCODE" }
         $outDir = Join-Path $ws "target\debug"
     }
-    cargo +1.99.0 test --locked
+    cargo test
     if ($LASTEXITCODE -ne 0) { throw "official plugins cargo test failed with exit code $LASTEXITCODE" }
 } finally {
     Pop-Location
@@ -40,12 +41,7 @@ $packages = @(
 
 $pluginsRoot = Join-Path $root "resources\official-plugins"
 if (Test-Path $pluginsRoot) {
-    $resolvedPlugins = (Resolve-Path -LiteralPath $pluginsRoot).Path
-    $expectedPlugins = [System.IO.Path]::GetFullPath((Join-Path $root "resources\official-plugins"))
-    if ($resolvedPlugins -ne $expectedPlugins) {
-        throw "Unexpected official plugin output directory: $resolvedPlugins"
-    }
-    Remove-Item -LiteralPath $resolvedPlugins -Recurse -Force
+    Remove-Item -Recurse -Force $pluginsRoot
 }
 New-Item -ItemType Directory -Force $pluginsRoot | Out-Null
 

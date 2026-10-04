@@ -1,8 +1,5 @@
 //! Kite 启动入口：只做模块装配，业务不写在本文件。
 
-#[cfg(not(windows))]
-compile_error!("Kite supports Windows targets only");
-
 pub mod app;
 pub mod history;
 pub mod log;

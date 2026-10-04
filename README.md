@@ -4,8 +4,6 @@
 
 Kite 是面向 Windows 的原生应用启动器：按下快捷键，输入你记得的那一点信息——完整名称、中文、拼音、首字母、别名，甚至只是模糊印象——把正确的程序排到最前面并直接启动。
 
-应用与官方插件仅支持 Windows，构建时会拒绝其他操作系统目标。
-
 它不追求成为功能最多的桌面工具箱，而是优先解决一件事：
 
 > 用户知道自己大概想找什么，但不一定能准确输入完整名称时，Kite 依然能够快速、稳定地把正确结果排在最前面。
@@ -43,7 +41,7 @@ Kite 是面向 Windows 的原生应用启动器：按下快捷键，输入你记
 - 中文、拼音全拼、首字母、用户别名；启动历史、最近使用、固定与降权
 - 右键或 Shift+F10 打开结果操作面板，直接设置 Alias、隐藏入口或忘记当前查询的学习记录
 - 在设置中恢复隐藏入口，或登记、改名和移除单个 exe / lnk；快捷方式保留原参数与工作目录
-- Loci 文件搜索（后台服务索引固定 NTFS 卷，含图片 / 文档 / 视频等类型筛选）
+- 可选 Everything 文件搜索（含图片 / 文档 / 视频等类型筛选）
 - 本地绝对路径直达：打开文件 / 打开所在文件夹
 - 网页搜索槽位、常用 Windows 系统入口（回收站、控制面板等）
 
@@ -52,7 +50,6 @@ Kite 是面向 Windows 的原生应用启动器：按下快捷键，输入你记
 - 计算器：搜索 `=1+1` 等表达式，Enter 复制结果
 - 窗口切换：`win` 列出并切换当前打开的窗口
 - 开发者工具：UUID、SHA-256、时间戳、JSON / Base64 独立工具窗
-- Loci 文件搜索：普通文件模式与 `loci` 插件共用 LociIndex 后台服务；`loci status` 查看状态，见 [使用与构建说明](docs/LOCI-PLUGIN.md)
 
 插件是**独立进程**，崩溃或卡顿不拖垮 Kite；删除插件目录后仍是完整启动器。协议不限制语言，详见 [`docs/PLUGIN-DEVELOPMENT.md`](docs/PLUGIN-DEVELOPMENT.md)。
 
@@ -66,7 +63,7 @@ Kite 是面向 Windows 的原生应用启动器：按下快捷键，输入你记
 
 - Windows 10 / 11 x64
 - 无需安装 WebView2 或 Node.js
-- 文件搜索：先导入独立发布的 [Loci 插件包](https://github.com/NGLSL/Loci/releases)，点击安装服务；安装／启用 LociIndex 服务需要管理员授权；服务以 LocalSystem 索引固定 NTFS 卷，Kite 日常以普通权限查询
+- 文件搜索可选：需本机已安装并运行 [Everything](https://www.voidtools.com/)
 
 ## 下载与安装
 
@@ -100,7 +97,7 @@ artifacts/kite-setup.exe
 src/app/             应用扫描、UWP、启动
 src/search/          规范化、拼音、召回与排序
 src/storage/         SQLite 设置、固定项、历史
-src/system/          热键、托盘、图标、窗口定位
+src/system/          热键、托盘、图标、Everything、窗口定位
 src/plugin/          插件 Host / 协议 / 安装
 src/ui/              Iced 窗口与交互
 official-plugins/    官方插件 Rust workspace（独立进程）
@@ -113,7 +110,7 @@ docs/                需求、性能、插件与开发规范
 
 ## 性能
 
-Kite 为**单进程原生**桌面程序。0.3.7 起默认性能基线走代码路径（搜索热路径、插件故障、系统恢复、存储升级等），**不必反复唤起 UI**；真窗口唤起延迟保留脚本抽检。
+Kite 为**单进程原生**桌面程序。0.3.7 起默认性能基线走代码路径（搜索热路径、插件故障、Everything 降级、存储升级等），**不必反复唤起 UI**；真窗口唤起延迟保留脚本抽检。
 
 本机实测、复现命令与口径说明见 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)。数字随硬件与索引规模变化，请以文档内测量条件为准。
 
@@ -152,7 +149,7 @@ Issue / PR 请说明变更内容、验证方式，以及适用的 Windows 环境
 
 - 「检查更新」会请求 GitHub API；确认下载时从 GitHub Releases 获取安装包
 - 网页搜索会把查询发送到用户本机配置的搜索引擎
-- 文件搜索使用 LociIndex 服务的 NTFS 全卷索引；普通文件模式、显式 `loci` 插件和独立 CLI 通过本机 named pipe 只读查询同一索引
+- Everything 文件搜索走本机 IPC，需用户自行安装并运行 Everything
 
 Kite 不会把本地索引、启动历史或日志发给维护者。用户主动打开的外部网站与应用遵循各自策略。
 
@@ -160,4 +157,4 @@ Kite 不会把本地索引、启动历史或日志发给维护者。用户主动
 
 [Apache License 2.0](LICENSE)
 
-4096 条目是原有目录验证引擎的限制，不是全盘服务的产品上限。百万合成库已实际运行；真实服务安装、全卷长时间运行及安装后普通权限查询仍需验证，尚无与 Everything 对齐的性能证明。Loci 独立发布插件包，导入后点击安装服务；Kite 构建无需 Loci 源码，安装器不捆绑 Loci。
+安装包内的 Everything SDK DLL 使用 MIT 许可，原文见 [第三方声明](THIRD_PARTY_NOTICES.txt)。

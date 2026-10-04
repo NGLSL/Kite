@@ -12,7 +12,7 @@ pub struct Settings {
     /// 可解析的快捷键，如 Alt+Space。
     pub hotkey: String,
     pub hotkey_label: String,
-    /// 搜索时是否带上 Loci 文件结果；默认关闭，选择要记住。
+    /// 搜索时是否带上 Everything 文件结果；默认关闭，选择要记住。
     pub search_files: bool,
     /// 是否记录启动历史（Usage + Query History）；暂停后 record 直接跳过。
     pub history_recording: bool,

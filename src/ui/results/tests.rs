@@ -3,11 +3,11 @@
 use super::super::test_support::{settings_result, test_state};
 use super::{
     build_direct_path_results, build_empty_query_lists, build_file_results,
-    is_current_file_response, loci_status_result, prepend_dependency_status,
+    everything_status_result, is_current_file_response, prepend_dependency_status,
     prepend_direct_path_results,
 };
 use crate::model::ResultAction;
-use crate::system::file_filter;
+use crate::system::everything::{self, Availability};
 use crate::ui::actions::menu_action;
 use crate::ui::MenuAction;
 
@@ -221,12 +221,7 @@ fn pin_toggle_on_non_empty_query_routes_through_worker() {
 
     let _ = menu_action(&mut state, item, MenuAction::TogglePin);
 
-    assert!(state
-        .history
-        .as_ref()
-        .unwrap()
-        .pinned_ids()
-        .contains(&item_id));
+    assert!(state.history.as_ref().unwrap().pinned_ids().contains(&item_id));
     assert!(
         state.app_search_worker.latest_seq() > before,
         "Pin 与 Demote 必须共用同一条刷新路径（worker）"
@@ -288,7 +283,7 @@ fn stale_or_disabled_file_results_are_rejected() {
 }
 
 #[test]
-fn files_mode_ranks_loci_hits_before_apps() {
+fn files_mode_ranks_everything_hits_before_apps() {
     let mut state = test_state("test");
     state.files_mode = true;
     state.query = "test".into();
@@ -299,7 +294,7 @@ fn files_mode_ranks_loci_hits_before_apps() {
         r"C:\Tools\test.png".into(),
         None,
         None,
-        "loci",
+        "everything",
     );
     file_item.attach_search_fields();
     let file_hit = crate::model::SearchResult::scored(file_item, 400, "file");
@@ -318,19 +313,12 @@ fn files_mode_ranks_loci_hits_before_apps() {
 
     let generation = state.app_query_generation;
     let index_generation = state.index_generation;
-    state.apply_app_search_ready(
-        generation,
-        "test".into(),
-        vec![app_hit],
-        0,
-        index_generation,
-    );
+    state.apply_app_search_ready(generation, "test".into(), vec![app_hit], 0, index_generation);
 
     assert!(!state.results.is_empty(), "文件模式下合并结果不得为空");
     assert_eq!(
-        state.results[0].item.source,
-        "loci",
-        "文件模式下 Loci 命中必须排在应用之前，实际 top={:?}",
+        state.results[0].item.source, "everything",
+        "文件模式下 Everything 命中必须排在应用之前，实际 top={:?}",
         state.results.first().map(|r| &r.item.display_name)
     );
     assert!(
@@ -338,8 +326,7 @@ fn files_mode_ranks_loci_hits_before_apps() {
         "文件优先不移除应用命中"
     );
     assert!(
-        state
-            .results
+        state.results
             .iter()
             .all(|r| r.item.source != "websearch" && r.item.source != "browser"),
         "文件模式已有文件结果时不得再插入网页搜索"
@@ -358,7 +345,7 @@ fn non_files_mode_still_appends_file_hits_after_apps() {
         r"C:\Tools\test.png".into(),
         None,
         None,
-        "loci",
+        "everything",
     );
     file_item.attach_search_fields();
     state.file_results = vec![crate::model::SearchResult::scored(file_item, 400, "file")];
@@ -376,13 +363,7 @@ fn non_files_mode_still_appends_file_hits_after_apps() {
 
     let generation = state.app_query_generation;
     let index_generation = state.index_generation;
-    state.apply_app_search_ready(
-        generation,
-        "test".into(),
-        vec![app_hit],
-        0,
-        index_generation,
-    );
+    state.apply_app_search_ready(generation, "test".into(), vec![app_hit], 0, index_generation);
 
     assert_eq!(
         state.results.first().map(|r| r.item.source.as_str()),
@@ -390,7 +371,7 @@ fn non_files_mode_still_appends_file_hits_after_apps() {
         "非文件模式不应把未请求的文件结果抬到应用前"
     );
     assert!(
-        state.results.iter().all(|r| r.item.source != "loci"),
+        state.results.iter().all(|r| r.item.source != "everything"),
         "非文件模式不得合并 file_results"
     );
 }
@@ -405,11 +386,11 @@ fn changing_file_filter_invalidates_previous_query() {
     state.file_query_generation = 4;
     let _ = update(
         &mut state,
-        Message::FileFilterChanged(file_filter::FileFilter::Images),
+        Message::FileFilterChanged(everything::FileFilter::Images),
     );
 
     assert_eq!(state.query, "Kite");
-    assert_eq!(state.file_filter, file_filter::FileFilter::Images);
+    assert_eq!(state.file_filter, everything::FileFilter::Images);
     assert_eq!(state.file_query_generation, 5);
     assert!(!is_current_file_response(
         true,
@@ -421,187 +402,34 @@ fn changing_file_filter_invalidates_previous_query() {
 }
 
 #[test]
-fn missing_loci_is_visible_as_a_search_result() {
-    let state = test_state("logo");
+fn missing_everything_is_visible_as_a_search_result() {
+    if everything::availability() != Availability::NotInstalled {
+        return;
+    }
+
     let results = build_file_results(
         "logo",
         &std::env::temp_dir(),
-        file_filter::FileFilter::Images,
-        &state.plugin_registry,
-        &state.plugin_host,
+        everything::FileFilter::Images,
     );
 
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].item.id, "loci:configure");
-    assert!(results[0].item.display_name.contains("未安装"));
+    assert_eq!(results[0].item.id, "kite:everything-download");
+    assert!(results[0].item.display_name.contains("未安装 Everything"));
 }
 
 #[test]
-fn loci_status_opens_management_and_preserves_error_message() {
-    let status = loci_status_result("Loci 索引正在恢复");
-    assert_eq!(status.item.id, "loci:configure");
-    assert_eq!(status.item.target, "loci:configure");
-    assert_eq!(status.item.source, "loci-status");
-    assert!(status.item.display_name.contains("索引正在恢复"));
-}
+fn dependency_status_distinguishes_missing_and_not_running() {
+    let missing = everything_status_result(Availability::NotInstalled).expect("missing status");
+    assert_eq!(missing.item.id, everything::DOWNLOAD_RESULT_ID);
+    assert_eq!(missing.item.target, everything::DOWNLOAD_URL);
+    assert!(missing.item.display_name.contains("官方下载"));
 
-#[test]
-fn ordinary_file_search_uses_loci_provider_and_keeps_rpc_generation() {
-    use crate::plugin::{
-        MemProcess, MemProcessBackend, PluginHost, PluginRegistry, RegisteredPlugin, RuntimePhase,
-    };
-    use std::sync::{Arc, Mutex};
-    let mut registry = PluginRegistry::new();
-    registry.insert_loaded(RegisteredPlugin {
-        manifest: crate::plugin::parse_manifest(include_str!("../../plugin/testdata/loci.json"))
-            .unwrap(),
-        root: std::env::temp_dir(),
-        enabled: true,
-        phase: RuntimePhase::Dormant,
-        last_error: None,
-    });
-    let process = Arc::new(Mutex::new(MemProcess::new()));
-    process.lock().unwrap().push_response(
-        serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"plugin_api":1}}).to_string(),
-    );
-    process.lock().unwrap().push_response(serde_json::json!({"jsonrpc":"2.0","id":2,"result":{"type":"list","items":[
-        {"id":"loci-status","title":"索引正在校正"},
-        {"id":"file-1","title":"status.txt","action":{"type":"open_file","path":"C:\\Fixture\\status.txt"}},
-        {"id":"unsafe","title":"unsafe","action":{"type":"open_file","path":"shell:bad"}}
-    ]}}).to_string());
-    let mut backend = MemProcessBackend::new();
-    backend.auto_respond = false;
-    backend.register("com.kite.loci", process.clone());
-    let mut host = PluginHost::new(
-        Box::new(backend),
-        std::env::temp_dir(),
-        env!("CARGO_PKG_VERSION"),
-    );
-    host.set_generation(100);
-    let host = Arc::new(Mutex::new(host));
-    let registry = Arc::new(Mutex::new(registry));
-    let results = build_file_results(
-        "status",
-        &std::env::temp_dir(),
-        file_filter::FileFilter::Documents,
-        &registry,
-        &host,
-    );
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[0].item.target, "loci:configure");
-    assert_eq!(results[1].item.source, "loci");
-    assert_eq!(
-        results[1].action,
-        ResultAction::OpenFile {
-            path: r"C:\Fixture\status.txt".into()
-        }
-    );
-    assert_eq!(host.lock().unwrap().current_generation(), 100);
-    let process = process.lock().unwrap();
-    let request: serde_json::Value = serde_json::from_str(&process.sent[1]).unwrap();
-    assert_eq!(request["params"]["provider_id"], "file_search");
-    let effective: serde_json::Value =
-        serde_json::from_str(request["params"]["query"].as_str().unwrap()).unwrap();
-    assert_eq!(
-        effective,
-        serde_json::json!({"query":"status","filter":"documents"})
-    );
-}
-
-#[test]
-fn file_worker_refreshes_pending_without_typing_and_skips_obsolete_requests() {
-    use crate::plugin::{
-        MemProcess, MemProcessBackend, PluginHost, PluginRegistry, RegisteredPlugin, RuntimePhase,
-    };
-    use std::sync::{mpsc, Arc, Mutex};
-    use std::time::Duration;
-    let mut registry = PluginRegistry::new();
-    registry.insert_loaded(RegisteredPlugin {
-        manifest: crate::plugin::parse_manifest(include_str!("../../plugin/testdata/loci.json"))
-            .unwrap(),
-        root: std::env::temp_dir(),
-        enabled: true,
-        phase: RuntimePhase::Dormant,
-        last_error: None,
-    });
-    let registry = Arc::new(Mutex::new(registry));
-    let process = Arc::new(Mutex::new(MemProcess::new()));
-    for response in [
-        serde_json::json!({"id":1,"result":{"plugin_api":1}}),
-        serde_json::json!({"id":2,"result":{"type":"list","items":[{"id":"loci-pending","title":"正在建立索引"}]}}),
-        serde_json::json!({"id":3,"result":{"type":"list","items":[{"id":"file-1","title":"ready.txt","action":{"type":"open_file","path":"C:\\Fixture\\ready.txt"}}]}}),
-        serde_json::json!({"id":4,"result":{"type":"list","items":[]}}),
-    ] {
-        process.lock().unwrap().push_response(response.to_string());
-    }
-    let mut backend = MemProcessBackend::new();
-    backend.auto_respond = false;
-    backend.register("com.kite.loci", process.clone());
-    let host = Arc::new(Mutex::new(PluginHost::new(
-        Box::new(backend),
-        std::env::temp_dir(),
-        env!("CARGO_PKG_VERSION"),
-    )));
-    let worker = super::FileSearchWorker::spawn();
-    let (send, receive) = mpsc::channel();
-    let on_done = Arc::new(move |generation, query, results, _| {
-        send.send((generation, query, results)).unwrap();
-    });
-    let job = |generation, query: &str| super::FileSearchJob {
-        generation,
-        query: query.into(),
-        icon_dir: std::env::temp_dir(),
-        filter: file_filter::FileFilter::All,
-        registry: registry.clone(),
-        host: host.clone(),
-        on_done: on_done.clone(),
-    };
-    worker.submit(job(1, "ready"));
-    let (_, _, pending) = receive.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert_eq!(pending[0].matched_by, "loci-pending");
-    let (_, _, ready) = receive.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert_eq!(ready[0].item.display_name, "ready.txt");
-
-    let locked_host = host.lock().unwrap();
-    worker.submit(job(2, "obsolete"));
-    std::thread::sleep(Duration::from_millis(50));
-    assert!(
-        registry.try_lock().is_ok(),
-        "waiting for host IPC must not hold registry/UI lock"
-    );
-    worker.submit(job(3, "latest"));
-    drop(locked_host);
-    let (generation, query, _) = receive.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert_eq!(generation, 3);
-    assert_eq!(query, "latest");
-    worker.cancel_current();
-    let captured_process = process.lock().unwrap();
-    let queries: Vec<serde_json::Value> = captured_process
-        .sent
-        .iter()
-        .map(|request| serde_json::from_str::<serde_json::Value>(request).unwrap())
-        .filter(|request| request["method"] == "plugin/query")
-        .collect();
-    assert_eq!(queries.len(), 3);
-    assert!(queries.iter().all(|request| !request["params"]["query"]
-        .as_str()
-        .unwrap()
-        .contains("obsolete")));
-    drop(captured_process);
-    for id in [5, 6] {
-        process.lock().unwrap().push_response(serde_json::json!({"id":id,"result":{"type":"list","items":[{"id":"loci-pending","title":"正在建立索引"}]}}).to_string());
-    }
-    worker.submit(job(4, "pending"));
-    let (_, _, pending) = receive.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert_eq!(pending[0].matched_by, "loci-pending");
-    drop(worker);
-    let sent = process.lock().unwrap().sent.len();
-    std::thread::sleep(Duration::from_millis(700));
-    assert_eq!(
-        process.lock().unwrap().sent.len(),
-        sent,
-        "dropping the last worker must stop pending polling"
-    );
+    let stopped =
+        everything_status_result(Availability::InstalledButNotRunning).expect("not-running status");
+    assert_eq!(stopped.item.id, everything::NOT_RUNNING_RESULT_ID);
+    assert!(stopped.item.display_name.contains("未运行"));
+    assert!(everything_status_result(Availability::Ready).is_none());
 }
 
 #[test]
@@ -619,11 +447,11 @@ fn missing_dependency_is_always_visible_ahead_of_application_results() {
             crate::model::SearchResult::scored(item, 1000, "exact")
         })
         .collect::<Vec<_>>();
-    let status = loci_status_result("Loci 索引未就绪");
+    let status = everything_status_result(Availability::NotInstalled).unwrap();
 
     prepend_dependency_status(&mut results, &[status]);
 
-    assert_eq!(results[0].item.id, "loci:configure");
+    assert_eq!(results[0].item.id, everything::DOWNLOAD_RESULT_ID);
     assert_eq!(results.len(), crate::search::MAX_RESULTS);
 }
 
@@ -690,7 +518,7 @@ fn direct_path_actions_lead_and_replace_duplicate_file_hits() {
             path.to_uppercase(),
             None,
             None,
-            "loci",
+            "everything",
         ),
         400,
         "file",
@@ -778,10 +606,7 @@ fn empty_query_pinned_follow_storage_order_and_cap() {
     );
     assert_eq!(lists.pinned[7].item.id, "p7");
     assert!(
-        lists
-            .pinned
-            .iter()
-            .all(|h| h.item.id != "p8" && h.item.id != "p9"),
+        lists.pinned.iter().all(|h| h.item.id != "p8" && h.item.id != "p9"),
         "超出上限的固定项不得因哈希序挤入选中集合"
     );
 }

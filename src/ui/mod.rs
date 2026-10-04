@@ -33,13 +33,11 @@ mod interaction;
 mod json_tool;
 mod keyboard;
 mod results;
-#[cfg(test)]
-pub(crate) use results::build_file_results;
-#[cfg(test)]
-mod action_tests;
 mod runtime;
 mod search_view;
 mod settings;
+#[cfg(test)]
+mod action_tests;
 #[cfg(test)]
 mod test_support;
 pub mod theme;
@@ -109,6 +107,12 @@ fn with_plugin_registry<T>(state: &State, f: impl FnOnce(&mut PluginRegistry) ->
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     f(&mut reg)
+}
+
+/// 在插件 Host 锁内执行。
+fn with_plugin_host<T>(state: &State, f: impl FnOnce(&mut PluginHost) -> T) -> T {
+    let mut host = state.plugin_host.lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut host)
 }
 
 /// 设置页分区（对齐前端 NAV）。
@@ -205,8 +209,8 @@ enum Message {
     LaunchIndex(usize),
     /// 「文件」胶囊开关（css .files-toggle）。
     ToggleFiles,
-    FileFilterChanged(system::file_filter::FileFilter),
-    /// 后台 Loci 查询完成；代际和查询文本用于丢弃过期结果。
+    FileFilterChanged(system::everything::FileFilter),
+    /// 后台 Everything 查询完成；代际和查询文本用于丢弃过期结果。
     FileSearchReady(u64, String, Vec<SearchResult>, u128),
     /// 后台检查用户输入的绝对路径。
     DirectPathReady(u64, String, Vec<SearchResult>),
@@ -312,13 +316,10 @@ enum Message {
     PluginQueryReady(u64, PluginQueryPayload),
     /// 插件→宿主 host/* 调用（clipboard/open_url/open_path/hide_kite）。
     PluginHostCall(String, plugin::HostCall),
-    PluginExecuteReady(String, u64, Result<(), String>),
     /// 设置页：启用/禁用插件。
     PluginSetEnabled(String, bool),
     /// 设置页：重新加载插件进程。
     PluginReload(String),
-    /// 后台插件生命周期操作完成。
-    PluginManagementReady(String, Result<(), String>),
     /// 设置页：打开插件目录。
     PluginOpenDir(String),
     /// 设置页：打开插件 stderr 日志。
@@ -327,9 +328,8 @@ enum Message {
     PluginUninstall(String),
     /// 设置页：导入路径输入。
     PluginImportPathChanged(String),
-    /// 设置页：从路径导入插件 ZIP 或文件夹。
+    /// 设置页：从路径导入插件文件夹。
     PluginImportFromPath,
-    PluginImportReady(Vec<Result<plugin::ImportOutcome, String>>),
     /// 设置页：安装捆绑的官方示例插件。
     PluginInstallOfficial,
     /// 设置页：打开全局插件目录。
@@ -378,7 +378,7 @@ enum MenuAction {
 struct State {
     #[allow(dead_code)]
     data_dir: PathBuf,
-    /// 应用与文件图标缓存目录。
+    /// Everything64.dll 所在资源目录（文件搜索用）。
     icon_dir: PathBuf,
     index: std::sync::Arc<Mutex<AppIndex>>,
     scan_options: std::sync::Arc<std::sync::RwLock<app::scanner::ScanOptions>>,
@@ -401,9 +401,8 @@ struct State {
     /// 用户主动点了重新扫描；完成后给设置页一条可见反馈。
     rescan_pending: bool,
     files_mode: bool,
-    file_filter: system::file_filter::FileFilter,
+    file_filter: system::everything::FileFilter,
     file_query_generation: u64,
-    file_search_worker: std::sync::Arc<results::FileSearchWorker>,
     file_results: Vec<SearchResult>,
     direct_path_generation: u64,
     direct_path_latest: std::sync::Arc<std::sync::atomic::AtomicU64>,

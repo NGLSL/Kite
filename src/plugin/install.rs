@@ -1,14 +1,12 @@
 //! 插件导入：校验后拷入 `%APPDATA%\...\plugins\`，再交给 Registry/Host。
 //!
-//! 支持本地文件夹、单插件 ZIP 导入与官方样例 seed。
+//! V1 不做 Plugin Store / 在线市场；支持本地文件夹导入与官方样例 seed。
+//! 包形态 `.kiteplugin`（ZIP）不在本模块范围。
 
 use std::path::{Path, PathBuf};
 
 use super::manifest::{parse_manifest, path_inside_plugin_root, validate_plugin_id};
 use super::registry::PluginRegistry;
-
-#[path = "archive.rs"]
-mod archive;
 
 /// 官方插件打包目录名（resources/ 下，由 build-official-plugins.ps1 生成）。
 pub const OFFICIAL_PLUGINS_DIR_NAME: &str = "official-plugins";
@@ -104,11 +102,8 @@ pub fn import_plugin_dir(source: &Path, plugins_dir: &Path) -> Result<ImportOutc
     })
 }
 
-/// 从路径导入：单插件 ZIP、插件根目录，或包含插件子目录的文件夹。
+/// 从路径导入：路径本身是插件根，或其子目录各自为插件根。
 pub fn import_from_path(source: &Path, plugins_dir: &Path) -> Vec<Result<ImportOutcome, String>> {
-    if source.is_file() {
-        return import_from_path_with_pre_replace(source, plugins_dir, |_| Ok(()));
-    }
     if source.join("plugin.json").is_file() {
         return vec![import_plugin_dir(source, plugins_dir)];
     }
@@ -128,20 +123,6 @@ pub fn import_from_path(source: &Path, plugins_dir: &Path) -> Vec<Result<ImportO
         out.push(Err("路径下未找到 plugin.json".into()));
     }
     out
-}
-
-/// ZIP 校验、暂存完成后，在替换前停止对应插件运行时。
-/// 文件夹导入沿用现有流程；回调失败不会覆盖已安装的 ZIP 插件。
-pub fn import_from_path_with_pre_replace(
-    source: &Path,
-    plugins_dir: &Path,
-    mut before_replace: impl FnMut(&str) -> Result<(), String>,
-) -> Vec<Result<ImportOutcome, String>> {
-    if source.is_file() {
-        vec![archive::import_zip_with_pre_replace(source, plugins_dir, &mut before_replace)]
-    } else {
-        import_from_path(source, plugins_dir)
-    }
 }
 
 /// 安装捆绑的官方样例；返回每条导入结果。

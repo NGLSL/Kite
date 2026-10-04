@@ -64,15 +64,12 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
 
         Message::PluginQueryReady(..)
         | Message::PluginHostCall(..)
-        | Message::PluginExecuteReady(..)
         | Message::PluginSetEnabled(..)
         | Message::PluginReload(..)
-        | Message::PluginManagementReady(..)
         | Message::PluginOpenDir(..)
         | Message::PluginOpenLog(..)
         | Message::PluginUninstall(..)
         | Message::PluginImportPathChanged(..)
-        | Message::PluginImportReady(..)
         | Message::PluginImportFromPath
         | Message::PluginInstallOfficial
         | Message::PluginOpenPluginsDir
@@ -142,12 +139,7 @@ pub(super) fn apply_plugin_import_results(
     for r in results {
         match r {
             Ok(out) => {
-                super::update_plugins::reload_plugin_in_background(
-                    state,
-                    out.plugin_id.clone(),
-                    "重新加载",
-                    Ok(()),
-                );
+                super::with_plugin_host(state, |host| host.reload(&out.plugin_id));
                 let reg_result = super::with_plugin_registry(state, |reg| {
                     plugin::apply_import_to_registry(reg, &out.dest)
                 });
@@ -877,12 +869,7 @@ mod plugin_ui_tests {
     }
 
     #[allow(dead_code)]
-    fn _silence_unused(
-        activation: Activation,
-        mode: ResponseMode,
-        action: ResultAction,
-        src: ResultSource,
-    ) {
+    fn _silence_unused(activation: Activation, mode: ResponseMode, action: ResultAction, src: ResultSource) {
         let _ = (activation, mode, action, src);
     }
 }

@@ -4,8 +4,8 @@ use super::*;
 
 /// Build the single action list shared by mouse and Shift+F10.
 pub(super) fn menu_entries(state: &State, item: &AppItem) -> Vec<(String, MenuAction)> {
-    let target_is_fs =
-        std::path::Path::new(&item.target).is_file() || std::path::Path::new(&item.target).is_dir();
+    let target_is_fs = std::path::Path::new(&item.target).is_file()
+        || std::path::Path::new(&item.target).is_dir();
     let mut entries = Vec::new();
     if target_is_fs {
         entries.push(("打开所在文件夹".to_string(), MenuAction::OpenFolder));
@@ -24,17 +24,8 @@ pub(super) fn menu_entries(state: &State, item: &AppItem) -> Vec<(String, MenuAc
             .map(|db| db.is_demoted(&item.id))
             .unwrap_or(false);
         entries.push((
-            if demoted {
-                "恢复优先级"
-            } else {
-                "降低此结果优先级"
-            }
-            .to_string(),
-            if demoted {
-                MenuAction::Undemote
-            } else {
-                MenuAction::Demote
-            },
+            if demoted { "恢复优先级" } else { "降低此结果优先级" }.to_string(),
+            if demoted { MenuAction::Undemote } else { MenuAction::Demote },
         ));
     }
     if is_app_entry(item) {
@@ -62,14 +53,15 @@ pub(super) fn menu_entries(state: &State, item: &AppItem) -> Vec<(String, MenuAc
 }
 
 pub(super) fn is_app_entry(item: &AppItem) -> bool {
-    !item.id.starts_with("kite:") && crate::model::is_hideable_application_source(&item.source)
+    !item.id.starts_with("kite:")
+        && crate::model::is_hideable_application_source(&item.source)
 }
 
 /// Pin/Demote keep the original panel permissions. Alias/Hide use the
 /// narrower application-source check above, while file, web and plugin
 /// results may still carry their existing preference actions.
 fn can_personalize_entry(item: &AppItem) -> bool {
-    item.source != "loci-status" && item.source != "direct-path"
+    item.source != "everything-status" && item.source != "direct-path"
 }
 
 fn resolve_from_index(state: &State, captured: &AppItem) -> Option<AppItem> {
@@ -90,10 +82,8 @@ fn needs_index_resolution(item: &AppItem, action: MenuAction) -> bool {
     if matches!(action, MenuAction::SetAlias | MenuAction::HideEntry) {
         return true;
     }
-    matches!(
-        action,
-        MenuAction::TogglePin | MenuAction::Demote | MenuAction::Undemote
-    ) && !item.id.starts_with("kite:")
+    matches!(action, MenuAction::TogglePin | MenuAction::Demote | MenuAction::Undemote)
+        && !item.id.starts_with("kite:")
         && (is_app_entry(item)
             || matches!(
                 item.source.as_str(),
@@ -266,7 +256,9 @@ pub(super) fn menu_action(state: &mut State, item: AppItem, action: MenuAction) 
                     let hidden_ids = state.hidden_ids.clone();
                     state.results.retain(|result| {
                         !hidden_ids.contains(&result.item.id)
-                            || !crate::model::is_hideable_application_source(&result.item.source)
+                            || !crate::model::is_hideable_application_source(
+                                &result.item.source,
+                            )
                     });
                     if state.results.is_empty() {
                         state.selected = 0;
@@ -387,7 +379,9 @@ pub(super) fn on_key(
     // Settings and standalone tool windows own their text/button keyboard
     // interaction. Keep only Escape global so captured widget events cannot
     // move or launch a result in the hidden/secondary UI.
-    if (state.settings_open || state.any_tool_open()) && !matches!(key, Key::Named(Named::Escape)) {
+    if (state.settings_open || state.any_tool_open())
+        && !matches!(key, Key::Named(Named::Escape))
+    {
         return Task::none();
     }
 
@@ -433,9 +427,7 @@ pub(super) fn on_key(
                 }
                 let selected = state.menu_selected;
                 let chosen = state.menu.as_ref().and_then(|(item, _, _)| {
-                    menu_entries(state, item)
-                        .get(selected)
-                        .map(|(_, action)| *action)
+                    menu_entries(state, item).get(selected).map(|(_, action)| *action)
                 });
                 if let (Some((item, _, _)), Some(action)) = (state.menu.clone(), chosen) {
                     return menu_action(state, item, action);
@@ -555,7 +547,7 @@ pub(super) fn on_key(
                     return focus(search_view::input_id());
                 } else if state.files_mode {
                     state.files_mode = false;
-                    state.file_filter = system::file_filter::FileFilter::All;
+                    state.file_filter = system::everything::FileFilter::All;
                     state.request_file_search();
                     state.refresh_results();
                     return Task::batch([sync_scroll(state), focus(search_view::input_id())]);
@@ -897,7 +889,7 @@ pub(super) fn exec_result_action(
             if item.id == "kite:action:files" {
                 state.files_mode = !state.files_mode;
                 if !state.files_mode {
-                    state.file_filter = system::file_filter::FileFilter::All;
+                    state.file_filter = system::everything::FileFilter::All;
                 }
                 state.request_file_search();
                 state.refresh_results();
@@ -907,27 +899,17 @@ pub(super) fn exec_result_action(
             if item.id == super::json_tool::CONFIRM_RESULT_ID {
                 return super::tools::confirm_open(state);
             }
-            if item.id == "loci:configure" {
-                let enabled = state
-                    .plugin_registry
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get("com.kite.loci")
-                    .is_some_and(|plugin| plugin.enabled);
-                if !enabled {
-                    let task = open_settings(state);
-                    state.settings_section = Section::Plugins;
-                    return Task::batch([
-                        task,
-                        flash(state, "请导入并启用 Loci 插件，随后在插件中安装服务"),
-                    ]);
-                }
-                return exec_plugin_action(
-                    state,
-                    "com.kite.loci",
-                    "enter_provider",
-                    serde_json::json!({"provider": "files"}),
-                );
+            if let Some(url) = everything_download_url(&item.id) {
+                let result = app::uwp::launch_shell_path(url);
+                state.qlog(|| format!("open Everything download err={result:?}"));
+                return if result.is_ok() {
+                    launch_and_hide(state)
+                } else {
+                    flash(state, "无法打开 Everything 官方下载页")
+                };
+            }
+            if item.id == system::everything::NOT_RUNNING_RESULT_ID {
+                return flash(state, "请先启动 Everything，再使用文件搜索");
             }
             if let Some((kind, browser_id, payload)) = app::web::parse_id(&item.id) {
                 let t0 = Instant::now();
@@ -1036,7 +1018,8 @@ fn exec_plugin_action(
 ) -> Task<Message> {
     if action_id == "enter_trigger_provider" {
         let query = state.query.clone();
-        let activation = super::with_plugin_registry(state, |reg| plugin::route_query(&query, reg));
+        let activation =
+            super::with_plugin_registry(state, |reg| plugin::route_query(&query, reg));
         let Some(act) = activation.filter(|act| {
             act.plugin_id == plugin_id
                 && payload.get("provider").and_then(|v| v.as_str())
@@ -1070,7 +1053,6 @@ fn exec_plugin_action(
                 true,
             );
         }
-        prepare_loci_provider(state, plugin_id);
         state.provider_mode = Some(act);
         state.plugin_panel = None;
         state.refresh_results();
@@ -1135,7 +1117,6 @@ fn exec_plugin_action(
                     false,
                 );
             }
-            prepare_loci_provider(state, plugin_id);
             state.provider_mode = Some(act.clone());
             state.plugin_panel = None;
             state.navigation_mode = NavigationMode::Input;
@@ -1149,8 +1130,6 @@ fn exec_plugin_action(
                 )
             });
             state.refresh_results();
-        } else if plugin_id == "com.kite.loci" {
-            return flash(state, "请在设置的插件页安装并启用 Loci，再使用文件搜索");
         }
         return focus(search_view::input_id());
     }
@@ -1160,141 +1139,38 @@ fn exec_plugin_action(
     let host = state.plugin_host.clone();
     let pid = plugin_id.to_string();
     let aid = action_id.to_string();
-    let generation = state.plugin_query_generation;
     std::thread::spawn(move || {
-        let (result, host_calls) = {
+        let host_calls = {
+            let reg = registry.lock().unwrap_or_else(|e| e.into_inner());
             let mut host = host.lock().unwrap_or_else(|e| e.into_inner());
-            // Recheck after waiting for an in-flight RPC: settings may have
-            // disabled, removed or replaced the plugin while this action waited.
-            let plugin = registry
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&pid)
-                .filter(|plugin| plugin.enabled)
-                .cloned();
-            let Some(plugin) = plugin else {
-                return;
-            };
-            let mut reg = plugin::PluginRegistry::new();
-            reg.insert_loaded(plugin);
-            let result = host
-                .execute(&reg, &pid, &aid, payload)
-                .map(|_| ())
-                .map_err(|error| error.to_string());
-            (result, host.drain_host_calls())
+            let _ = host.execute(&reg, &pid, &aid, payload);
+            host.drain_host_calls()
         };
-        for (plugin_id, call) in host_calls {
-            super::send_event(Message::PluginHostCall(plugin_id, call));
+        for (pid, call) in host_calls {
+            super::send_event(Message::PluginHostCall(pid, call));
         }
-        super::send_event(Message::PluginExecuteReady(pid, generation, result));
     });
     Task::none()
 }
 
-fn prepare_loci_provider(state: &mut State, plugin_id: &str) {
-    if plugin_id == "com.kite.loci" {
-        state.files_mode = false;
-        state.file_filter = system::file_filter::FileFilter::All;
-        state.file_query_generation = state.file_query_generation.wrapping_add(1);
-        state.file_search_worker.cancel_current();
-        state.file_results.clear();
-    }
+fn everything_download_url(item_id: &str) -> Option<&'static str> {
+    (item_id == system::everything::DOWNLOAD_RESULT_ID).then_some(system::everything::DOWNLOAD_URL)
 }
 
 #[cfg(test)]
-mod loci_action_tests {
-    use super::super::test_support::test_state;
+mod everything_action_tests {
     use super::*;
 
-    fn configure_state(enabled: Option<bool>) -> State {
-        let mut state = test_state("report");
-        state.files_mode = true;
-        state.file_filter = system::file_filter::FileFilter::Documents;
-        state.results = vec![SearchResult::scored(
-            AppItem::scanned(
-                "loci:configure".into(),
-                "配置 Loci".into(),
-                "loci:configure".into(),
-                None,
-                None,
-                "loci-status",
-            ),
-            1000,
-            "loci-status",
-        )];
-        if let Some(enabled) = enabled {
-            let manifest =
-                plugin::manifest::parse_manifest(include_str!("../plugin/testdata/loci.json"))
-                    .unwrap();
-            state.plugin_registry.lock().unwrap().insert_loaded(
-                plugin::registry::RegisteredPlugin {
-                    manifest,
-                    root: std::env::temp_dir(),
-                    enabled,
-                    phase: if enabled {
-                        plugin::registry::RuntimePhase::Dormant
-                    } else {
-                        plugin::registry::RuntimePhase::Disabled
-                    },
-                    last_error: None,
-                },
-            );
-        }
-        state
-    }
-
     #[test]
-    fn loci_status_click_opens_management_provider_and_exits_file_mode() {
-        let mut state = configure_state(Some(true));
-        let _ = launch_selected(&mut state);
-        let activation = state
-            .provider_mode
-            .as_ref()
-            .expect("Loci provider activated");
-        assert_eq!(activation.plugin_id, "com.kite.loci");
-        assert_eq!(activation.provider_id, "files");
-        assert!(!state.files_mode);
-        assert_eq!(state.file_filter, system::file_filter::FileFilter::All);
-        assert!(state.query.starts_with("loci"));
-        assert!(!state.hidden);
-    }
-
-    #[test]
-    fn loci_trigger_entry_exits_file_mode_and_invalidates_pending_files() {
-        let mut state = configure_state(Some(true));
-        state.query = "loci status".into();
-        state.file_results = state.results.clone();
-        let before = state.file_query_generation;
-        let _ = exec_plugin_action(
-            &mut state,
-            "com.kite.loci",
-            "enter_trigger_provider",
-            serde_json::json!({"provider": "files"}),
-        );
-        assert!(!state.files_mode);
-        assert_eq!(state.file_filter, system::file_filter::FileFilter::All);
-        assert!(state.file_results.is_empty());
-        assert!(state.file_query_generation != before);
+    fn missing_dependency_result_targets_official_download_page() {
         assert_eq!(
-            state.provider_mode.as_ref().unwrap().effective_query,
-            "status"
+            everything_download_url(system::everything::DOWNLOAD_RESULT_ID),
+            Some("https://www.voidtools.com/downloads/")
         );
-    }
-
-    #[test]
-    fn loci_status_click_explains_missing_or_disabled_plugin() {
-        for enabled in [None, Some(false)] {
-            let mut state = configure_state(enabled);
-            let _ = launch_selected(&mut state);
-            assert!(state.provider_mode.is_none());
-            assert!(state
-                .flash
-                .as_deref()
-                .is_some_and(|text| text.contains("导入并启用 Loci")));
-            assert!(!state.hidden);
-            assert!(state.settings_open);
-            assert_eq!(state.settings_section, Section::Plugins);
-        }
+        assert_eq!(
+            everything_download_url(system::everything::NOT_RUNNING_RESULT_ID),
+            None
+        );
     }
 }
 
@@ -1759,10 +1635,7 @@ mod result_panel_tests {
             Physical::Code(Code::Enter),
             Modifiers::empty(),
         );
-        assert!(
-            state.menu.is_some(),
-            "IME Enter must not execute or close panel"
-        );
+        assert!(state.menu.is_some(), "IME Enter must not execute or close panel");
     }
 
     #[test]
@@ -1772,15 +1645,12 @@ mod result_panel_tests {
         let _ = open_context_menu(&mut state, 0);
         state.alt_down = true;
         state.query_at_alt = Some("k".into());
-        let _ = super::super::update_search::handle(&mut state, Message::QueryChanged("k1".into()));
-        assert!(
-            state.menu.is_some(),
-            "Alt text fallback must not close the panel"
+        let _ = super::super::update_search::handle(
+            &mut state,
+            Message::QueryChanged("k1".into()),
         );
-        assert!(
-            !state.settings_open,
-            "Alt text fallback must not launch the target"
-        );
+        assert!(state.menu.is_some(), "Alt text fallback must not close the panel");
+        assert!(!state.settings_open, "Alt text fallback must not launch the target");
     }
 
     #[test]
@@ -1914,17 +1784,7 @@ mod result_panel_tests {
         let _ = open_context_menu(&mut state, 0);
         state.query = "later".into();
         let _ = menu_action(&mut state, item, MenuAction::ForgetQuery);
-        assert!(state
-            .history
-            .as_ref()
-            .unwrap()
-            .query_pairs_for("vs")
-            .is_empty());
-        assert!(!state
-            .history
-            .as_ref()
-            .unwrap()
-            .query_pairs_for("code")
-            .is_empty());
+        assert!(state.history.as_ref().unwrap().query_pairs_for("vs").is_empty());
+        assert!(!state.history.as_ref().unwrap().query_pairs_for("code").is_empty());
     }
 }

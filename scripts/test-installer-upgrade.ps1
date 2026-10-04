@@ -52,8 +52,7 @@ else {
 foreach ($pluginProcess in @(
     'kite-plugin-calculator.exe',
     'kite-plugin-window-switcher.exe',
-    'kite-plugin-devtools.exe',
-    'kite-plugin-loci.exe'
+    'kite-plugin-devtools.exe'
 )) {
     if ($source -notmatch [regex]::Escape("/IM $pluginProcess")) {
         $failures.Add("The installer does not stop the official plugin process $pluginProcess before overwriting bundled files.")
@@ -70,11 +69,6 @@ if ($source -notmatch 'WriteRegStr\s+HKLM\s+"Software\\Kite"\s+"InstallLocation"
 
 if ($source -notmatch 'DeleteRegKey\s+HKLM\s+"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Kite"') {
     $failures.Add("Uninstalling leaves the Kite entry in Programs and Features.")
-}
-
-# Kite owns only its client plugin; Loci is installed independently.
-if ($source -match 'SEC_LOCI_SERVICE|install-service\.ps1|loci-service\.exe|resources\\loci') {
-    $failures.Add("Kite must not install, overwrite, stop, or uninstall the independent Loci service.")
 }
 
 if ($failures.Count -gt 0) {

@@ -16,6 +16,7 @@ pub fn write(dest: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// 用 `ReplaceFileW` / `MoveFileExW` 把 tmp 换到 dest；失败再退回 remove+rename。
 fn replace(tmp: &Path, dest: &Path) -> io::Result<()> {
+    #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
         use windows::core::PCWSTR;

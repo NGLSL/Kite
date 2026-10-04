@@ -2,9 +2,6 @@
 //!
 //! 宿主契约见 `docs/PLUGIN-DEVELOPMENT.md`。插件进程不链接 Kite 本体。
 
-#[cfg(not(windows))]
-compile_error!("Kite official plugins support Windows targets only");
-
 use std::io::{Read, Write};
 
 use serde_json::{json, Value};

@@ -224,7 +224,7 @@ pub fn launch(item: &AppItem) -> Result<(), String> {
         return Err("builtin action should be handled by launch_app".into());
     }
 
-    // 文件/文件夹（Loci 结果）
+    // 文件/文件夹（Everything 结果）
     let path = Path::new(target);
     if path.is_dir() {
         return opener_open(target);

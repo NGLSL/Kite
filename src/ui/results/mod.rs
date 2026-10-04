@@ -2,7 +2,7 @@
 //!
 //! 职责拆分：
 //! - 本文件：State 编排（请求、落地、合并、Provider / 空 Query 入口）
-//! - `file_search`：Loci 文件结果与索引状态
+//! - `file_search`：Everything 文件结果与依赖状态
 //! - `direct_path`：绝对路径直达动作
 //! - `empty_query`：空 Query 默认列表组装
 
@@ -18,10 +18,11 @@ mod tests;
 
 pub(crate) use direct_path::{build_direct_path_results, prepend_direct_path_results};
 pub(crate) use empty_query::build_empty_query_lists;
+pub(crate) use file_search::{
+    build_file_results, is_current_file_response, prepend_dependency_status,
+};
 #[cfg(test)]
-pub(crate) use file_search::{build_file_results, loci_status_result};
-pub(crate) use file_search::{is_current_file_response, prepend_dependency_status};
-pub(super) use file_search::{FileSearchJob, FileSearchWorker};
+pub(crate) use file_search::everything_status_result;
 
 impl State {
     pub(super) fn request_direct_path(&mut self) {
@@ -51,34 +52,26 @@ impl State {
     pub(super) fn invalidate_file_search(&mut self) {
         self.file_query_generation = self.file_query_generation.wrapping_add(1);
         self.file_results.clear();
-        self.file_search_worker.cancel_current();
     }
 
-    /// 在后台复用 Loci 插件进程查询文件。
+    /// 探测依赖状态，并在可用时把 Everything 查询放到后台线程。
     pub(super) fn request_file_search(&mut self) {
         self.invalidate_file_search();
         let query = self.query.trim().to_string();
-        if !self.files_mode || self.provider_mode.is_some() {
+        if !self.files_mode {
             return;
         }
 
         let generation = self.file_query_generation;
         let icon_dir = self.icon_dir.clone();
         let filter = self.file_filter;
-        let registry = self.plugin_registry.clone();
-        let host = self.plugin_host.clone();
-        self.file_search_worker.submit(FileSearchJob {
-            generation,
-            query,
-            icon_dir,
-            filter,
-            registry,
-            host,
-            on_done: Arc::new(|generation, query, results, elapsed_us| {
-                send_event(Message::FileSearchReady(
-                    generation, query, results, elapsed_us,
-                ))
-            }),
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let results = build_file_results(&query, &icon_dir, filter);
+            let elapsed_us = started.elapsed().as_micros();
+            send_event(Message::FileSearchReady(
+                generation, query, results, elapsed_us,
+            ));
         });
     }
 
@@ -278,8 +271,8 @@ impl State {
 
     /// 最终列表组装的唯一实现。
     ///
-    /// - 非文件模式：应用命中 → 网址直达 → 截断 → 网页搜索槽位
-    /// - 文件模式：Loci 文件优先，再拼应用/网址等其余命中（索引状态仍由调用方置顶）
+    /// - 非文件模式：应用命中 → 网址直达 → 追加 Everything 文件 → 截断 → 网页搜索槽位
+    /// - 文件模式：Everything 文件优先，再拼应用/网址等其余命中（依赖状态仍由调用方置顶）
     ///
     /// 调用方只有异步主路径（`apply_app_search_ready`）；同步刷新不再内联一份，
     /// 避免「第 5 位网页搜索」「文件结果过滤」这类规则改一处漏一处。
@@ -310,7 +303,7 @@ impl State {
             let mut files: Vec<SearchResult> = self
                 .file_results
                 .iter()
-                .filter(|result| result.item.source != "loci-status")
+                .filter(|result| result.item.source != "everything-status")
                 .cloned()
                 .collect();
             if !files.is_empty() {
@@ -323,9 +316,9 @@ impl State {
             && !q_norm.is_empty()
             && app::actions::direct_path_candidate(&self.query).is_none()
         {
-            // 文件模式已把 Loci 命中置顶：再插网页槽位会打散文件列表。
+            // 文件模式已把 Everything 命中置顶：再插网页槽位会打散文件列表。
             let files_mode_has_files =
-                self.files_mode && hits.iter().any(|h| h.item.source == "loci");
+                self.files_mode && hits.iter().any(|h| h.item.source == "everything");
             if !files_mode_has_files {
                 let has_app_like = hits
                     .iter()

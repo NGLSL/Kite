@@ -13,16 +13,28 @@ pub fn plugin_url_allowed(url: &str) -> bool {
     lower.starts_with("http://") || lower.starts_with("https://")
 }
 
-/// 仅允许普通盘符绝对路径或 UNC，拒绝 URI、设备路径和数据流。
-/// 调用方把整个路径作为 ShellExecuteW 的 lpFile，参数为空，不拼接命令。
-/// 因此 &、%、单引号等合法文件名字符按字面保留。
+/// 仅允许盘符绝对路径或 UNC；拒绝 shell:/ms-settings: 等 scheme 与 shell 元字符。
 pub fn plugin_path_allowed(path: &str) -> bool {
     let p = path.trim();
-    if p.contains(['|', '>', '<', '"', '*', '?']) {
+    if p.is_empty() || p.contains('\0') || p.contains('\n') || p.contains('\r') {
         return false;
     }
-    crate::app::actions::direct_path_candidate(p).is_some()
-        && !p.strip_prefix(r"\\").is_some_and(|unc| unc.contains(':'))
+    if p.contains(['&', '|', '>', '<', '^', ';', '"', '\'', '`', '%']) {
+        return false;
+    }
+    let b = p.as_bytes();
+    let drive_abs = b.len() >= 3
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b[2] == b'\\' || b[2] == b'/')
+        && !p[2..].contains(':');
+    // 普通 UNC（\\server\share\...），拒绝 \\?\ 设备路径
+    let unc = p.starts_with(r"\\")
+        && !p.starts_with(r"\\?\")
+        && !p.starts_with(r"\\.\")
+        && p.len() > 2
+        && p[2..].contains('\\');
+    drive_abs || unc
 }
 
 #[cfg(test)]
@@ -40,23 +52,14 @@ mod tests {
     }
 
     #[test]
-    fn path_accepts_literal_names_and_rejects_schemes_devices_and_streams() {
+    fn path_rejects_schemes_and_metachars() {
         assert!(plugin_path_allowed(r"C:\Windows\System32\calc.exe"));
         assert!(plugin_path_allowed(r"\\server\share\file.txt"));
-        assert!(!plugin_path_allowed(
-            "shell:AppsFolder\\Microsoft.WindowsStore"
-        ));
+        assert!(!plugin_path_allowed("shell:AppsFolder\\Microsoft.WindowsStore"));
         assert!(!plugin_path_allowed("ms-settings:clipboard"));
-        assert!(plugin_path_allowed(r"C:\R&D 100%\report';^`.txt"));
-        assert!(plugin_path_allowed(r"\\server\share\R&D 100%.txt"));
+        assert!(!plugin_path_allowed(r"C:\foo & calc.exe"));
         assert!(!plugin_path_allowed("relative\\path.exe"));
         assert!(!plugin_path_allowed(r"\\?\C:\Windows"));
-        assert!(!plugin_path_allowed(r"\\.\C:\Windows"));
-        assert!(!plugin_path_allowed(r"C:\file.txt:stream"));
-        assert!(!plugin_path_allowed(r"\\server\share\file.txt:stream"));
-        assert!(!plugin_path_allowed(r"\\server\"));
-        assert!(!plugin_path_allowed(r"C:\foo | calc.exe"));
-        assert!(!plugin_path_allowed("C:\\foo\nbar.txt"));
         assert!(!plugin_path_allowed(""));
     }
 }

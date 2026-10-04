@@ -1,4 +1,4 @@
-; Kite native installer (NSIS)
+﻿; Kite native installer (NSIS)
 Unicode True
 Name "Kite"
 OutFile "..\artifacts\kite-setup.exe"
@@ -37,7 +37,7 @@ Section "-关闭旧版 Kite" SEC_CLOSE_OLD
   ExecWait '"$SYSDIR\taskkill.exe" /F /IM kite.exe'
   ; 插件是独立子进程，旧版宿主退出异常时可能仍占用待覆盖的官方插件文件。
   ; 这里只结束 Kite 官方插件进程，不影响用户启动的其他程序或第三方插件。
-  ExecWait '"$SYSDIR\taskkill.exe" /F /IM kite-plugin-calculator.exe /IM kite-plugin-window-switcher.exe /IM kite-plugin-devtools.exe /IM kite-plugin-loci.exe'
+  ExecWait '"$SYSDIR\taskkill.exe" /F /IM kite-plugin-calculator.exe /IM kite-plugin-window-switcher.exe /IM kite-plugin-devtools.exe'
   Sleep 300
 SectionEnd
 
@@ -47,12 +47,11 @@ SectionEnd
 
 Section "Kite 主程序" SEC_MAIN
   SectionIn RO
-  ; 覆盖升级清理已移除的旧文件搜索资源；不触碰用户目录与插件索引。
-  Delete "$INSTDIR\resources\Everything64.dll"
-  Delete "$INSTDIR\THIRD_PARTY_NOTICES.txt"
   SetOutPath "$INSTDIR"
   File "..\target\release\kite.exe"
+  File "..\THIRD_PARTY_NOTICES.txt"
   SetOutPath "$INSTDIR\resources"
+  File "..\resources\Everything64.dll"
   File "..\resources\open.wav"
   SetOutPath "$INSTDIR\resources\official-plugins"
   File /r "..\resources\official-plugins\*"

@@ -129,7 +129,7 @@ pub(super) fn search_row<'a>(state: &'a State, tokens: ThemeTokens) -> Element<'
     if state.provider_mode.is_none() {
         if state.files_mode {
             let filter = pick_list(
-                crate::system::file_filter::FileFilter::ALL,
+                crate::system::everything::FileFilter::ALL,
                 Some(state.file_filter),
                 Message::FileFilterChanged,
             )
