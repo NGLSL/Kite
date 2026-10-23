@@ -16,6 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # Explicit ref preserves the annotated tag object during checkout.
+          ref: ${{ github.ref }}
           fetch-depth: 0
           fetch-tags: true
       - name: Verify annotated version tag, main ancestry and exact-commit CI
@@ -29,6 +31,8 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $type -ne 'tag') { throw 'Release requires an annotated tag' }
           $tagCommit = git rev-parse "$($env:GITHUB_REF)^{commit}"
           if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve tag commit' }
+          $headCommit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $tagCommit -ne $headCommit -or $tagCommit -ne $env:GITHUB_SHA) { throw 'Tag, checkout and workflow event commits differ' }
           $version = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
           if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag and Cargo package version differ' }
           git fetch origin main --no-tags
