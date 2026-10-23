@@ -4,6 +4,7 @@
 //! service boundary; the UI never performs volume I/O or waits for a build.
 
 mod build;
+mod diagnostics;
 
 use std::fmt;
 
@@ -52,7 +53,7 @@ impl fmt::Display for FileFilter {
 
 /// Dispatch the ordinary-permission, short-lived builder before claiming a UI instance.
 pub fn dispatch_entry() -> bool {
-    build::dispatch_entry()
+    diagnostics::dispatch_entry() || build::dispatch_entry()
 }
 
 use kite_file_index::{Generation, LiveSearch, Query};
@@ -120,6 +121,7 @@ struct Shared {
     active: AtomicU64,
     running: Mutex<Option<Running>>,
     query_cancel: Mutex<Option<kite_file_index::CancelToken>>,
+    diagnostics: Mutex<Value>,
 }
 
 pub struct Controller {
@@ -149,6 +151,7 @@ impl Controller {
                 active: AtomicU64::new(0),
                 running: Mutex::new(None),
                 query_cancel: Mutex::new(None),
+                diagnostics: Mutex::new(serde_json::json!({})),
             }),
         })
     }
@@ -204,6 +207,7 @@ impl Controller {
             cancel_running(previous);
         }
         let id = self.shared.active.fetch_add(1, Ordering::AcqRel) + 1;
+        self.shared.set_diagnostics(id, serde_json::json!({}));
         let cancel = Arc::new(AtomicBool::new(false));
         let service = Arc::new(Mutex::new(None));
         let done = Arc::new(AtomicBool::new(false));
@@ -397,6 +401,19 @@ impl Shared {
         }
     }
 
+    fn set_diagnostics(&self, id: u64, value: Value) {
+        if self.active.load(Ordering::Acquire) != id {
+            return;
+        }
+        let mut current = self
+            .diagnostics
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.active.load(Ordering::Acquire) == id {
+            *current = value;
+        }
+    }
+
     fn progress(&self, id: u64, event: Value) {
         let volume = event.get("volume").and_then(Value::as_str).unwrap_or("");
         let (phase, detail) = match event.get("stage").and_then(Value::as_str) {
@@ -462,13 +479,29 @@ fn run(
         kite_index_service::request_install().map_err(service_error)?;
     }
     check_cancel(&cancel)?;
-    let mut client = Client::connect_current(false).map_err(service_error)?;
+    let mut client = match Client::connect_current(false) {
+        Err(error) if allow_install && error.kind == ErrorKind::NeedsInstall => {
+            // A registered component may still speak an older feed protocol.
+            // Only the user's explicit authorization may replace that image.
+            shared.update(
+                id,
+                Phase::Starting,
+                "请在 Windows 授权窗口中确认更新索引组件",
+                None,
+            );
+            kite_index_service::request_install().map_err(service_error)?;
+            check_cancel(&cancel)?;
+            Client::connect_current(false).map_err(service_error)?
+        }
+        result => result.map_err(service_error)?,
+    };
     *service_handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(client.cancel_handle());
+    let acknowledge_handle = client.cancel_handle();
     check_cancel(&cancel)?;
     let progress_shared = Arc::clone(shared);
     let progress = move |event: Value| progress_shared.progress(id, event);
     let existing = if rebuild { None } else { load_current(root)? };
-    let (generation, mut watch, new_generation, protected_checkpoint) =
+    let (generation, mut watch, new_generation, protected_checkpoint, loaded_resume_cursors) =
         if let Some((generation, checkpoint)) = existing {
             shared.update(
                 id,
@@ -476,10 +509,13 @@ fn run(
                 "正在补齐退出期间的文件变化",
                 Some(generation.entries),
             );
+            let resume = LiveSearch::resume_cursors(&generation)
+                .map_err(|error| (Phase::NeedsRebuild, format!("索引需要重建：{error}")))?;
+            let loaded_resume_cursors = resume.clone().unwrap_or(Value::Null);
             let watch = client
-                .watch_path(&checkpoint, None)
+                .watch_path_from(&checkpoint, resume, None)
                 .map_err(checkpoint_error)?;
-            (generation, watch, false, checkpoint)
+            (generation, watch, false, checkpoint, loaded_resume_cursors)
         } else {
             shared.update(id, Phase::Indexing, "正在读取本机 NTFS 磁盘的文件名", None);
             let capture = client
@@ -500,7 +536,7 @@ fn run(
                 &progress,
             )
             .map_err(|error| (Phase::Error, error.to_string()))?;
-            (generation, watch, true, checkpoint)
+            (generation, watch, true, checkpoint, Value::Null)
         };
     check_cancel(&cancel)?;
     let feed = watch.feed_path().to_path_buf();
@@ -549,13 +585,31 @@ fn run(
             "正在同步最新变化",
             Some(generation.entries),
         );
-        let mut engine = LiveSearch::open_with_cancel(&generation, &feed, Arc::clone(&cancel))
-            .map_err(|error| (Phase::NeedsRebuild, format!("索引需要重建：{error}")))?;
+        let acknowledge = Arc::new(move |seq| {
+            let _ = acknowledge_handle.acknowledge(seq);
+        });
+        let mut engine = LiveSearch::open_with_resume_and_ack(
+            &generation,
+            &feed,
+            Arc::clone(&cancel),
+            acknowledge,
+        )
+        .map_err(|error| (Phase::NeedsRebuild, format!("索引需要重建：{error}")))?;
         check_cancel(&cancel)?;
         live_health(&engine.status(), &watch_error)?;
         if new_generation {
             publish_current(root, &generation, &protected_checkpoint)?;
         }
+        shared.set_diagnostics(
+            id,
+            serde_json::json!({
+                "generation_root":generation.root.to_string_lossy(),
+                "protected_checkpoint":protected_checkpoint.to_string_lossy(),
+                "feed_path":feed.to_string_lossy(),
+                "loaded_resume_cursors":loaded_resume_cursors,
+                "live":engine.status(),
+            }),
+        );
         shared.update(
             id,
             Phase::Ready,
@@ -565,6 +619,16 @@ fn run(
         let mut changes = engine.status()["changes"].as_u64().unwrap_or(0);
         while !cancel.load(Ordering::Acquire) {
             let state = engine.status();
+            shared.set_diagnostics(
+                id,
+                serde_json::json!({
+                    "generation_root":generation.root.to_string_lossy(),
+                    "protected_checkpoint":protected_checkpoint.to_string_lossy(),
+                    "feed_path":feed.to_string_lossy(),
+                    "loaded_resume_cursors":loaded_resume_cursors,
+                    "live":state,
+                }),
+            );
             live_health(&state, &watch_error)?;
             let current_changes = state["changes"].as_u64().unwrap_or(0);
             if current_changes != changes {
@@ -783,6 +847,9 @@ fn remove_previous_generation(root: &Path, name: &str) -> Result<(), String> {
         "identities.sorted.provenance.json",
         "journal-start.json",
         "generation.json",
+        "live-state.sqlite",
+        "live-state.sqlite-wal",
+        "live-state.sqlite-shm",
     ];
     for name in files {
         let path = directory.join(name);

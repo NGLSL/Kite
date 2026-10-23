@@ -30,13 +30,13 @@ Kite 是面向 Windows 的轻量应用启动器，使用 Rust 2021、Iced 0.14 �
 - 修改搜索行为时补充 Rust 回归测试。
 - 保持改动聚焦，避免无需求的抽象、依赖和跨平台扩展。
 
-## 验证命令
+## 本机检查与发布
+
+本机按改动范围执行必要的编译、格式和静态检查；仅在定位具体问题时运行相关既有测试。常规提交和发布不在本机重复全量测试、Release 构建、NSIS 打包、安装或覆盖升级。
 
 ```powershell
-cargo check
-cargo test
-cargo build --release
-.\scripts\build-installer.ps1
+cargo check --locked --offline
+git diff --check
 ```
 
-`build-installer.ps1` 会自动构建 release 版本并生成 `artifacts/kite-setup.exe`。需要 NSIS 时安装 `NSIS.NSIS`。
+正式构建、安装验收、校验和与产物上传统一由 GitHub Actions 执行。发布版本或修改发布流程时先读 [`docs/RELEASING.md`](docs/RELEASING.md)，以此处的项目流程为准；完整 CI 通过后才在对应提交打注释 tag。安装验证失败阻止发布。没有单独授权时，不安装、替换或重启本机现用 Kite 和读取组件。

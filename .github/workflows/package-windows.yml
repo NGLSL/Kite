@@ -1,0 +1,352 @@
+name: Package and validate Windows installer
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            official-plugins
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+      # This entry point builds the application and official plugins exactly once.
+      - name: Build installer
+        run: ./scripts/build-installer.ps1 -Nsis 'C:\Program Files (x86)\NSIS\makensis.exe'
+      - name: Record build payload and installer checksum
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+          if (-not $version) { throw 'Cargo package version missing' }
+          $files = @(
+            @{ source = 'target/release/kite.exe'; path = 'kite.exe' }
+            @{ source = 'resources/open.wav'; path = 'resources/open.wav' }
+          )
+          $files += @(Get-ChildItem resources/official-plugins -Recurse -File | ForEach-Object {
+            @{ source = $_.FullName; path = [IO.Path]::GetRelativePath($PWD.Path, $_.FullName).Replace('\', '/') }
+          })
+          if ($files.Count -lt 8) { throw 'Official plugin payload is incomplete' }
+          $payload = @($files | ForEach-Object {
+            @{ path = $_.path; sha256 = (Get-FileHash -LiteralPath $_.source -Algorithm SHA256).Hash }
+          })
+          $manifest = @{
+            schemaVersion = 1; commit = (git rev-parse HEAD).Trim(); version = $version
+            installerSha256 = (Get-FileHash artifacts/kite-setup.exe -Algorithm SHA256).Hash
+            installerBytes = (Get-Item artifacts/kite-setup.exe).Length
+            payload = $payload
+          }
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content artifacts/payload-manifest.json -Encoding utf8
+          "$($manifest.installerSha256)  kite-setup.exe" | Set-Content artifacts/kite-setup.exe.sha256 -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kite-package-candidate
+          if-no-files-found: error
+          retention-days: 3
+          path: |
+            artifacts/kite-setup.exe
+            artifacts/kite-setup.exe.sha256
+            artifacts/payload-manifest.json
+
+  validate:
+    needs: package
+    # A separate runner ensures validation cannot pass by finding build outputs.
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: kite-package-candidate
+          path: artifacts
+      - name: Validate clean install, same-version overwrite and uninstall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifest = Get-Content artifacts/payload-manifest.json -Raw | ConvertFrom-Json
+          if ($manifest.commit -ne $env:GITHUB_SHA) { throw 'Candidate commit mismatch' }
+          $installer = (Resolve-Path artifacts/kite-setup.exe).Path
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne $manifest.installerSha256 -or (Get-Item $installer).Length -ne $manifest.installerBytes) { throw 'Installer checksum/size mismatch' }
+          $installDir = Join-Path $env:RUNNER_TEMP 'kite-installer-validation'
+          if (Test-Path $installDir) { throw 'Install directory must be clean' }
+          $userDir = Join-Path $env:APPDATA 'com.kite.launcher'
+          $probe = Join-Path $userDir 'actions-installer-preservation-probe.txt'
+          New-Item -ItemType Directory -Force $userDir | Out-Null
+          if (Test-Path $probe) { throw 'Probe already exists' }
+          $probeValue = [guid]::NewGuid().ToString()
+          Set-Content -LiteralPath $probe -Value $probeValue -Encoding utf8
+          $registry = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
+          $uninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\Kite'
+          $serviceHost = Join-Path $env:ProgramW6432 'Kite\file-index\kite-index-host.exe'
+          if ((Get-Service KiteFileIndex -ErrorAction SilentlyContinue) -or (Test-Path $serviceHost) -or $registry.OpenSubKey($uninstallKey)) {
+            throw 'Validation requires a runner without an existing Kite installation'
+          }
+          function Invoke-InstallerProcess([string]$File, [string]$Arguments) {
+            $process = Start-Process -FilePath $File -ArgumentList $Arguments -PassThru -WindowStyle Hidden
+            if (-not $process.WaitForExit(120000)) {
+              $process.Kill()
+              throw "Timed out: $File"
+            }
+            if ($process.ExitCode -ne 0) { throw "Process failed ($($process.ExitCode)): $File" }
+          }
+          function Assert-Probe {
+            if (-not (Test-Path $probe) -or (Get-Content $probe -Raw).Trim() -ne $probeValue) { throw 'User data probe was modified or removed' }
+          }
+          function Assert-InstalledPayload {
+            foreach ($file in $manifest.payload) {
+              $path = Join-Path $installDir $file.path
+              if (-not (Test-Path -LiteralPath $path) -or (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $file.sha256) {
+                throw "Installed payload mismatch: $($file.path)"
+              }
+            }
+            if (-not (Test-Path (Join-Path $installDir 'uninstall.exe'))) { throw 'Uninstaller missing' }
+            $key = $registry.OpenSubKey($uninstallKey)
+            if (-not $key) { throw 'Uninstall registry entry missing (Registry32)' }
+            try {
+              if ($key.GetValue('DisplayName') -ne 'Kite' -or $key.GetValue('InstallLocation') -ne $installDir -or $key.GetValue('UninstallString') -ne (Join-Path $installDir 'uninstall.exe')) {
+                throw 'Uninstall registry metadata mismatch'
+              }
+            } finally { $key.Dispose() }
+            $location = $registry.OpenSubKey('Software\Kite')
+            if (-not $location) { throw 'Remembered installation path missing' }
+            try {
+              if ($location.GetValue('InstallLocation') -ne $installDir) { throw 'Remembered installation path mismatch' }
+            } finally { $location.Dispose() }
+            Assert-Probe
+          }
+          # NSIS /D= must be last and must not be quoted, including for paths with spaces.
+          Invoke-InstallerProcess $installer "/S /D=$installDir"
+          Assert-InstalledPayload
+          if (Get-Service KiteFileIndex -ErrorAction SilentlyContinue) { throw 'Fresh installation unexpectedly enabled the indexing service' }
+          Invoke-InstallerProcess (Join-Path $installDir 'kite.exe') '--kite-index-install'
+          function Assert-Service {
+            $service = Get-CimInstance Win32_Service -Filter "Name='KiteFileIndex'"
+            if (-not $service -or $service.State -ne 'Stopped' -or $service.StartMode -ne 'Manual' -or $service.PathName -ne ('"' + $serviceHost + '" --kite-index-service')) { throw 'Index service registration/state mismatch' }
+            if ((Get-FileHash $serviceHost -Algorithm SHA256).Hash -ne ($manifest.payload | Where-Object path -eq 'kite.exe').sha256) { throw 'Index service host payload mismatch' }
+          }
+          Assert-Service
+          # The installed production controller consumes real NTFS changes.
+          $exerciseRoot = Join-Path $env:RUNNER_TEMP ('kite-usn-' + [guid]::NewGuid().ToString('N'))
+          $sessionDataDirectory = Join-Path $exerciseRoot 'profile'
+          $fileRoot = Join-Path $exerciseRoot ('payload\' + ('a' * 28) + '\' + ('b' * 28))
+          New-Item -ItemType Directory -Path $sessionDataDirectory, $fileRoot -Force | Out-Null
+          $token = [guid]::NewGuid().ToString('N').Substring(0, 16)
+          $script:session = $null
+          function Start-FileSession {
+            $info = [Diagnostics.ProcessStartInfo]::new()
+            $info.FileName = Join-Path $installDir 'kite.exe'
+            $info.UseShellExecute = $false
+            $info.CreateNoWindow = $true
+            $info.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+            $info.RedirectStandardInput = $true
+            $info.RedirectStandardOutput = $true
+            $info.RedirectStandardError = $true
+            $info.ArgumentList.Add('--kite-file-index-session')
+            $info.ArgumentList.Add($sessionDataDirectory)
+            $process = [Diagnostics.Process]::new()
+            $process.StartInfo = $info
+            if (-not $process.Start()) { throw 'Cannot start installed file-search session' }
+            $script:session = @{ process = $process; stderr = $process.StandardError.ReadToEndAsync() }
+          }
+          function Invoke-FileCommand($Command) {
+            $process = $script:session.process
+            if ($process.HasExited) { throw "File-search process exited: $($script:session.stderr.GetAwaiter().GetResult())" }
+            $process.StandardInput.WriteLine(($Command | ConvertTo-Json -Compress))
+            $process.StandardInput.Flush()
+            $line = $process.StandardOutput.ReadLineAsync()
+            if (-not $line.Wait(120000)) { throw 'File-search command timed out' }
+            if ($null -eq $line.Result) { throw 'File-search command returned EOF' }
+            $response = $line.Result | ConvertFrom-Json
+            if ($response.ok -ne $true) { throw "File-search command failed: $($line.Result)" }
+            return $response
+          }
+          function Wait-FileReady([int]$Seconds = 900) {
+            $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
+            do {
+              $state = (Invoke-FileCommand @{ command = 'status' }).state
+              if ($state.phase -eq 'ready') { return $state }
+              if ($state.phase -in @('error', 'needs_rebuild', 'needs_authorization', 'stopped')) { throw "File-search failed: $($state | ConvertTo-Json -Compress -Depth 8)" }
+              Write-Host "File-search: $($state.phase) $($state.detail)"
+              Start-Sleep -Seconds 3
+            } while ([DateTime]::UtcNow -lt $deadline)
+            throw 'File-search readiness deadline exceeded'
+          }
+          function Stop-FileSession {
+            $null = Invoke-FileCommand @{ command = 'stop' }
+            if (-not $script:session.process.WaitForExit(120000)) { throw 'File-search session did not stop' }
+            if ($script:session.process.ExitCode -ne 0) { throw 'File-search session stop failed' }
+            $script:session.process.Dispose()
+            $script:session = $null
+          }
+          function Assert-FileHit([string]$Needle, [string]$Path, [bool]$Expected = $true) {
+            $response = Invoke-FileCommand @{ command = 'query'; query = $Needle; limit = 1000 }
+            $found = @($response.hits | Where-Object { [string]::Equals($_.path, $Path, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+            if ($found -ne $Expected) { throw "Unexpected query result for $Needle ($Path), expected=$Expected" }
+          }
+          try {
+            Start-FileSession
+            $initial = Wait-FileReady
+            Stop-FileSession
+            # Accumulate surviving identities while the watcher is stopped.
+            $empty = [byte[]]::new(0)
+            for ($i = 0; $i -lt 70000; $i++) {
+              [IO.File]::WriteAllBytes((Join-Path $fileRoot ('bulkA_{0}_{1:D6}.txt' -f $token, $i)), $empty)
+              if ($i % 10000 -eq 0) { Write-Host "Created $i real NTFS files" }
+            }
+            $oldStem = 'sentinel' + $token + 'old'
+            $deletedStem = 'sentinel' + $token + 'deleted'
+            $newStem = 'sentinel' + $token + 'new'
+            $addedStem = 'sentinel' + $token + 'added'
+            $oldPath = Join-Path $fileRoot ($oldStem + '.txt')
+            $deletedPath = Join-Path $fileRoot ($deletedStem + '.txt')
+            $newPath = Join-Path $fileRoot ($newStem + '.txt')
+            $addedPath = Join-Path $fileRoot ($addedStem + '.txt')
+            [IO.File]::WriteAllBytes($oldPath, $empty)
+            [IO.File]::WriteAllBytes($deletedPath, $empty)
+            Start-FileSession
+            $large = Wait-FileReady
+            if ($large.generation_root -ne $initial.generation_root -or [long]$large.live.objects -le 65536) { throw 'Large catch-up did not reuse the base with over 65,536 live overlay objects' }
+            Assert-FileHit $oldStem $oldPath
+            Assert-FileHit $deletedStem $deletedPath
+            $feedPath = $large.feed_path
+            if (-not $feedPath) { throw 'Diagnostic feed path missing' }
+            $feedDirectory = Split-Path $feedPath -Parent
+            $segments = @(Get-ChildItem -LiteralPath $feedDirectory -Filter 'feed-*.jsonl' -File)
+            $renamedBulk = $false
+            # If necessary, another real rename round crosses the unchanged 32 MiB threshold.
+            if ($segments.Count -eq 0) {
+              $renamedBulk = $true
+              for ($i = 0; $i -lt 70000; $i++) {
+                [IO.File]::Move((Join-Path $fileRoot ('bulkA_{0}_{1:D6}.txt' -f $token, $i)), (Join-Path $fileRoot ('bulkB_{0}_{1:D6}.txt' -f $token, $i)))
+              }
+            }
+            $deadline = [DateTime]::UtcNow.AddMinutes(8)
+            do {
+              $large = Wait-FileReady 120
+              $segments = @(Get-ChildItem -LiteralPath $feedDirectory -Filter 'feed-*.jsonl' -File)
+              if ($segments.Count -gt 0 -and -not (Test-Path -LiteralPath $feedPath)) { break }
+              Start-Sleep -Seconds 2
+            } while ([DateTime]::UtcNow -lt $deadline)
+            if ($segments.Count -eq 0 -or (Test-Path -LiteralPath $feedPath)) { throw 'Actual feed rotation and consumed first-segment reclamation were not observed' }
+            $lastSegment = ($segments | Sort-Object Name | Select-Object -Last 1).Name
+            if ($lastSegment -notmatch '^feed-(\d{6})\.jsonl$' -or [int]$Matches[1] -lt 1) { throw 'Invalid rotated feed segment evidence' }
+            $segmentCount = [int]$Matches[1] + 1
+            $beforeRestart = $large
+            if (-not $beforeRestart.live.resume_cursors) { throw 'Committed recovery cursors missing' }
+            Stop-FileSession
+            [IO.File]::Move($oldPath, $newPath)
+            [IO.File]::Delete($deletedPath)
+            [IO.File]::WriteAllBytes($addedPath, $empty)
+            Start-FileSession
+            $resumed = Wait-FileReady
+            if ($resumed.generation_root -ne $beforeRestart.generation_root -or -not $resumed.loaded_resume_cursors) { throw 'Restart did not resume the same committed generation' }
+            foreach ($cursor in $beforeRestart.live.resume_cursors) {
+              $loaded = @($resumed.loaded_resume_cursors | Where-Object volume -eq $cursor.volume)
+              if ($loaded.Count -ne 1 -or $loaded[0].journal_id -ne $cursor.journal_id -or [long]$loaded[0].next_usn -lt [long]$cursor.next_usn) { throw 'Restart recovery cursor regressed or changed identity' }
+            }
+            $anchor = Get-Content (Join-Path $beforeRestart.generation_root 'journal-start.json') -Raw | ConvertFrom-Json
+            $fileVolume = [IO.Path]::GetPathRoot($fileRoot).TrimEnd('\')
+            $originalCursor = @($anchor.volumes | Where-Object volume -eq $fileVolume)
+            $loadedCursor = @($resumed.loaded_resume_cursors | Where-Object volume -eq $fileVolume)
+            if ($originalCursor.Count -ne 1 -or $loadedCursor.Count -ne 1 -or [long]$loadedCursor[0].next_usn -le [long]$originalCursor[0].start_usn) { throw 'Restart fell back to the original build cursor' }
+            Assert-FileHit $oldStem $oldPath $false
+            Assert-FileHit $deletedStem $deletedPath $false
+            Assert-FileHit $newStem $newPath
+            Assert-FileHit $addedStem $addedPath
+            $fileSearchEvidence = @{
+              commit = $manifest.commit
+              installedExeSha256 = (Get-FileHash (Join-Path $installDir 'kite.exe') -Algorithm SHA256).Hash
+              createdSurvivingFiles = 70002; observedOverlayObjects = [long]$beforeRestart.live.objects
+              feedSegmentBytes = 33554432; observedFeedSegments = $segmentCount
+              observedLastSegment = $lastSegment; firstSegmentReclaimed = $true
+              additionalBulkRenameRound = $renamedBulk
+              generationBeforeRestart = $beforeRestart.generation_root
+              generationAfterRestart = $resumed.generation_root
+              cursorsBeforeRestart = $beforeRestart.live.resume_cursors
+              loadedCursorsAfterRestart = $resumed.loaded_resume_cursors
+              cursorsAfterRestart = $resumed.live.resume_cursors
+              fileVolume = $fileVolume
+              originalBuildCursor = $originalCursor[0].start_usn
+              resumedFileVolumeCursor = $loadedCursor[0].next_usn
+              checks = @{ realNtfsCatchup = $true; over65536Objects = $true; durableResume = $true; sentinelCreateRenameDelete = $true; feedRotation = $true; feedReclamation = $true }
+            }
+            Stop-FileSession
+          } finally {
+            if ($null -ne $script:session -and -not $script:session.process.HasExited) {
+              $script:session.process.Kill()
+              $script:session.process.WaitForExit(30000) | Out-Null
+            }
+          }
+          $resolvedExercise = [IO.Path]::GetFullPath($exerciseRoot)
+          $tempPrefix = [IO.Path]::GetFullPath($env:RUNNER_TEMP) + [IO.Path]::DirectorySeparatorChar
+          if (-not $resolvedExercise.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolvedExercise) -notmatch '^kite-usn-[0-9a-f]{32}$') { throw 'USN cleanup path escaped runner temp' }
+          Remove-Item -LiteralPath $resolvedExercise -Recurse -Force
+          $service = Get-Service KiteFileIndex
+          $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+          $service.Dispose()
+          Assert-Service
+          function Get-ServiceHostFileId {
+            $output = & fsutil.exe file queryfileid $serviceHost
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot query index service host file identity' }
+            $identities = [regex]::Matches(($output -join ' '), '(?i)\b0x[0-9a-f]{32}\b')
+            if ($identities.Count -ne 1) { throw 'Unexpected index service host file identity output' }
+            return $identities[0].Value.ToLowerInvariant()
+          }
+          $serviceHostIdBeforeOverwrite = Get-ServiceHostFileId
+          # Omitting /D also exercises InstallDirRegKey on the overwrite path.
+          Invoke-InstallerProcess $installer '/S'
+          Assert-InstalledPayload
+          Assert-Service
+          $serviceHostIdAfterOverwrite = Get-ServiceHostFileId
+          if ($serviceHostIdAfterOverwrite -eq $serviceHostIdBeforeOverwrite) { throw 'Overwrite did not replace the index service host file' }
+          # _?= executes the original uninstaller without an asynchronous temporary copy.
+          Invoke-InstallerProcess (Join-Path $installDir 'uninstall.exe') "/S _?=$installDir"
+          foreach ($file in $manifest.payload) {
+            if (Test-Path -LiteralPath (Join-Path $installDir $file.path)) { throw "Payload remains after uninstall: $($file.path)" }
+          }
+          if ($registry.OpenSubKey($uninstallKey)) { throw 'Uninstall registry entry remains' }
+          if ((Get-Service KiteFileIndex -ErrorAction SilentlyContinue) -or (Test-Path $serviceHost)) { throw 'Index service remains after uninstall' }
+          Assert-Probe
+          $report = @{
+            schemaVersion = 1; commit = $manifest.commit; version = $manifest.version
+            installerSha256 = $manifest.installerSha256; installerBytes = $manifest.installerBytes
+            validatedAtUtc = [DateTime]::UtcNow.ToString('o')
+            runnerOs = $env:RUNNER_OS; installationDirectory = $installDir
+            serviceHostFileIdBeforeOverwrite = $serviceHostIdBeforeOverwrite
+            serviceHostFileIdAfterOverwrite = $serviceHostIdAfterOverwrite
+            serviceHostReplaced = $true
+            checks = @{
+              cleanInstall = $true; sameVersionOverwrite = $true; uninstall = $true
+              userDataPreserved = $true; payloadHashes = $true; registry = $true
+              serviceInstallUpdateUninstall = $true
+            }
+            fileSearch = $fileSearchEvidence
+            payloadFiles = @($manifest.payload).Count
+            limitations = @('Same-version overwrite; cross-version migration and interactive GUI/UAC are not exercised.', 'Real NTFS catch-up, committed-cursor restart and feed rotation/reclamation are exercised; forced crash and disk-full behavior are not exercised.')
+          }
+          $report | ConvertTo-Json -Depth 5 | Set-Content artifacts/installer-validation.json -Encoding utf8
+          $registry.Dispose()
+          # The in-place uninstaller may leave its own executable; remove only this isolated directory.
+          $resolved = [IO.Path]::GetFullPath($installDir)
+          $expected = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'kite-installer-validation'))
+          if ($resolved -ne $expected -or -not $resolved.StartsWith([IO.Path]::GetFullPath($env:RUNNER_TEMP) + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Cleanup path escaped runner temp' }
+          if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force }
+          Remove-Item -LiteralPath $probe -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kite-windows-validated
+          if-no-files-found: error
+          path: |
+            artifacts/kite-setup.exe
+            artifacts/kite-setup.exe.sha256
+            artifacts/installer-validation.json
+            artifacts/payload-manifest.json

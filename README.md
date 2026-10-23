@@ -77,21 +77,16 @@ Kite 是面向 Windows 的原生应用启动器：按下快捷键，输入你记
 
 ## 从源码构建
 
-环境：Rust stable、MSVC 工具链、Visual Studio Build Tools（Desktop development with C++）。打包安装器还需 [NSIS](https://nsis.sourceforge.io/)（`winget install NSIS.NSIS`）。
+本机开发环境：Rust stable、MSVC 工具链、Visual Studio Build Tools（Desktop development with C++）。按改动范围做必要检查：
 
 ```powershell
-cargo test
-cargo build --release
-.\scripts\build-installer.ps1
+cargo check --locked --offline
+git diff --check
 ```
 
-`build-installer.ps1` 会先构建官方插件，再编译 release 并生成：
+需要运行界面定位问题时可用 `cargo run --locked`；依赖未缓存时先正常获取依赖，再使用离线检查。完整检查、官方插件构建、Release 编译和 NSIS 打包由 GitHub Actions 完成，本机无需安装 NSIS。
 
-```text
-artifacts/kite-setup.exe
-```
-
-仅开发主程序时可直接 `cargo build --release`；需要官方插件进包时再跑 `.\scripts\build-official-plugins.ps1`。
+需要安装包时，在 Actions 中手动运行 **Build Windows application**。工作流会在独立 Windows runner 上验证安装、同版本覆盖与卸载，再提供安装器、SHA-256 和验收报告。正式发布使用已通过 CI 的 `main` 提交上的注释 tag，完整流程见[发布规范](docs/RELEASING.md)。
 
 ## 项目结构
 
@@ -127,14 +122,14 @@ Kite 为原生桌面程序；启用文件搜索时，按需元数据服务单独
 
 ## 贡献
 
-提交前请阅读 [`AGENTS.md`](AGENTS.md) 与 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)，并至少运行：
+提交前请阅读 [`AGENTS.md`](AGENTS.md) 与 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)，执行与改动相关的必要检查，默认使用：
 
 ```powershell
-cargo test
-cargo build --release
+cargo check --locked --offline
+git diff --check
 ```
 
-Issue / PR 请说明变更内容、验证方式，以及适用的 Windows 环境。涉及窗口、热键、托盘、扫描或启动的修改，编译通过之外还需 Windows 运行验证。
+Issue / PR 请说明变更内容、验证方式，以及适用的 Windows 环境。完整检查与安装验收交给 Actions；涉及窗口、热键、托盘、扫描或启动时，另行注明已执行的运行验证及仍需人工验证的部分。
 
 ## 开源参考
 

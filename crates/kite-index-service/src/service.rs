@@ -9,7 +9,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter};
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -49,6 +49,23 @@ pub trait MetadataBackend: Send + Sync + 'static {
         cancel: CancelToken,
         progress: &ProgressSink,
     ) -> ServiceResult<()>;
+
+    fn watch_resumable(
+        &self,
+        checkpoint: &Path,
+        feed: &Path,
+        cancel: CancelToken,
+        progress: &ProgressSink,
+        resume: Option<Value>,
+        _acknowledged: Arc<AtomicU64>,
+    ) -> ServiceResult<()> {
+        if resume.is_some() {
+            return Err(ServiceError::invalid_request(
+                "backend does not support resumed watch",
+            ));
+        }
+        self.watch(checkpoint, feed, cancel, progress)
+    }
 }
 
 /// The production adapter is intentionally kept here so the fixed service
@@ -58,6 +75,19 @@ pub trait MetadataBackend: Send + Sync + 'static {
 struct KernelBackend;
 
 impl MetadataBackend for KernelBackend {
+    fn watch_resumable(
+        &self,
+        checkpoint: &Path,
+        feed: &Path,
+        cancel: CancelToken,
+        progress: &ProgressSink,
+        resume: Option<Value>,
+        acknowledged: Arc<AtomicU64>,
+    ) -> ServiceResult<()> {
+        kite_file_index::watch_resumable(checkpoint, feed, cancel, progress, resume, acknowledged)
+            .map_err(|error| ServiceError::backend(error.to_string()))
+    }
+
     fn capture(
         &self,
         root: &Path,
@@ -371,6 +401,7 @@ fn handle_client(file: File, backend: Arc<dyn MetadataBackend>) -> ServiceResult
     let checkpoint_provenance: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
     let mut active_cancel: Option<CancelToken> = None;
     let mut active_done: Option<Arc<AtomicBool>> = None;
+    let mut active_acknowledged: Option<Arc<AtomicU64>> = None;
     loop {
         if active_done
             .as_ref()
@@ -378,6 +409,7 @@ fn handle_client(file: File, backend: Arc<dyn MetadataBackend>) -> ServiceResult
         {
             active_done = None;
             active_cancel = None;
+            active_acknowledged = None;
         }
         let request = match protocol::read_request(&mut reader) {
             Ok(value) => value,
@@ -401,6 +433,7 @@ fn handle_client(file: File, backend: Arc<dyn MetadataBackend>) -> ServiceResult
         {
             active_done = None;
             active_cancel = None;
+            active_acknowledged = None;
         }
         match request {
             Request::Capture {
@@ -494,6 +527,7 @@ fn handle_client(file: File, backend: Arc<dyn MetadataBackend>) -> ServiceResult
             Request::Watch {
                 checkpoint_path: source_path,
                 checkpoint_json,
+                resume_cursors,
             } => {
                 if active_cancel.is_some() {
                     let _ = protocol::send_response(
@@ -533,6 +567,12 @@ fn handle_client(file: File, backend: Arc<dyn MetadataBackend>) -> ServiceResult
                         continue;
                     }
                 };
+                if let Err(error) =
+                    validate_resume_cursors(&checkpoint_bytes, resume_cursors.as_ref())
+                {
+                    let _ = protocol::send_response(&writer, protocol::error_response(&error));
+                    continue;
+                }
                 let checkpoint = session.checkpoint_path.clone();
                 if let Err(error) =
                     fs::write(&checkpoint, checkpoint_bytes).map_err(ServiceError::from)
@@ -541,6 +581,8 @@ fn handle_client(file: File, backend: Arc<dyn MetadataBackend>) -> ServiceResult
                     continue;
                 }
                 let feed = session.feed_path.clone();
+                let acknowledged = Arc::new(AtomicU64::new(0));
+                active_acknowledged = Some(Arc::clone(&acknowledged));
                 let cancel = Arc::new(AtomicBool::new(false));
                 let done = Arc::new(AtomicBool::new(false));
                 active_cancel = Some(Arc::clone(&cancel));
@@ -559,8 +601,14 @@ fn handle_client(file: File, backend: Arc<dyn MetadataBackend>) -> ServiceResult
                         let _ =
                             protocol::send_response(&progress_writer, Response::Progress { event });
                     };
-                    let result =
-                        backend2.watch(&checkpoint, &feed2, Arc::clone(&cancel2), &progress);
+                    let result = backend2.watch_resumable(
+                        &checkpoint,
+                        &feed2,
+                        Arc::clone(&cancel2),
+                        &progress,
+                        resume_cursors,
+                        acknowledged,
+                    );
                     let response = match result {
                         Ok(()) if session2.contains(&feed2) => {
                             // Keep terminal success behind WatchReady. This
@@ -629,6 +677,15 @@ fn handle_client(file: File, backend: Arc<dyn MetadataBackend>) -> ServiceResult
                 }
                 ready_announced.store(true, Ordering::SeqCst);
             }
+            Request::Acknowledge { seq } => {
+                if let Some(acknowledged) = active_acknowledged.as_ref() {
+                    acknowledged.fetch_max(seq, Ordering::Release);
+                } else {
+                    // Acknowledgements are one-way and valid only during watch.
+                    // Reject the connection rather than injecting an unsolicited response.
+                    break;
+                }
+            }
             Request::Cancel => {
                 if let Some(cancel) = active_cancel.as_ref() {
                     cancel.store(true, Ordering::SeqCst);
@@ -656,6 +713,7 @@ fn handle_client(file: File, backend: Arc<dyn MetadataBackend>) -> ServiceResult
         {
             active_done = None;
             active_cancel = None;
+            active_acknowledged = None;
         }
         if STOP_REQUESTED.load(Ordering::SeqCst) {
             if let Some(cancel) = active_cancel.take() {
@@ -852,6 +910,52 @@ fn wait_for_feed_ready(
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn validate_resume_cursors(checkpoint: &[u8], resume: Option<&Value>) -> ServiceResult<()> {
+    let Some(resume) = resume else {
+        return Ok(());
+    };
+    let invalid =
+        || ServiceError::invalid_request("resume cursors do not match protected checkpoint");
+    let trusted: Value = serde_json::from_slice(checkpoint).map_err(|_| invalid())?;
+    let original = trusted["volumes"].as_array().ok_or_else(invalid)?;
+    let cursors = resume.as_array().ok_or_else(invalid)?;
+    if cursors.is_empty() || cursors.len() > 26 || cursors.len() != original.len() {
+        return Err(invalid());
+    }
+    let decimal = |value: &Value| -> ServiceResult<u64> {
+        let text = value.as_str().ok_or_else(invalid)?;
+        if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        text.parse().map_err(|_| invalid())
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    for (cursor, source) in cursors.iter().zip(original) {
+        let fields = cursor.as_object().ok_or_else(invalid)?;
+        if fields.len() != 3
+            || fields
+                .keys()
+                .any(|key| !matches!(key.as_str(), "volume" | "journal_id" | "next_usn"))
+        {
+            return Err(invalid());
+        }
+        let volume = cursor["volume"].as_str().ok_or_else(invalid)?;
+        let bytes = volume.as_bytes();
+        if bytes.len() != 2
+            || !bytes[0].is_ascii_uppercase()
+            || bytes[1] != b':'
+            || !seen.insert(volume)
+            || cursor["volume"] != source["volume"]
+            || decimal(&cursor["journal_id"])? != decimal(&source["journal_id"])?
+            || decimal(&cursor["next_usn"])? < decimal(&source["start_usn"])?
+            || decimal(&cursor["next_usn"])? > i64::MAX as u64
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
 }
 
 fn validate_checkpoint_bytes(bytes: Vec<u8>) -> ServiceResult<Vec<u8>> {

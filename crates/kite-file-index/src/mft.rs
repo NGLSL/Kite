@@ -618,6 +618,14 @@ pub fn journal_begin(checkpoint: &Path, roots: &[OsString]) -> Result<()> {
 pub fn journal_watch_continuous(checkpoint: &Path, feed: &Path) -> Result<()> {
     journal::watch(checkpoint, feed)
 }
+pub(crate) fn journal_watch_resumable(
+    checkpoint: &Path,
+    feed: &Path,
+    resume: Option<Value>,
+    acknowledged: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> Result<()> {
+    journal::watch_resumable(checkpoint, feed, resume, acknowledged)
+}
 
 // Explicit search scope only: NTFS reserved file records, never directories/subtrees.
 pub(crate) const FILE_SEARCH_SCOPE: &str = "file-search-exclude-ntfs-reserved-files-0-15-v1";

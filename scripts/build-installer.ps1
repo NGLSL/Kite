@@ -1,5 +1,8 @@
 param([string]$Nsis = "")
 $ErrorActionPreference = "Stop"
+if ($env:GITHUB_ACTIONS -ne "true") {
+  throw "Formal installer builds run in GitHub Actions. Run the 'Build Windows application' workflow to obtain a validated package."
+}
 $root = Split-Path $PSScriptRoot -Parent
 $manifest = Join-Path $root "Cargo.toml"
 $artifacts = Join-Path $root "artifacts"
@@ -8,7 +11,7 @@ Write-Host "Building official plugins..."
 & (Join-Path $PSScriptRoot "build-official-plugins.ps1")
 if ($LASTEXITCODE -ne 0) { throw "build-official-plugins failed with exit code $LASTEXITCODE" }
 Write-Host "Building Kite (release)..."
-& cargo build --release --manifest-path $manifest
+& cargo build --release --locked --manifest-path $manifest
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
 if (!$Nsis) {
   $Nsis = @((Get-Command makensis.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue), "C:\Program Files (x86)\NSIS\makensis.exe", "C:\Program Files\NSIS\makensis.exe") | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1

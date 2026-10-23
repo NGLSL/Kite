@@ -41,9 +41,28 @@ pub fn watch(
     cancel: CancelToken,
     progress: Progress<'_>,
 ) -> Result<()> {
+    watch_resumable(
+        checkpoint,
+        feed,
+        cancel,
+        progress,
+        None,
+        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    )
+}
+/// Continue from a durable applied cursor. Acknowledgements reclaim only
+/// transport segments already consumed by this authenticated session.
+pub fn watch_resumable(
+    checkpoint: &Path,
+    feed: &Path,
+    cancel: CancelToken,
+    progress: Progress<'_>,
+    resume: Option<Value>,
+    acknowledged: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> Result<()> {
     let _guard = crate::cancel::enter(cancel);
     progress(serde_json::json!({"stage":"watching"}));
-    let result = crate::mft::journal_watch_continuous(checkpoint, feed);
+    let result = crate::mft::journal_watch_resumable(checkpoint, feed, resume, acknowledged);
     if crate::cancel::cancelled() {
         Ok(())
     } else {

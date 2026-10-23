@@ -1616,7 +1616,7 @@ dependencies = [
 
 [[package]]
 name = "kite"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "base64",
  "dirs",
@@ -1649,6 +1649,7 @@ version = "0.1.0"
 dependencies = [
  "memchr",
  "memmap2",
+ "rusqlite",
  "serde",
  "serde_json",
 ]

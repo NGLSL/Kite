@@ -33,36 +33,31 @@ Kite 是 Windows x64 原生桌面应用，使用 Rust 2021、Iced 0.14 和 tiny-
 - 涉及窗口、热键、托盘、扫描或启动的修改，除编译外要做 Windows 运行验证。
 - 保持改动聚焦，避免无需求的抽象、依赖和跨平台扩展。
 
-## 验证与打包
+## 本机必要检查
 
 ```powershell
-cargo check
-cargo test
-cargo build --release
-.\scripts\build-official-plugins.ps1   # 打包 resources/official-plugins
-.\scripts\build-installer.ps1          # 会先构建官方插件，再 release + NSIS
+cargo check --locked --offline
+git diff --check
 ```
 
-安装器脚本会自动构建 release 版本并生成：
+按改动范围补充已修改文件的格式检查、PowerShell/YAML 解析等静态检查；仅为定位具体故障运行相关既有测试。依赖未缓存时先获取依赖，不把离线条件不足当作源码失败。完整测试、正式 Release 编译、官方插件打包、NSIS、安装验收和上传统一在 GitHub Actions 执行。
 
-```text
-artifacts/kite.exe
-artifacts/kite-setup.exe
+需要运行主程序定位界面问题时使用 `cargo run --locked`。本机不为常规提交或发布重复制作安装包，也不覆盖现用 Kite 或读取组件。不要提交 `target/`、`artifacts/` 或本机日志。
+
+## 文件索引诊断
+
+`kite.exe --kite-file-index-session <data-directory>` 提供重定向 stdin/stdout 的逐行 JSON 会话，复用生产文件搜索控制器。它只使用明确给出的数据目录，不自动安装组件或创建窗口；运行前应已安装相同版本的读取组件。Actions 安装验收使用安装后的同一份程序调用此入口。
+
+请求示例：
+
+```json
+{"command":"status"}
+{"command":"query","query":"文件名关键词","limit":20,"filter":"all"}
+{"command":"stop"}
 ```
 
-需要 NSIS 时执行 `winget install NSIS.NSIS`。不要提交 `target/`、`artifacts/` 或本机日志。
+每个请求返回一行带 `ok` 的 JSON。查询仅在 `state.phase=ready` 时接受；状态包含 generation、提交游标和活跃 feed 位置。显式 `rebuild` 请求会重新建库；`stop` 或输入 EOF 等待控制器退出并释放服务会话。此入口供诊断和验收使用，查询结果不会被执行。
 
 ## 正式发布
 
-正式版本只由 `main` 上的 `v*` tag 触发。**禁止**在未合入 main 或 main 上 CI 未绿时打 tag。
-
-固定顺序：
-
-1. 合并目标提交到 `main`，等待 `.github/workflows/ci.yml`（push main / PR）成功。
-2. 按 [`docs/releases/README.md`](releases/README.md) 写好 `docs/releases/vX.Y.Z.md`，并更新 `Cargo.toml` 版本。
-3. 在 **已绿的 main 提交** 上创建并推送 `vX.Y.Z` tag。
-4. Release workflow 会校验：tag 提交包含于 origin/main，且该提交的 CI workflow 成功；然后跑 test、NSIS、生成报告并发布。
-
-NSIS 与完整 Release **只在 tag 上跑**，不在每个 PR 上跑。`ci.yml` 是 main/PR 的唯一自动化门禁。
-
-发布报告会记录 tag 提交、提交范围、`cargo test`、release 构建、NSIS 构建、构建环境、安装包大小和 SHA-256。发布完成后应检查报告内容和下载文件，再向用户公布版本。
+发布顺序、工作流分工、安装验收范围及完成标准统一维护在 [`RELEASING.md`](RELEASING.md)。维护者说明格式见 [`releases/README.md`](releases/README.md)。正式发布需要明确授权；仅修改代码或发布流程不会触发推送、打 tag 或上传 Release。

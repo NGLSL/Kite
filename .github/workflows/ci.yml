@@ -1,4 +1,6 @@
 name: CI
+permissions:
+  contents: read
 on:
   push:
     branches: [main]
@@ -15,6 +17,8 @@ jobs:
       - name: Build official plugins
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-official-plugins.ps1
       - name: Rust tests
-        run: cargo test
+        run: cargo test --locked
+      - name: Installer source contracts
+        run: ./scripts/test-installer-upgrade.ps1
       - name: Release build
-        run: cargo build --release
+        run: cargo build --release --locked

@@ -18,15 +18,15 @@ if (-not (Test-Path (Join-Path $ws "Cargo.toml"))) {
 Push-Location $ws
 try {
     if ($Release) {
-        cargo build --release
+        cargo build --release --locked
         if ($LASTEXITCODE -ne 0) { throw "official plugins cargo build failed with exit code $LASTEXITCODE" }
         $outDir = Join-Path $ws "target\release"
     } else {
-        cargo build
+        cargo build --locked
         if ($LASTEXITCODE -ne 0) { throw "official plugins cargo build failed with exit code $LASTEXITCODE" }
         $outDir = Join-Path $ws "target\debug"
     }
-    cargo test
+    cargo test --locked
     if ($LASTEXITCODE -ne 0) { throw "official plugins cargo test failed with exit code $LASTEXITCODE" }
 } finally {
     Pop-Location

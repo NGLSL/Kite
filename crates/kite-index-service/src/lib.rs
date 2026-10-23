@@ -35,8 +35,10 @@ pub const SERVICE_NAME: &str = "KiteFileIndex";
 /// Human-readable SCM display name.
 pub const SERVICE_DISPLAY_NAME: &str = "Kite File Index Metadata Service";
 /// Named-pipe protocol version.
-pub const PROTOCOL_VERSION: u32 = 1;
-/// Fixed named pipe endpoint.  It rejects remote clients at pipe creation.
+/// Version 3 adds durable cursor recovery and acknowledged feed segments.
+pub const PROTOCOL_VERSION: u32 = 3;
+/// Fixed endpoint across protocol revisions, so an outdated service can answer
+/// the handshake with a version error instead of a pipe connection timeout.
 pub const PIPE_NAME: &str = r"\\.\pipe\Kite\FileIndex\v1";
 
 /// A connected normal-user client.  The service is started on demand; the
@@ -55,6 +57,11 @@ pub struct CancelHandle {
 }
 
 impl CancelHandle {
+    /// Confirm that feed records through this sequence are durably consumed.
+    pub fn acknowledge(&self, seq: u64) -> ServiceResult<()> {
+        protocol::send_request(&self.writer, protocol::Request::Acknowledge { seq })
+    }
+
     /// Ask the service to cancel the active metadata operation.  Closing the
     /// client still cancels it if the pipe is already broken.
     pub fn cancel(&self) -> ServiceResult<()> {
@@ -147,12 +154,24 @@ impl Client {
             },
         )?;
         match protocol::read_response_until(&mut client.reader, Some(deadline))? {
-            protocol::Response::HelloOk { .. } => Ok(client),
+            protocol::Response::HelloOk { protocol } if protocol == PROTOCOL_VERSION => Ok(client),
+            protocol::Response::HelloOk { .. } => Err(ServiceError::needs_install(
+                "文件索引读取组件版本不匹配，请授权更新后重试",
+            )),
             protocol::Response::Error {
                 error_kind: kind,
                 message,
                 code,
-            } => Err(ServiceError::remote(kind, message, code)),
+            } => {
+                let error = ServiceError::remote(kind, message, code);
+                if error.kind == ErrorKind::Protocol {
+                    Err(ServiceError::needs_install(
+                        "文件索引读取组件版本不匹配，请授权更新后重试",
+                    ))
+                } else {
+                    Err(error)
+                }
+            }
             other => Err(ServiceError::protocol(format!(
                 "unexpected handshake response: {other:?}"
             ))),
@@ -231,6 +250,7 @@ impl Client {
             protocol::Request::Watch {
                 checkpoint_path: None,
                 checkpoint_json: Some(checkpoint_json.to_vec()),
+                resume_cursors: None,
             },
         )?;
         loop {
@@ -268,8 +288,18 @@ impl Client {
     /// capture.  The service verifies the path is inside the protected
     /// ProgramData\Kite\FileIndex\<SID> tree before copying it.
     pub fn watch_path(
+        self,
+        checkpoint_path: &std::path::Path,
+        progress: Option<&ProgressSink>,
+    ) -> ServiceResult<WatchSession> {
+        self.watch_path_from(checkpoint_path, None, progress)
+    }
+
+    /// Resume only cursors bound to the original protected checkpoint identities.
+    pub fn watch_path_from(
         mut self,
         checkpoint_path: &std::path::Path,
+        resume_cursors: Option<serde_json::Value>,
         progress: Option<&ProgressSink>,
     ) -> ServiceResult<WatchSession> {
         let path = checkpoint_path.to_string_lossy().into_owned();
@@ -278,6 +308,7 @@ impl Client {
             protocol::Request::Watch {
                 checkpoint_path: Some(path),
                 checkpoint_json: None,
+                resume_cursors,
             },
         )?;
         loop {

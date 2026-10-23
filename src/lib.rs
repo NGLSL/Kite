@@ -22,6 +22,11 @@ pub fn run() {
     if kite_index_service::dispatch_entry() {
         return;
     }
+    // Builder and diagnostic sessions use explicit paths and redirected I/O;
+    // dispatch before touching the UI profile or relaunching for de-elevation.
+    if file_search::dispatch_entry() {
+        return;
+    }
     // Initialize file logging before elevation handling so bootstrap failures
     // and a guarded de-elevation retry are visible even when the UI never starts.
     let data_dir = system::paths::data_dir();
@@ -45,10 +50,6 @@ pub fn run() {
             ));
             eprintln!("kite: elevated launch could not be converted to a user launch: {error}");
         }
-    }
-
-    if file_search::dispatch_entry() {
-        return;
     }
 
     // 降权之后再 claim，避免提权 bootstrap 短暂占位误伤正常实例。

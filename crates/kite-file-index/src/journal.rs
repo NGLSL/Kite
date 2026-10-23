@@ -1,13 +1,19 @@
 //! Bounded, read-only USN polling. Saves names/identity, never file content.
 use super::*;
-use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom};
+use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 const REASONS: u32 = 0x0001_3300; // create/delete, both rename records, hardlink change
-const FILE_DELETE: u32 = 0x200;
-const MAX_PENDING: usize = 65_536;
+const POLL_BUFFER_BYTES: usize = 64 * 1024;
+const ROUND_INTERVAL: Duration = Duration::from_millis(100);
+const CHANGE_BATCH: usize = 128;
+const CHANGE_BATCH_BYTES: usize = 1024 * 1024;
 #[link(name = "kernel32")]
 extern "system" {
     fn QueryPerformanceCounter(counter: *mut i64) -> i32;
@@ -68,38 +74,130 @@ fn json_new(path: &Path, value: &Value) -> Result<()> {
     out.get_ref().sync_all()?;
     Ok(())
 }
-// Session feeds are append-only, but bounded even for an indefinitely running
-// service. Keep room for the terminal error so consumers cannot remain live.
-const MAX_FEED_BYTES: u64 = 512 * 1024 * 1024;
-const ERROR_RESERVE_BYTES: u64 = 64 * 1024;
+// Segment size controls transport I/O, never the lifetime of file search.
+// The consumer acknowledges this session's frames after durable staging.
+const FEED_SEGMENT_BYTES: u64 = 32 * 1024 * 1024;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 struct FeedWriter {
     out: BufWriter<File>,
+    path: PathBuf,
+    segment: u64,
+    first_retained: u64,
+    segment_bytes: u64,
+    acknowledged: Arc<AtomicU64>,
     bytes: u64,
+    seq: u64,
+    last_output: Instant,
+    last_pending: usize,
+    last_cursors: Vec<Value>,
+}
+impl FeedWriter {
+    fn segment_path(&self, segment: u64) -> PathBuf {
+        if segment == 0 {
+            self.path.clone()
+        } else {
+            self.path.with_file_name(format!("feed-{segment:06}.jsonl"))
+        }
+    }
+
+    fn reclaim(&mut self) -> Result<()> {
+        let acknowledged = self.acknowledged.load(Ordering::Acquire);
+        while self.first_retained < self.segment {
+            let path = self.segment_path(self.first_retained);
+            let mut file = File::open(&path)?;
+            let length = file.metadata()?.len();
+            file.seek(SeekFrom::Start(length.saturating_sub(512)))?;
+            let mut tail = Vec::new();
+            file.read_to_end(&mut tail)?;
+            let line = tail
+                .split(|b| *b == b'\n')
+                .rfind(|line| !line.is_empty())
+                .ok_or_else(|| invalid("journal segment rotation footer missing"))?;
+            let footer: Value = serde_json::from_slice(line)?;
+            let through = footer["through_seq"]
+                .as_u64()
+                .filter(|_| footer["kind"] == "rotate")
+                .ok_or_else(|| invalid("journal segment rotation footer invalid"))?;
+            // A frame in a later segment proves the tail has switched away
+            // from this one; equality alone could precede reading rotate.
+            if acknowledged <= through {
+                break;
+            }
+            drop(file);
+            std::fs::remove_file(path)?;
+            self.first_retained += 1;
+        }
+        Ok(())
+    }
 }
 fn emit(out: &mut FeedWriter, value: &Value) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
-    let next = out
-        .bytes
-        .checked_add(bytes.len() as u64)
-        .and_then(|n| n.checked_add(1))
-        .ok_or_else(|| invalid("journal feed size overflow"))?;
-    let limit = if value["kind"] == "error" {
-        MAX_FEED_BYTES
-    } else {
-        MAX_FEED_BYTES - ERROR_RESERVE_BYTES
-    };
-    if next > limit {
-        return Err(crate::NeedsRebuild(
-            "session journal feed reached its 512 MiB limit; rebuild required".into(),
-        )
-        .into());
+    if out.segment_bytes >= FEED_SEGMENT_BYTES {
+        let segment = out
+            .segment
+            .checked_add(1)
+            .ok_or_else(|| invalid("journal segment number overflow"))?;
+        let path = out.segment_path(segment);
+        // Make the successor available before advertising it to the reader.
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        file.sync_all()?;
+        let footer = json!({"kind":"rotate", "next":path.file_name().unwrap().to_string_lossy(),
+            "through_seq":out.seq});
+        let footer = serde_json::to_vec(&footer)?;
+        out.out.write_all(&footer)?;
+        out.out.write_all(b"\n")?;
+        out.out.flush()?;
+        out.bytes += footer.len() as u64 + 1;
+        out.out = BufWriter::with_capacity(1024 * 1024, file);
+        out.segment = segment;
+        out.segment_bytes = 0;
     }
     out.out.write_all(&bytes)?;
     out.out.write_all(b"\n")?;
     out.out.flush()?;
-    out.bytes = next;
+    out.bytes = out
+        .bytes
+        .checked_add(bytes.len() as u64 + 1)
+        .ok_or_else(|| invalid("journal feed size overflow"))?;
+    out.segment_bytes += bytes.len() as u64 + 1;
+    out.reclaim()?;
     Ok(())
+}
+
+fn emit_frame(out: &mut FeedWriter, mut frame: Value) -> Result<()> {
+    let seq = out
+        .seq
+        .checked_add(1)
+        .ok_or_else(|| invalid("journal sequence overflow"))?;
+    frame["seq"] = json!(seq);
+    frame["observed_qpc_ns"] = json!(qpc_ns()?);
+    emit(out, &frame)?;
+    out.seq = seq;
+    out.last_output = Instant::now();
+    out.last_pending = usize::try_from(frame["pending_objects"].as_u64().unwrap_or(0))?;
+    out.last_cursors = frame["cursors"].as_array().cloned().unwrap_or_default();
+    Ok(())
+}
+
+fn emit_batch(
+    out: &mut FeedWriter,
+    changes: Vec<Value>,
+    cursors: &[Value],
+    pending: usize,
+    identity_only: bool,
+) -> Result<()> {
+    let mut batch = json!({"kind":"batch","changes":changes,
+        "cursors":cursors,"pending_objects":pending});
+    if identity_only {
+        batch["identity_only"] = json!(true);
+    }
+    if out.seq % 10 == 0 {
+        batch["watcher_memory"] = memory_now()?;
+    }
+    emit_frame(out, batch)
 }
 
 fn memory_now() -> Result<Value> {
@@ -147,12 +245,35 @@ struct Volume {
     serial: u32,
     journal: u64,
     cursor: u64,
+    record_size: usize,
 }
 #[derive(Clone)]
 struct Changed {
     is_dir: bool,
-    reasons: u32,
-    since: Instant,
+}
+
+// GET_NTFS_FILE_RECORD returns the requested in-use ordinal, or the nearest
+// preceding one. A different ordinal/sequence proves the original FRN is gone;
+// an OpenFileById failure alone (including delete-pending) does not.
+fn disappeared(volume: &Volume, id: u64) -> Result<bool> {
+    // NTFS_FILE_RECORD_OUTPUT_BUFFER includes ABI tail padding. Match the
+    // existing collector's +16 allocation; only the 12-byte header is payload.
+    let mut record = vec![0; volume.record_size + 16];
+    let n = ioctl(&volume.handle, 0x0009_0068, &id.to_le_bytes(), &mut record)?;
+    if n < 12 + volume.record_size
+        || u32_at(&record, 8) as usize != volume.record_size
+        || &record[12..16] != b"FILE"
+    {
+        return Err(invalid("invalid journal refresh MFT record length/signature").into());
+    }
+    let ordinal = u64_at(&record, 0) & 0x0000_ffff_ffff_ffff;
+    let requested = id & 0x0000_ffff_ffff_ffff;
+    if ordinal > requested || u32_at(&record, 56) as u64 != ordinal {
+        return Err(invalid("invalid journal refresh MFT record ordinal").into());
+    }
+    let sequence = u16::from_le_bytes([record[28], record[29]]) as u64;
+    let in_use = u16::from_le_bytes([record[34], record[35]]) & 1 != 0;
+    Ok(ordinal != requested || sequence != id >> 48 || !in_use)
 }
 fn exact_id(volume: &Volume, frn: u64) -> Result<(OwnedHandle, [u32; 13])> {
     let id = FileId {
@@ -187,7 +308,7 @@ fn paths(volume: &Volume, id: u64, change: &Changed) -> Result<Vec<Vec<u16>>> {
             let code = error
                 .downcast_ref::<io::Error>()
                 .and_then(|e| e.raw_os_error());
-            if change.reasons & FILE_DELETE != 0 && matches!(code, Some(2 | 3 | 87 | 303 | 1168)) {
+            if matches!(code, Some(2 | 3 | 5 | 87 | 303 | 1168)) && disappeared(volume, id)? {
                 return Ok(Vec::new());
             }
             return Err(error);
@@ -233,29 +354,18 @@ fn paths(volume: &Volume, id: u64, change: &Changed) -> Result<Vec<Vec<u16>>> {
 }
 fn poll(
     volume: &mut Volume,
-    pending: &mut BTreeMap<(usize, u64), Changed>,
+    cutoff: u64,
+    pending: &mut Pending,
     vi: usize,
     buffer: &mut [u8],
     record_count: &mut u64,
-) -> Result<()> {
-    let journal = query(&volume.handle)?;
-    if number(&journal, "journal_id")? != volume.journal
-        || volume.cursor < number(&journal, "first_usn")?.max(number(&journal, "lowest_valid_usn")?)
-        || volume.cursor > number(&journal, "next_usn")?
-    {
-        return Err(crate::NeedsRebuild(format!(
-            "{} journal identity/retention changed",
-            volume.root
-        ))
-        .into());
+) -> Result<bool> {
+    crate::cancel::check()?;
+    let journal = validate_journal(volume)?;
+    if cutoff > number(&journal, "next_usn")? {
+        return Err(invalid("journal catch-up target moved backwards").into());
     }
-    let cutoff = number(&journal, "next_usn")?;
-    let mut pages = 0;
-    while volume.cursor < cutoff {
-        pages += 1;
-        if pages > 4096 {
-            return Err(invalid("journal catch-up exceeded bounded batch").into());
-        }
+    if volume.cursor < cutoff {
         let mut input = [0u8; 48];
         input[..8].copy_from_slice(&volume.cursor.to_le_bytes());
         input[8..12].copy_from_slice(&REASONS.to_le_bytes());
@@ -271,7 +381,9 @@ fn poll(
             return Err(invalid("journal read made no progress before cutoff").into());
         }
         let mut at = 8;
+        let mut page = Vec::new();
         while at < n {
+            crate::cancel::check()?;
             let mut name = Vec::new();
             let node = parse_record(&buffer[at..n], &mut name)?;
             let length = u32_at(buffer, at) as usize;
@@ -284,56 +396,313 @@ fn poll(
             {
                 return Err(invalid("USN record cursor/reason/name invalid").into());
             }
-            *record_count += 1;
+            if usn >= cutoff {
+                break;
+            }
             if !reserved_metadata_file(node.frn, node.is_dir) {
-                pending
-                    .entry((vi, node.frn))
-                    .and_modify(|c| c.reasons |= reason)
-                    .or_insert(Changed {
-                        is_dir: node.is_dir,
-                        reasons: reason,
-                        since: Instant::now(),
-                    });
+                page.push((vi, node.frn, node.is_dir));
             }
-            if pending.len() > MAX_PENDING {
-                return Err(invalid("journal pending-object limit: full rebuild required").into());
-            }
+            *record_count += 1;
             at += length;
         }
-        volume.cursor = next;
+        pending.add_page(&page)?;
+        volume.cursor = next.min(cutoff);
+    }
+    Ok(volume.cursor < cutoff)
+}
+
+fn validate_journal(volume: &Volume) -> Result<Value> {
+    let journal = query(&volume.handle)?;
+    if number(&journal, "journal_id")? != volume.journal
+        || volume.cursor < number(&journal, "first_usn")?.max(number(&journal, "lowest_valid_usn")?)
+        || volume.cursor > number(&journal, "next_usn")?
+    {
+        return Err(crate::NeedsRebuild(format!(
+            "{} journal identity/retention changed",
+            volume.root
+        ))
+        .into());
+    }
+    Ok(journal)
+}
+
+fn validate_journals(volumes: &[Volume]) -> Result<()> {
+    for volume in volumes {
+        crate::cancel::check()?;
+        validate_journal(volume)?;
     }
     Ok(())
 }
+
+// Only a read page and a refresh page are resident. The coalesced identity
+// set lives in a session-owned database and has no object-count ceiling.
+struct Pending {
+    db: rusqlite::Connection,
+    count: usize,
+}
+impl Pending {
+    fn new(feed: &Path) -> Result<Self> {
+        let path = feed.with_extension("pending.sqlite");
+        drop(
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)?,
+        );
+        let db = rusqlite::Connection::open(path)?;
+        // This is replayable scratch, not the durable applied state. The
+        // ordinary consumer alone publishes a recovery cursor after commit.
+        db.execute_batch(
+            "PRAGMA journal_mode=DELETE; PRAGMA synchronous=OFF;
+            PRAGMA cache_size=-4096; PRAGMA mmap_size=0; PRAGMA temp_store=FILE;
+            CREATE TABLE pending(volume INTEGER NOT NULL, frn BLOB NOT NULL,
+            is_dir INTEGER NOT NULL, PRIMARY KEY(volume,frn)) WITHOUT ROWID;",
+        )?;
+        Ok(Self { db, count: 0 })
+    }
+    fn add_page(&mut self, changes: &[(usize, u64, bool)]) -> Result<()> {
+        let tx = self.db.transaction()?;
+        let mut added = 0;
+        {
+            let mut insert = tx.prepare_cached(
+                "INSERT OR IGNORE INTO pending(volume,frn,is_dir) VALUES(?1,?2,?3)",
+            )?;
+            let mut existing =
+                tx.prepare_cached("SELECT is_dir FROM pending WHERE volume=?1 AND frn=?2")?;
+            for &(volume, frn, is_dir) in changes {
+                let key = frn.to_be_bytes();
+                if insert.execute(rusqlite::params![volume as i64, &key[..], is_dir])? != 0 {
+                    added += 1;
+                } else if existing.query_row(rusqlite::params![volume as i64, &key[..]], |row| {
+                    row.get::<_, bool>(0)
+                })? != is_dir
+                {
+                    return Err(invalid("journal identity changed directory type").into());
+                }
+            }
+        }
+        tx.commit()?;
+        self.count += added;
+        Ok(())
+    }
+    fn page(&self, after: Option<(usize, u64)>) -> Result<Vec<((usize, u64), Changed)>> {
+        let mut query = self.db.prepare_cached(
+            "SELECT volume,frn,is_dir FROM pending
+             WHERE (volume,frn)>(?1,?2)
+             ORDER BY volume,frn LIMIT 128",
+        )?;
+        let (volume, frn) = after.map_or((-1, 0), |(v, f)| (v as i64, f));
+        let key = frn.to_be_bytes();
+        let mut rows = query.query(rusqlite::params![volume, &key[..]])?;
+        let mut page = Vec::with_capacity(CHANGE_BATCH);
+        while let Some(row) = rows.next()? {
+            let volume = usize::try_from(row.get::<_, i64>(0)?)?;
+            let frn: Vec<u8> = row.get(1)?;
+            let frn = u64::from_be_bytes(
+                frn.as_slice()
+                    .try_into()
+                    .map_err(|_| invalid("invalid pending identity"))?,
+            );
+            page.push((
+                (volume, frn),
+                Changed {
+                    is_dir: row.get(2)?,
+                },
+            ));
+        }
+        Ok(page)
+    }
+    fn clear(&mut self) -> Result<()> {
+        self.db.execute("DELETE FROM pending", [])?;
+        self.count = 0;
+        Ok(())
+    }
+}
+
+fn refresh_pending(
+    volumes: &[Volume],
+    pending: &Pending,
+    out: &mut FeedWriter,
+    cursors: &[Value],
+) -> Result<u64> {
+    let round = out
+        .seq
+        .checked_add(1)
+        .ok_or_else(|| invalid("round overflow"))?;
+    emit_frame(
+        out,
+        json!({"kind":"round_begin", "round":round,
+        "cursors":cursors,"pending_objects":pending.count}),
+    )?;
+    let mut after = None;
+    let mut changes = Vec::with_capacity(CHANGE_BATCH);
+    let mut bytes = 0;
+    let mut remaining = pending.count;
+    let mut disappeared_count = 0;
+    loop {
+        let page = pending.page(after)?;
+        if page.is_empty() {
+            break;
+        }
+        for (key @ (vi, id), change) in page {
+            crate::cancel::check()?;
+            let mut failed_since = None::<Instant>;
+            let paths = loop {
+                crate::cancel::check()?;
+                if out.last_output.elapsed() >= HEARTBEAT_INTERVAL {
+                    validate_journals(volumes)?;
+                    emit_frame(
+                        out,
+                        json!({"kind":"round_changes","round":round,
+                        "changes":std::mem::take(&mut changes),"cursors":cursors,
+                        "pending_objects":remaining}),
+                    )?;
+                    bytes = 0;
+                }
+                match paths(&volumes[vi], id, &change) {
+                    Ok(paths) => break paths,
+                    Err(error) => {
+                        if failed_since.get_or_insert_with(Instant::now).elapsed()
+                            >= Duration::from_secs(3)
+                        {
+                            return Err(format!(
+                                "{} FRN {id} refresh failed: {error}",
+                                volumes[vi].root
+                            )
+                            .into());
+                        }
+                        std::thread::sleep(ROUND_INTERVAL);
+                    }
+                }
+            };
+            let identity_only = paths.is_empty();
+            disappeared_count += u64::from(identity_only);
+            let item = json!({"volume":volumes[vi].root,"frn":id.to_string(),
+                "is_dir":change.is_dir,"paths_utf16":paths,"identity_only":identity_only});
+            let item_bytes = serde_json::to_vec(&item)?.len();
+            if !changes.is_empty() && bytes + item_bytes > CHANGE_BATCH_BYTES {
+                emit_frame(
+                    out,
+                    json!({"kind":"round_changes","round":round,
+                    "changes":std::mem::take(&mut changes),"cursors":cursors,
+                    "pending_objects":remaining}),
+                )?;
+                bytes = 0;
+            }
+            changes.push(item);
+            bytes += item_bytes;
+            remaining -= 1;
+            after = Some(key);
+            if changes.len() >= CHANGE_BATCH || bytes >= CHANGE_BATCH_BYTES {
+                validate_journals(volumes)?;
+                emit_frame(
+                    out,
+                    json!({"kind":"round_changes","round":round,
+                    "changes":std::mem::take(&mut changes),"cursors":cursors,
+                    "pending_objects":remaining}),
+                )?;
+                bytes = 0;
+            }
+        }
+    }
+    if !changes.is_empty() {
+        emit_frame(
+            out,
+            json!({"kind":"round_changes","round":round,
+            "changes":changes,"cursors":cursors,"pending_objects":0}),
+        )?;
+    }
+    // No recovery cursor is published before all paths are refreshed and
+    // journal continuity is checked. The consumer commits both together.
+    validate_journals(volumes)?;
+    emit_frame(
+        out,
+        json!({"kind":"round_commit","round":round,
+        "cursors":cursors,"pending_objects":0}),
+    )?;
+    Ok(disappeared_count)
+}
 pub(super) fn watch(checkpoint: &Path, feed: &Path) -> Result<()> {
+    watch_resumable(checkpoint, feed, None, Arc::new(AtomicU64::new(0)))
+}
+
+pub(super) fn watch_resumable(
+    checkpoint: &Path,
+    feed: &Path,
+    resume: Option<Value>,
+    acknowledged: Arc<AtomicU64>,
+) -> Result<()> {
     crate::cancel::check()?;
     let _privilege = backup_privilege()?;
-    let begin: Value = serde_json::from_reader(BufReader::new(File::open(checkpoint)?))?;
+    let mut begin: Value = serde_json::from_reader(BufReader::new(File::open(checkpoint)?))?;
     if begin["kind"] != "begin" || begin["scope"] != FILE_SEARCH_SCOPE {
         return Err(invalid("unsupported journal checkpoint").into());
     }
+    let original = begin["volumes"]
+        .as_array()
+        .filter(|volumes| !volumes.is_empty() && volumes.len() <= 26)
+        .ok_or_else(|| invalid("journal checkpoint needs 1..26 volumes"))?;
+    let mut starts = Vec::with_capacity(original.len());
+    if let Some(resume) = &resume {
+        let cursors = resume
+            .as_array()
+            .filter(|v| v.len() == original.len())
+            .ok_or_else(|| invalid("resume volume inventory mismatch"))?;
+        for (cursor, volume) in cursors.iter().zip(original) {
+            if cursor.as_object().is_none_or(|v| v.len() != 3)
+                || cursor["volume"] != volume["volume"]
+                || number(cursor, "journal_id")? != number(volume, "journal_id")?
+                || number(cursor, "next_usn")? < number(volume, "start_usn")?
+                || number(cursor, "next_usn")? > i64::MAX as u64
+            {
+                return Err(invalid("resume identity/cursor mismatch").into());
+            }
+            starts.push(number(cursor, "next_usn")?);
+        }
+    } else {
+        for volume in original {
+            starts.push(number(volume, "start_usn")?);
+        }
+    }
+    // Provenance fields remain the immutable capture identity. Only this
+    // invocation's starting cursors differ, bound to durable consumer state.
+    begin["resume_cursors"] = resume.unwrap_or(Value::Null);
     let started = Instant::now();
     let mut out = FeedWriter {
         out: BufWriter::with_capacity(
             1024 * 1024,
             OpenOptions::new().write(true).create_new(true).open(feed)?,
         ),
+        path: feed.to_path_buf(),
+        segment: 0,
+        first_retained: 0,
+        segment_bytes: 0,
+        acknowledged,
         bytes: 0,
+        seq: 0,
+        last_output: Instant::now(),
+        last_pending: 0,
+        last_cursors: Vec::new(),
     };
     emit(&mut out, &begin)?;
     let mut report = json!({"mode":"journal-watch","pid":std::process::id(),
         "start_qpc_ns":qpc_ns()?,"status":"running","metadata_only":true,
-        "journal_mutations":false,"raw_records_saved":false,"max_feed_bytes":MAX_FEED_BYTES,"heartbeat_ms":HEARTBEAT_INTERVAL.as_millis()});
+        "journal_mutations":false,"raw_records_saved":false,
+        "feed_segment_bytes":FEED_SEGMENT_BYTES,"pending_storage":"sqlite",
+        "pending_cache_bytes":4*1024*1024,"refresh_batch_objects":CHANGE_BATCH,
+        "heartbeat_ms":HEARTBEAT_INTERVAL.as_millis(),
+        "peak_pending_objects":0,"reclaimed_objects":0});
     let result = (|| -> Result<()> {
         let mut volumes = Vec::new();
-        for v in begin["volumes"]
-            .as_array()
-            .ok_or_else(|| invalid("missing volumes"))?
-        {
+        for (vi, v) in begin["volumes"].as_array().unwrap().iter().enumerate() {
             let root = drive(&OsString::from(
                 v["volume"]
                     .as_str()
                     .ok_or_else(|| invalid("missing volume"))?,
             ))?;
+            if volumes.iter().any(|volume: &Volume| volume.root == root) {
+                return Err(invalid("duplicate journal checkpoint volume").into());
+            }
             let handle = open(&format!(r"\\.\{root}"), 0x8000_0000, 0)?;
             let rh = open(&format!(r"\\?\{root}\"), 0, 0x0220_0000)?;
             let ri = info(&rh)?;
@@ -342,111 +711,131 @@ pub(super) fn watch(checkpoint: &Path, feed: &Path) -> Result<()> {
             {
                 return Err(invalid("journal volume/root identity changed").into());
             }
+            let mut geometry = [0u8; 96];
+            if ioctl(&handle, 0x0009_0064, &[], &mut geometry)? < geometry.len()
+                || u64_at(&geometry, 0) as u32 != ri[7]
+            {
+                return Err(invalid("journal NTFS volume geometry/identity mismatch").into());
+            }
+            let record_size = u32_at(&geometry, 48) as usize;
+            if !(512..=1024 * 1024).contains(&record_size) {
+                return Err(invalid("unsupported journal MFT record size").into());
+            }
             volumes.push(Volume {
                 handle,
                 root,
                 serial: ri[7],
                 journal: number(v, "journal_id")?,
-                cursor: number(v, "start_usn")?,
+                cursor: starts[vi],
+                record_size,
             });
         }
-        // Immutable base begin is unchanged; these are this invocation's catch-up targets.
         let mut targets = Vec::new();
         for volume in &volumes {
-            let current = query(&volume.handle)?;
-            if number(&current, "journal_id")? != volume.journal {
-                return Err(invalid("journal identity changed before catch-up").into());
-            }
-            targets.push(json!({"volume":volume.root,"journal_id":volume.journal.to_string(),"next_usn":current["next_usn"],"volume_serial":volume.serial}));
+            let current = validate_journal(volume)?;
+            targets.push(
+                json!({"volume":volume.root,"journal_id":volume.journal.to_string(),
+                "next_usn":current["next_usn"],"volume_serial":volume.serial}),
+            );
         }
         let mut catchup_emitted = false;
-        let mut buffer = vec![0; 1024 * 1024];
-        let mut pending = BTreeMap::new();
-        let mut seq = 0u64;
+        let mut buffer = vec![0; POLL_BUFFER_BYTES];
+        let mut pending = Pending::new(feed)?;
+        let mut next_volume = 0;
+        let mut round_targets = targets
+            .iter()
+            .map(|target| number(target, "next_usn"))
+            .collect::<Result<Vec<_>>>()?;
+        let mut round_complete = false;
         let mut records = 0u64;
         let mut changed = 0u64;
-        let mut last_output = Instant::now();
-        let mut last_pending = 0usize;
-        let mut last_cursors = Vec::<Value>::new();
         while !crate::cancel::cancelled() {
             let tick = Instant::now();
-            for (vi, volume) in volumes.iter_mut().enumerate() {
-                poll(volume, &mut pending, vi, &mut buffer, &mut records)?;
+            if round_complete {
+                round_targets = volumes
+                    .iter()
+                    .map(|volume| number(&query(&volume.handle)?, "next_usn"))
+                    .collect::<Result<Vec<_>>>()?;
             }
-            let mut changes = Vec::new();
-            let mut done = Vec::new();
-            for (&(vi, id), change) in &pending {
-                match paths(&volumes[vi], id, change) {
-                    Ok(paths) => {
-                        changes.push(json!({"volume":volumes[vi].root,"frn":id.to_string(),
-                            "is_dir":change.is_dir,"paths_utf16":paths}));
-                        done.push((vi, id));
-                    }
-                    Err(error) if change.since.elapsed() < Duration::from_secs(3) => {
-                        let _ = error; // retry only inside the explicit, bounded pending window
-                    }
-                    Err(error) => {
-                        return Err(format!(
-                            "{} FRN {id} refresh failed: {error}",
-                            volumes[vi].root
-                        )
-                        .into())
-                    }
-                }
+            let previous_records = records;
+            for offset in 0..volumes.len() {
+                let vi = (next_volume + offset) % volumes.len();
+                poll(
+                    &mut volumes[vi],
+                    round_targets[vi],
+                    &mut pending,
+                    vi,
+                    &mut buffer,
+                    &mut records,
+                )?;
             }
-            for key in done {
-                pending.remove(&key);
+            next_volume = (next_volume + 1) % volumes.len();
+            report["peak_pending_objects"] = json!(report["peak_pending_objects"]
+                .as_u64()
+                .unwrap_or(0)
+                .max(pending.count as u64));
+            let cursors: Vec<_> = volumes
+                .iter()
+                .map(|v| {
+                    json!({"volume":v.root,
+                "journal_id":v.journal.to_string(),"next_usn":v.cursor.to_string()})
+                })
+                .collect();
+            let more = volumes
+                .iter()
+                .zip(&round_targets)
+                .any(|(volume, &target)| volume.cursor < target);
+            let had_changes = !more && pending.count != 0;
+            if had_changes {
+                let before = pending.count;
+                let reclaimed = refresh_pending(&volumes, &pending, &mut out, &cursors)?;
+                changed += before as u64;
+                report["reclaimed_objects"] =
+                    json!(report["reclaimed_objects"].as_u64().unwrap_or(0) + reclaimed);
+                pending.clear()?;
             }
-            changed += changes.len() as u64;
-            let cursors:Vec<_> = volumes.iter().map(|v|json!({"volume":v.root,"journal_id":v.journal.to_string(),"next_usn":v.cursor.to_string()})).collect();
+            round_complete = !more;
             let caught_up_now = !catchup_emitted
-                && pending.is_empty()
+                && round_complete
+                && pending.count == 0
                 && volumes.iter().zip(&targets).all(|(volume, target)| {
                     number(target, "next_usn").is_ok_and(|target| volume.cursor >= target)
                 });
-            // After startup, cursor-only motion can wait for the next heartbeat.
-            // Metadata polling and refresh retries still run on every 100ms tick.
-            let emit_batch = seq == 0
-                || !changes.is_empty()
-                || pending.len() != last_pending
+            // Collection heartbeats may report read cursors, but the consumer
+            // persists them only with pending=0 outside an unfinished round.
+            if out.seq == 0
+                || pending.count != out.last_pending
                 || caught_up_now
-                || (!catchup_emitted && cursors != last_cursors)
-                || last_output.elapsed() >= HEARTBEAT_INTERVAL;
-            if emit_batch {
-                let next_seq = seq
-                    .checked_add(1)
-                    .ok_or_else(|| invalid("journal sequence overflow"))?;
-                let mut batch = json!({"kind":"batch","seq":next_seq,"changes":changes,"cursors":cursors,"observed_qpc_ns":qpc_ns()?,"pending_objects":pending.len()});
-                if next_seq % 10 == 1 {
-                    batch["watcher_memory"] = memory_now()?;
-                }
-                emit(&mut out, &batch)?;
-                seq = next_seq;
-                last_pending = pending.len();
-                last_cursors = cursors;
-                last_output = Instant::now();
-                if caught_up_now {
-                    emit(
-                        &mut out,
-                        &json!({"kind":"caught_up","seq":seq,"generation":begin["generation"],"scope":begin["scope"],"targets":targets,"cursors":batch["cursors"],"pending_objects":0}),
-                    )?;
-                    catchup_emitted = true;
+                || (!catchup_emitted && cursors != out.last_cursors)
+                || out.last_output.elapsed() >= HEARTBEAT_INTERVAL
+            {
+                validate_journals(&volumes)?;
+                emit_batch(&mut out, Vec::new(), &cursors, pending.count, false)?;
+            }
+            if caught_up_now {
+                let seq = out.seq;
+                emit(
+                    &mut out,
+                    &json!({"kind":"caught_up","seq":seq,
+                    "generation":begin["generation"],"scope":begin["scope"],
+                    "targets":targets,"cursors":cursors,"pending_objects":0}),
+                )?;
+                catchup_emitted = true;
+            }
+            if !(more && records != previous_records) {
+                if let Some(delay) = ROUND_INTERVAL.checked_sub(tick.elapsed()) {
+                    std::thread::sleep(delay);
                 }
             }
-            if tick.elapsed() < Duration::from_millis(100) {
-                std::thread::sleep(Duration::from_millis(100) - tick.elapsed());
-            }
         }
-        if !pending.is_empty() {
-            return Err(invalid("pending refreshes remain when journal watcher stops").into());
-        }
-        report["batches"] = json!(seq);
+        report["batches"] = json!(out.seq);
         report["journal_records"] = json!(records);
         report["object_refreshes"] = json!(changed);
         report["status"] = json!("complete");
+        let seq = out.seq + 1;
         emit(
             &mut out,
-            &json!({"kind":"end","seq":seq+1,"observed_qpc_ns":qpc_ns()?}),
+            &json!({"kind":"end","seq":seq,"observed_qpc_ns":qpc_ns()?}),
         )?;
         Ok(())
     })();
@@ -459,8 +848,6 @@ pub(super) fn watch(checkpoint: &Path, feed: &Path) -> Result<()> {
             "MetadataReaderFailed"
         };
         report["error_code"] = json!(code);
-        // Bounded text leaves the reserved terminal frame below 64 KiB even
-        // with JSON escaping; the report sidecar retains the complete error.
         let message: String = error.to_string().chars().take(8192).collect();
         let _ = emit(
             &mut out,
@@ -468,6 +855,7 @@ pub(super) fn watch(checkpoint: &Path, feed: &Path) -> Result<()> {
         );
     }
     report["feed_bytes"] = json!(out.bytes);
+    report["feed_segments"] = json!(out.segment + 1);
     report["wall_ms"] = json!(started.elapsed().as_secs_f64() * 1000.0);
     report["end_qpc_ns"] = json!(qpc_ns()?);
     sample_memory(&mut report)?;

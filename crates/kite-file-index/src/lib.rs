@@ -16,7 +16,9 @@ mod mft;
 #[allow(dead_code)]
 mod paged;
 mod snapshot_merge;
-pub use api::{build, capture, watch, CaptureManifest, CapturedVolume, Generation};
+pub use api::{
+    build, capture, watch, watch_resumable, CaptureManifest, CapturedVolume, Generation,
+};
 pub use filter::{FileFilter, Query};
 pub use live::LiveSearch;
 /// Share with the service/controller; true requests cooperative cancellation.

@@ -1,14 +1,18 @@
-//! Small, bounded live overlay for the KFPAGED1 snapshot.
+//! Durable disk-backed live overlay for the KFPAGED1 snapshot.
 //!
-//! The immutable snapshot/index remains the search base.  The overlay only
-//! keeps changed objects, a bit per shadowed baseline path, and lazy directory
-//! prefix rewrites.  It is intentionally a prototype: when its bounded state
-//! is full it reports `rebuild_required` instead of growing without limit.
+//! Changed identities, directory mappings and incomplete journal rounds live
+//! in SQLite with a fixed page cache. Only the baseline shadow bitmap remains
+//! resident. A complete round commits its overlay and recovery cursors together.
 
 use super::{decode_path, invalid, paged, path_record, snapshot_header, utf16_units, Result};
 use memchr::memmem::Finder;
+use rusqlite::{params, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+#[path = "live_store.rs"]
+mod live_store;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -22,8 +26,10 @@ use std::time::{Duration, Instant};
 const ID_MAGIC: &[u8; 8] = b"KFLIVEI1";
 const ID_HEADER: usize = 64;
 const ID_RECORD: usize = 24;
-const MAX_OBJECTS: usize = 65_536;
-const MAX_BYTES: usize = 64 * 1024 * 1024;
+// Normal producer frames target about 1 MiB. A single NTFS identity can
+// legally carry 1,024 long hard-link paths, so this is a corruption bound,
+// independent of the number of changed identities in a journal round.
+const MAX_FRAME_BYTES: u64 = 256 * 1024 * 1024;
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -485,115 +491,8 @@ struct PrefixMap {
     current: Vec<u16>,
 }
 
-/// Snapshot matching context captured at the point where a directory delete
-/// is applied.  Directory transforms still happen in feed order; only the
-/// expensive immutable-snapshot membership checks are merged by prefix state.
-struct SnapshotDeleteGroup {
-    volume: u8,
-    prefix_revision: u64,
-    mappings: Vec<PrefixMap>,
-    current_prefixes: Vec<Vec<u16>>,
-}
-
-#[derive(Default)]
-struct SnapshotDeleteBatch {
-    groups: Vec<SnapshotDeleteGroup>,
-}
-
-impl SnapshotDeleteBatch {
-    fn add(
-        &mut self,
-        volume: u8,
-        prefix_revision: u64,
-        prefixes: &[PrefixMap],
-        current_prefixes: &[Vec<u16>],
-    ) {
-        if let Some(group) = self
-            .groups
-            .iter_mut()
-            .find(|group| group.volume == volume && group.prefix_revision == prefix_revision)
-        {
-            group
-                .current_prefixes
-                .extend(current_prefixes.iter().cloned());
-            return;
-        }
-        self.groups.push(SnapshotDeleteGroup {
-            volume,
-            prefix_revision,
-            mappings: prefixes
-                .iter()
-                .filter(|mapping| mapping.volume == volume)
-                .cloned()
-                .collect(),
-            current_prefixes: current_prefixes.to_vec(),
-        });
-    }
-
-    fn apply(self, overlay: &mut Overlay) -> Result<()> {
-        if self.groups.is_empty() {
-            return Ok(());
-        }
-        overlay.load_startup_snapshot_cache()?;
-        for group in self.groups {
-            let matcher = PrefixMatcher::new(&group.current_prefixes);
-            let matched = if let Some(snapshot) = overlay.startup_snapshot.as_deref() {
-                overlay.snapshot_matches_prefixes_bytes_with_mappings(
-                    snapshot,
-                    &matcher,
-                    group.volume,
-                    &group.mappings,
-                )?
-            } else {
-                let file = File::open(&overlay.snapshot_path)?;
-                let mut reader = BufReader::with_capacity(1024 * 1024, file);
-                overlay.snapshot_matches_prefixes_with_mappings(
-                    &mut reader,
-                    &matcher,
-                    group.volume,
-                    &group.mappings,
-                )?
-            };
-            for ordinal in matched {
-                let ordinal = ordinal as usize;
-                overlay.shadowed[ordinal / 8] |= 1 << (ordinal % 8);
-            }
-        }
-        Ok(())
-    }
-}
-
 fn raw_utf16_unit(path: &[u8], index: usize) -> u16 {
     u16::from_le_bytes([path[index * 2], path[index * 2 + 1]])
-}
-
-fn raw_starts_with(path: &[u8], prefix: &[u16]) -> bool {
-    if path.len() < prefix.len() * 2 {
-        return false;
-    }
-    prefix
-        .iter()
-        .enumerate()
-        .all(|(index, unit)| raw_utf16_unit(path, index) == *unit)
-}
-
-fn raw_path_under(path: &[u8], prefix: &[u16]) -> bool {
-    let units = path.len() / 2;
-    if units == prefix.len() {
-        return raw_starts_with(path, prefix);
-    }
-    if units <= prefix.len() || !raw_starts_with(path, prefix) {
-        return false;
-    }
-    matches!(raw_utf16_unit(path, prefix.len()), 0x5c | 0x2f)
-}
-
-fn transformed_unit(path: &[u8], base_len: usize, replacement: &[u16], index: usize) -> u16 {
-    if index < replacement.len() {
-        replacement[index]
-    } else {
-        raw_utf16_unit(path, base_len + index - replacement.len())
-    }
 }
 
 #[derive(Default)]
@@ -664,19 +563,9 @@ impl PrefixMatcher {
     fn matches_raw(&self, path: &[u8]) -> bool {
         self.matches_with(path.len() / 2, |index| raw_utf16_unit(path, index))
     }
-
-    fn matches_transformed(&self, path: &[u8], base_len: usize, replacement: &[u16]) -> bool {
-        let units = path.len() / 2;
-        if units < base_len {
-            return false;
-        }
-        let transformed_len = replacement.len() + units - base_len;
-        self.matches_with(transformed_len, |index| {
-            transformed_unit(path, base_len, replacement, index)
-        })
-    }
 }
 
+#[derive(Serialize, Deserialize)]
 struct ObjectState {
     is_dir: bool,
     baseline_ordinals: Vec<u32>,
@@ -684,29 +573,20 @@ struct ObjectState {
     paths: Vec<Vec<u16>>,
 }
 
-impl ObjectState {
-    fn estimate_bytes(&self) -> usize {
-        128 + self.baseline_ordinals.len() * 4
-            + self
-                .baseline_paths
-                .iter()
-                .chain(self.paths.iter())
-                .map(|path| path.len() * 2 + 24)
-                .sum::<usize>()
-    }
-}
-
 struct Overlay {
     snapshot_path: PathBuf,
     snapshot: File,
     snapshot_bytes: u64,
-    startup_snapshot: Option<Vec<u8>>,
-    startup_cache_enabled: bool,
     identities: IdentityTable,
     shadowed: Vec<u8>,
-    objects: HashMap<Key, ObjectState>,
-    prefixes: Vec<PrefixMap>,
-    prefix_revision: u64,
+    store: live_store::Store,
+    round: Option<u64>,
+    work_stop: Option<Arc<AtomicBool>>,
+    stage_ordinal: i64,
+    pending_deletes: Vec<Vec<u16>>,
+    pending_delete_bytes: usize,
+    prefix_cache: RefCell<HashMap<(u8, Vec<u16>), Option<Vec<u16>>>>,
+    has_prefixes: Cell<Option<bool>>,
     last_seq: u64,
     batches: u64,
     changes: u64,
@@ -715,29 +595,43 @@ struct Overlay {
     pending_objects: u64,
     end_seq: Option<u64>,
     last_operation: Option<String>,
-    bytes_estimate: usize,
+}
+
+fn units_blob(path: &[u16]) -> Vec<u8> {
+    path.iter().flat_map(|unit| unit.to_le_bytes()).collect()
 }
 
 impl Overlay {
-    fn new(snapshot: &Path, identities: &Path, entries: u64, snapshot_bytes: u64) -> Result<Self> {
-        let file = File::open(snapshot)?;
+    fn new(
+        snapshot: &Path,
+        identities: &Path,
+        entries: u64,
+        snapshot_bytes: u64,
+        store: live_store::Store,
+    ) -> Result<Self> {
         let shadow_bytes = usize::try_from(
             entries
                 .checked_add(7)
                 .ok_or_else(|| invalid("shadow bitset overflow"))?
                 / 8,
         )?;
+        let shadowed = store.load_shadow(shadow_bytes)?;
+        let mut identities = IdentityTable::open(identities, snapshot_bytes, entries)?;
+        identities.release_startup_cache();
         Ok(Self {
-            snapshot_path: snapshot.to_path_buf(),
-            snapshot: file,
+            snapshot_path: snapshot.to_owned(),
+            snapshot: File::open(snapshot)?,
             snapshot_bytes,
-            startup_snapshot: None,
-            startup_cache_enabled: true,
-            identities: IdentityTable::open(identities, snapshot_bytes, entries)?,
-            shadowed: vec![0; shadow_bytes],
-            objects: HashMap::new(),
-            prefixes: Vec::new(),
-            prefix_revision: 0,
+            identities,
+            shadowed,
+            store,
+            round: None,
+            work_stop: None,
+            stage_ordinal: 0,
+            pending_deletes: Vec::new(),
+            pending_delete_bytes: 0,
+            prefix_cache: RefCell::new(HashMap::new()),
+            has_prefixes: Cell::new(None),
             last_seq: 0,
             batches: 0,
             changes: 0,
@@ -746,48 +640,39 @@ impl Overlay {
             pending_objects: 0,
             end_seq: None,
             last_operation: None,
-            bytes_estimate: shadow_bytes,
         })
     }
-
-    /// Read the immutable snapshot once for bootstrap.  Directory-delete
-    /// events may otherwise rescan the same 680 MiB file repeatedly.  This
-    /// cache is dropped before ready; steady-state path reads stay on disk.
-    fn load_startup_snapshot_cache(&mut self) -> Result<()> {
-        if !self.startup_cache_enabled || self.startup_snapshot.is_some() {
-            return Ok(());
+    fn check_cancel(&self) -> Result<()> {
+        crate::cancel::check()?;
+        if self
+            .work_stop
+            .as_ref()
+            .is_some_and(|stop| stop.load(Ordering::Acquire))
+        {
+            return Err(
+                io::Error::new(io::ErrorKind::Interrupted, "live overlay work stopped").into(),
+            );
         }
-        let capacity = usize::try_from(self.snapshot_bytes)?;
-        self.snapshot.seek(SeekFrom::Start(0))?;
-        let mut cache = Vec::with_capacity(capacity);
-        let mut reader = BufReader::with_capacity(1024 * 1024, &mut self.snapshot);
-        reader.read_to_end(&mut cache)?;
-        if cache.len() != capacity {
-            return Err(invalid("startup snapshot cache length mismatch").into());
-        }
-        self.startup_snapshot = Some(cache);
         Ok(())
     }
-
+    fn save_view_sequence(&self, seq: u64) -> Result<()> {
+        self.store.conn.execute("INSERT INTO metadata(key,value) VALUES('view_seq',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[seq.to_string()])?;
+        Ok(())
+    }
     fn release_startup_caches(&mut self) {
-        self.startup_snapshot.take();
-        self.startup_cache_enabled = false;
         self.identities.release_startup_cache();
     }
-
     fn mark_stale(&mut self, reason: impl Into<String>) {
         if self.stale.is_none() {
             self.stale = Some(reason.into());
         }
     }
-
     fn shadow_range(&mut self, records: &[IdentityRecord]) {
         for record in records {
             let ordinal = record.ordinal as usize;
             self.shadowed[ordinal / 8] |= 1 << (ordinal % 8);
         }
     }
-
     fn baseline_paths(&mut self, records: &[IdentityRecord]) -> Result<Vec<Vec<u16>>> {
         records
             .iter()
@@ -796,514 +681,629 @@ impl Overlay {
             })
             .collect()
     }
-
-    fn transform_path(&self, volume: u8, path: &[u16]) -> Vec<u16> {
-        let best = self
-            .prefixes
-            .iter()
-            .filter(|prefix| prefix.volume == volume && path_under(path, &prefix.base))
-            .max_by_key(|prefix| prefix.base.len());
-        best.map_or_else(
-            || path.to_vec(),
-            |prefix| replace_prefix(path, &prefix.base, &prefix.current),
-        )
+    fn object(&self, key: Key) -> Result<Option<ObjectState>> {
+        let value: Option<String> = self
+            .store
+            .conn
+            .query_row(
+                "SELECT state FROM objects WHERE volume=?1 AND frn=?2",
+                params![key.volume, key.frn.to_be_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        value
+            .map(|value| Ok(serde_json::from_str(&value)?))
+            .transpose()
     }
-
-    fn update_prefix(&mut self, volume: u8, base: &[u16], current: &[u16]) {
-        if base.is_empty() {
-            return;
-        }
-        let mut changed = false;
-        self.prefixes.retain(|prefix| {
-            let keep = !(prefix.volume == volume && prefix.base == base);
-            changed |= !keep;
-            keep
+    fn put_object(&self, key: Key, state: &ObjectState) -> Result<()> {
+        self.store.conn.execute("INSERT INTO objects(volume,frn,is_dir,state) VALUES(?1,?2,?3,?4) ON CONFLICT(volume,frn) DO UPDATE SET is_dir=excluded.is_dir,state=excluded.state",params![key.volume,key.frn.to_be_bytes().as_slice(),state.is_dir,serde_json::to_string(state)?])?;
+        Ok(())
+    }
+    fn remove_object(&self, key: Key) -> Result<()> {
+        self.store.conn.execute(
+            "DELETE FROM objects WHERE volume=?1 AND frn=?2",
+            params![key.volume, key.frn.to_be_bytes().as_slice()],
+        )?;
+        Ok(())
+    }
+    fn next_object(&self, after: Option<Key>) -> Result<Option<(Key, ObjectState)>> {
+        let (volume, frn) = after.map_or((-1, Vec::new()), |key| {
+            (key.volume as i64, key.frn.to_be_bytes().to_vec())
         });
-        if base != current {
-            self.prefixes.push(PrefixMap {
-                volume,
-                base: base.to_vec(),
-                current: current.to_vec(),
-            });
-            changed = true;
-        }
-        if changed {
-            self.prefix_revision = self.prefix_revision.wrapping_add(1);
-        }
+        let row: Option<(u8,Vec<u8>,String)> = self.store.conn.prepare_cached("SELECT volume,frn,state FROM objects WHERE (volume,frn)>(?1,?2) ORDER BY volume,frn LIMIT 1")?.query_row(params![volume,frn],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+        row.map(|(volume, frn, state)| {
+            let frn: [u8; 8] = frn.try_into().map_err(|_| invalid("invalid stored FRN"))?;
+            Ok((
+                Key {
+                    volume,
+                    frn: u64::from_be_bytes(frn),
+                },
+                serde_json::from_str(&state)?,
+            ))
+        })
+        .transpose()
     }
-
-    fn relocate_current_prefix(&mut self, volume: u8, old: &[u16], new: &[u16], except: Key) {
-        if old == new || old.is_empty() {
-            return;
+    fn next_prefix(&self, after: Option<(u8, Vec<u8>)>) -> Result<Option<PrefixMap>> {
+        let (volume, base) = after.map_or((-1, Vec::new()), |(v, b)| (v as i64, b));
+        let row: Option<(u8,Vec<u8>,Vec<u8>)> = self.store.conn.prepare_cached("SELECT volume,base,current FROM prefixes WHERE (volume,base)>(?1,?2) ORDER BY volume,base LIMIT 1")?.query_row(params![volume,base],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+        Ok(row.map(|(volume, base, current)| PrefixMap {
+            volume,
+            base: utf16_units(&base),
+            current: utf16_units(&current),
+        }))
+    }
+    fn transform_path(&self, volume: u8, path: &[u16]) -> Result<Vec<u16>> {
+        let has_prefixes = match self.has_prefixes.get() {
+            Some(value) => value,
+            None => {
+                let value: bool = self.store.conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM prefixes)",
+                    [],
+                    |row| row.get(0),
+                )?;
+                self.has_prefixes.set(Some(value));
+                value
+            }
+        };
+        if !has_prefixes {
+            return Ok(path.to_vec());
         }
-        let mut changed = false;
-        for prefix in &mut self.prefixes {
+        // Only ancestors can match; the number of probes is bounded by path depth.
+        let mut length = path.len();
+        loop {
+            let key = (volume, path[..length].to_vec());
+            let cached = self.prefix_cache.borrow().get(&key).cloned();
+            let target = if let Some(cached) = cached {
+                cached
+            } else {
+                let target: Option<Vec<u8>> = self
+                    .store
+                    .conn
+                    .query_row(
+                        "SELECT current FROM prefixes WHERE volume=?1 AND base=?2",
+                        params![volume, units_blob(&path[..length])],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let target = target.map(|bytes| utf16_units(&bytes));
+                // Cache memory is bounded by both entry count and path lengths.
+                if key.1.len() <= 1024 && target.as_ref().is_none_or(|path| path.len() <= 1024) {
+                    let mut cache = self.prefix_cache.borrow_mut();
+                    if cache.len() >= 512 {
+                        cache.clear();
+                    }
+                    cache.insert(key, target.clone());
+                }
+                target
+            };
+            if let Some(target) = target {
+                return Ok(replace_prefix(path, &path[..length], &target));
+            }
+            let Some(parent) = path[..length]
+                .iter()
+                .rposition(|unit| matches!(unit, 0x5c | 0x2f))
+            else {
+                break;
+            };
+            if parent == length {
+                break;
+            }
+            length = parent;
+        }
+        Ok(path.to_vec())
+    }
+    fn update_prefix(&mut self, volume: u8, base: &[u16], current: &[u16]) -> Result<()> {
+        if base.is_empty() {
+            return Ok(());
+        }
+        let old: Option<Vec<u8>> = self
+            .store
+            .conn
+            .query_row(
+                "SELECT current FROM prefixes WHERE volume=?1 AND base=?2",
+                params![volume, units_blob(base)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if (base == current && old.is_none())
+            || (base != current && old.as_deref() == Some(units_blob(current).as_slice()))
+        {
+            return Ok(());
+        }
+        // Pending deletes refer to the namespace before this mapping edit.
+        self.flush_pending_deletes()?;
+        self.prefix_cache.borrow_mut().clear();
+        self.has_prefixes.set(None);
+        if base == current {
+            self.store.conn.execute(
+                "DELETE FROM prefixes WHERE volume=?1 AND base=?2",
+                params![volume, units_blob(base)],
+            )?;
+        } else {
+            self.store.conn.execute("INSERT INTO prefixes(volume,base,current) VALUES(?1,?2,?3) ON CONFLICT(volume,base) DO UPDATE SET current=excluded.current",params![volume,units_blob(base),units_blob(current)])?;
+        }
+        Ok(())
+    }
+    fn relocate_current_prefix(
+        &mut self,
+        volume: u8,
+        old: &[u16],
+        new: &[u16],
+        except: Key,
+    ) -> Result<()> {
+        if old == new || old.is_empty() {
+            return Ok(());
+        }
+        let mut after = None;
+        while let Some(prefix) = self.next_prefix(after)? {
+            self.check_cancel()?;
+            after = Some((prefix.volume, units_blob(&prefix.base)));
             if prefix.volume == volume && path_under(&prefix.current, old) {
-                prefix.current = replace_prefix(&prefix.current, old, new);
-                changed = true;
+                self.update_prefix(
+                    volume,
+                    &prefix.base,
+                    &replace_prefix(&prefix.current, old, new),
+                )?;
             }
         }
-        let keys: Vec<_> = self.objects.keys().copied().collect();
-        for key in keys {
+        let mut after = None;
+        while let Some((key, mut state)) = self.next_object(after)? {
+            self.check_cancel()?;
+            after = Some(key);
             if key == except || key.volume != volume {
                 continue;
             }
-            if let Some(state) = self.objects.get_mut(&key) {
-                for path in &mut state.paths {
-                    if path_under(path, old) {
-                        *path = replace_prefix(path, old, new);
-                    }
+            let mut changed = false;
+            for path in &mut state.paths {
+                if path_under(path, old) {
+                    *path = replace_prefix(path, old, new);
+                    changed = true;
+                }
+            }
+            if changed {
+                self.put_object(key, &state)?;
+            }
+        }
+        Ok(())
+    }
+    fn queue_snapshot_delete(&mut self, prefix: &[u16]) -> Result<()> {
+        let bytes = prefix.len().saturating_mul(2).saturating_add(24);
+        if bytes > 1024 * 1024 {
+            return Err(invalid("directory delete prefix exceeds path bound").into());
+        }
+        if self
+            .pending_deletes
+            .iter()
+            .any(|queued| path_under(prefix, queued))
+        {
+            return Ok(());
+        }
+        // Within one unchanged namespace, deleting a parent also covers its
+        // queued children. Keep the bounded group small for directory trees.
+        self.pending_deletes
+            .retain(|queued| !path_under(queued, prefix));
+        self.pending_delete_bytes = self
+            .pending_deletes
+            .iter()
+            .map(|queued| queued.len() * 2 + 24)
+            .sum();
+        if self.pending_deletes.len() >= 128
+            || self.pending_delete_bytes.saturating_add(bytes) > 1024 * 1024
+        {
+            self.flush_pending_deletes()?;
+        }
+        self.pending_deletes.push(prefix.to_vec());
+        self.pending_delete_bytes += bytes;
+        Ok(())
+    }
+    fn flush_pending_deletes(&mut self) -> Result<()> {
+        if self.pending_deletes.is_empty() {
+            return Ok(());
+        }
+        let prefixes = std::mem::take(&mut self.pending_deletes);
+        self.pending_delete_bytes = 0;
+        let matcher = PrefixMatcher::new(&prefixes);
+        let has_mappings: bool =
+            self.store
+                .conn
+                .query_row("SELECT EXISTS(SELECT 1 FROM prefixes)", [], |row| {
+                    row.get(0)
+                })?;
+        let mut reader = BufReader::with_capacity(1024 * 1024, File::open(&self.snapshot_path)?);
+        let entries = snapshot_header(&mut reader)?;
+        if entries != self.identities.entries {
+            return Err(invalid("snapshot count changed during directory delete").into());
+        }
+        let mut offset = 16u64;
+        let mut raw = Vec::new();
+        for ordinal in 0..usize::try_from(entries)? {
+            if ordinal & 0x3fff == 0 {
+                self.check_cancel()?;
+            }
+            offset += path_record(&mut reader, self.snapshot_bytes - offset, &mut raw)?;
+            if self.shadowed[ordinal / 8] & (1 << (ordinal % 8)) != 0 {
+                continue;
+            }
+            let matched = if !has_mappings {
+                matcher.matches_raw(&raw)
+            } else {
+                let units = utf16_units(&raw);
+                let volume = units.first().copied().unwrap_or(0) as u8;
+                let current = self.transform_path(volume, &units)?;
+                matcher.matches_with(current.len(), |index| current[index])
+            };
+            if matched {
+                self.shadowed[ordinal / 8] |= 1 << (ordinal % 8);
+            }
+        }
+        if offset != self.snapshot_bytes {
+            return Err(invalid("snapshot trailing bytes during directory delete").into());
+        }
+        Ok(())
+    }
+    fn delete_directory_subtree(
+        &mut self,
+        prefixes: &[Vec<u16>],
+        volume: u8,
+        has_baseline: bool,
+    ) -> Result<()> {
+        // A delta-only directory cannot contain baseline paths unless a
+        // baseline prefix was previously moved beneath its current location.
+        let mut moved_baseline_under_delete = false;
+        if !has_baseline {
+            let mut after = None;
+            while let Some(mapping) = self.next_prefix(after)? {
+                self.check_cancel()?;
+                after = Some((mapping.volume, units_blob(&mapping.base)));
+                if mapping.volume == volume
+                    && prefixes
+                        .iter()
+                        .any(|prefix| path_under(&mapping.current, prefix))
+                {
+                    moved_baseline_under_delete = true;
+                    break;
                 }
             }
         }
-        self.prefixes.retain(|prefix| {
-            let keep = prefix.base != prefix.current;
-            changed |= !keep;
-            keep
-        });
-        if changed {
-            self.prefix_revision = self.prefix_revision.wrapping_add(1);
-        }
-    }
-
-    fn snapshot_path_matches_prefixes_with_mappings(
-        &self,
-        path: &[u8],
-        matcher: &PrefixMatcher,
-        volume: u8,
-        mappings: &[PrefixMap],
-    ) -> bool {
-        let best = mappings
-            .iter()
-            .filter(|mapping| mapping.volume == volume && raw_path_under(path, &mapping.base))
-            .max_by_key(|mapping| mapping.base.len());
-        match best {
-            Some(mapping) => {
-                matcher.matches_transformed(path, mapping.base.len(), &mapping.current)
+        let scan_snapshot = has_baseline || moved_baseline_under_delete;
+        if scan_snapshot {
+            for prefix in prefixes {
+                self.queue_snapshot_delete(prefix)?;
             }
-            None => matcher.matches_raw(path),
         }
-    }
-
-    fn snapshot_matches_prefixes_with_mappings(
-        &self,
-        reader: &mut impl Read,
-        matcher: &PrefixMatcher,
-        volume: u8,
-        mappings: &[PrefixMap],
-    ) -> Result<Vec<u32>> {
-        let entries = snapshot_header(reader)?;
-        if entries != self.identities.entries {
-            return Err(
-                invalid("snapshot entry count changed while deleting directory subtree").into(),
-            );
-        }
-        let mut offset = 16u64;
-        let mut path = Vec::new();
-        let mut matched = Vec::new();
-        for ordinal in 0..usize::try_from(entries)? {
-            if ordinal & 0x3fff == 0 {
-                crate::cancel::check()?;
-            }
-            let consumed = path_record(reader, self.snapshot_bytes - offset, &mut path)?;
-            if self.snapshot_path_matches_prefixes_with_mappings(&path, matcher, volume, mappings) {
-                matched.push(u32::try_from(ordinal)?);
-            }
-            offset += consumed;
-        }
-        if offset != self.snapshot_bytes {
-            return Err(invalid("snapshot trailing bytes while deleting directory subtree").into());
-        }
-        Ok(matched)
-    }
-
-    fn snapshot_matches_prefixes_bytes_with_mappings(
-        &self,
-        snapshot: &[u8],
-        matcher: &PrefixMatcher,
-        volume: u8,
-        mappings: &[PrefixMap],
-    ) -> Result<Vec<u32>> {
-        let snapshot_bytes = usize::try_from(self.snapshot_bytes)?;
-        if snapshot.len() != snapshot_bytes {
-            return Err(invalid("startup snapshot cache length mismatch").into());
-        }
-        let mut header_reader = snapshot;
-        let entries = snapshot_header(&mut header_reader)?;
-        if entries != self.identities.entries {
-            return Err(
-                invalid("snapshot entry count changed while deleting directory subtree").into(),
-            );
-        }
-        let mut offset = 16usize;
-        let mut matched = Vec::new();
-        for ordinal in 0..usize::try_from(entries)? {
-            if ordinal & 0x3fff == 0 {
-                crate::cancel::check()?;
-            }
-            if offset.checked_add(5).is_none_or(|end| end > snapshot.len()) {
-                return Err(invalid("truncated snapshot record").into());
-            }
-            let flags = snapshot[offset];
-            let length = u32::from_le_bytes(
-                snapshot[offset + 1..offset + 5]
-                    .try_into()
-                    .expect("snapshot record header has four length bytes"),
-            ) as usize;
-            if flags > 1 || length % 2 != 0 {
-                return Err(invalid("invalid snapshot record").into());
-            }
-            let path_start = offset + 5;
-            let path_end = path_start
-                .checked_add(length)
-                .ok_or_else(|| invalid("snapshot record length overflow"))?;
-            if path_end > snapshot.len() {
-                return Err(invalid("truncated snapshot record").into());
-            }
-            if self.snapshot_path_matches_prefixes_with_mappings(
-                &snapshot[path_start..path_end],
-                matcher,
-                volume,
-                mappings,
-            ) {
-                matched.push(u32::try_from(ordinal)?);
-            }
-            offset = path_end;
-        }
-        if offset != snapshot.len() {
-            return Err(invalid("snapshot trailing bytes while deleting directory subtree").into());
-        }
-        Ok(matched)
-    }
-
-    fn delete_directory_subtree(
-        &mut self,
-        current_prefixes: &[Vec<u16>],
-        volume: u8,
-        has_baseline: bool,
-        snapshot_deletes: &mut SnapshotDeleteBatch,
-    ) -> Result<()> {
-        let moved_baseline_under_delete = self.prefixes.iter().any(|mapping| {
-            mapping.volume == volume
-                && current_prefixes
-                    .iter()
-                    .any(|prefix| path_under(&mapping.current, prefix))
-        });
-        if has_baseline || moved_baseline_under_delete {
-            snapshot_deletes.add(
-                volume,
-                self.prefix_revision,
-                &self.prefixes,
-                current_prefixes,
-            );
-        }
-        let keys: Vec<_> = self.objects.keys().copied().collect();
-        for key in keys {
+        let mut after = None;
+        while let Some((key, mut state)) = self.next_object(after)? {
+            self.check_cancel()?;
+            after = Some(key);
             if key.volume != volume {
                 continue;
             }
-            if let Some(state) = self.objects.get_mut(&key) {
-                state.paths.retain(|path| {
-                    !current_prefixes
-                        .iter()
-                        .any(|prefix| path_under(path, prefix))
-                });
-            }
-            if self
-                .objects
-                .get(&key)
-                .is_some_and(|state| state.paths.is_empty())
-            {
-                self.objects.remove(&key);
+            let old = state.paths.len();
+            state
+                .paths
+                .retain(|path| !prefixes.iter().any(|prefix| path_under(path, prefix)));
+            if state.paths.is_empty() {
+                self.remove_object(key)?;
+            } else if old != state.paths.len() {
+                self.put_object(key, &state)?;
             }
         }
-        let mut prefixes_changed = false;
-        self.prefixes.retain(|mapping| {
-            let keep = !current_prefixes
-                .iter()
-                .any(|prefix| path_under(&mapping.current, prefix));
-            prefixes_changed |= !keep;
-            keep
-        });
-        if prefixes_changed {
-            self.prefix_revision = self.prefix_revision.wrapping_add(1);
+        let mut after = None;
+        while let Some(prefix) = self.next_prefix(after)? {
+            self.check_cancel()?;
+            after = Some((prefix.volume, units_blob(&prefix.base)));
+            if prefix.volume == volume
+                && prefixes
+                    .iter()
+                    .any(|current| path_under(&prefix.current, current))
+            {
+                self.flush_pending_deletes()?;
+                self.prefix_cache.borrow_mut().clear();
+                self.has_prefixes.set(None);
+                self.store.conn.execute(
+                    "DELETE FROM prefixes WHERE volume=?1 AND base=?2",
+                    params![prefix.volume, units_blob(&prefix.base)],
+                )?;
+            }
         }
         self.last_operation = Some(
-            if has_baseline || moved_baseline_under_delete {
+            if scan_snapshot {
                 "directory_delete_scanned_snapshot"
             } else {
                 "directory_delete_delta_only_no_baseline"
             }
-            .to_owned(),
+            .into(),
         );
         Ok(())
     }
-
-    fn state_size(&self, key: Key) -> usize {
-        self.objects
-            .get(&key)
-            .map_or(0, ObjectState::estimate_bytes)
-    }
-
-    fn estimate_bytes(&self) -> usize {
-        self.shadowed
-            .len()
-            .saturating_add(
-                self.prefixes
-                    .iter()
-                    .map(|prefix| 64 + (prefix.base.len() + prefix.current.len()) * 2)
-                    .sum::<usize>(),
-            )
-            .saturating_add(
-                self.objects
-                    .values()
-                    .map(ObjectState::estimate_bytes)
-                    .sum::<usize>(),
-            )
-    }
-
-    /// Apply only the namespace movement caused by a directory event to the
-    /// state that existed before this batch.  Fresh paths from this batch are
-    /// committed in a second pass; otherwise a later directory event could
-    /// rewrite an already-fresh absolute path and make the result depend on
-    /// FRN ordering within the batch.
-    fn apply_directory_transform(
+    fn validate_change(
         &mut self,
         change: &Change,
-        snapshot_deletes: &mut SnapshotDeleteBatch,
-    ) -> Result<()> {
-        if !change.is_dir {
-            return Ok(());
+        identity_only: bool,
+    ) -> Result<Vec<IdentityRecord>> {
+        if identity_only && !change.paths.is_empty() {
+            return Err(invalid("identity-only live change must have no paths").into());
         }
         let records = self.identities.paths_for(change.key)?;
         if records.iter().any(|record| record.is_dir != change.is_dir) {
             return Err(invalid("live change directory type disagrees with identity table").into());
         }
-        let baseline_paths = self.baseline_paths(&records)?;
-        if change.paths.is_empty() {
-            self.shadow_range(&records);
-            let state_paths = self
-                .objects
-                .get(&change.key)
-                .map(|state| state.paths.clone())
-                .filter(|paths| !paths.is_empty())
-                .unwrap_or_default();
-            let current_prefixes = if !state_paths.is_empty() {
-                state_paths
-            } else {
-                baseline_paths
-                    .iter()
-                    .map(|path| self.transform_path(change.key.volume, path))
-                    .collect()
-            };
-            if !current_prefixes.is_empty() {
-                self.delete_directory_subtree(
-                    &current_prefixes,
-                    change.key.volume,
-                    !records.is_empty(),
-                    snapshot_deletes,
-                )?;
-            }
-            self.objects.remove(&change.key);
+        if self
+            .object(change.key)?
+            .is_some_and(|state| state.is_dir != change.is_dir)
+        {
+            return Err(invalid("live object type changed").into());
+        }
+        Ok(records)
+    }
+    fn apply_directory_transform(&mut self, change: &Change) -> Result<()> {
+        if !change.is_dir {
             return Ok(());
         }
-
-        self.shadow_range(&records);
-        let state_paths = self
-            .objects
-            .get(&change.key)
-            .map(|state| state.paths.clone())
-            .unwrap_or_default();
-        let old_current_paths = if !state_paths.is_empty() {
-            state_paths
+        let records = self.validate_change(change, false)?;
+        let baseline = self.baseline_paths(&records)?;
+        let state = self.object(change.key)?;
+        let old = if let Some(state) = state.filter(|state| !state.paths.is_empty()) {
+            state.paths
         } else {
-            baseline_paths
+            baseline
                 .iter()
                 .map(|path| self.transform_path(change.key.volume, path))
-                .collect()
+                .collect::<Result<Vec<_>>>()?
         };
-        for (index, new) in change.paths.iter().enumerate() {
-            let Some(old) = old_current_paths.get(index) else {
-                break;
-            };
-            if old != new {
-                self.relocate_current_prefix(change.key.volume, old, new, change.key);
+        self.shadow_range(&records);
+        if change.paths.is_empty() {
+            if !old.is_empty() {
+                self.delete_directory_subtree(&old, change.key.volume, !records.is_empty())?;
             }
-            if let Some(base) = baseline_paths.get(index) {
-                self.update_prefix(change.key.volume, base, new);
+            self.remove_object(change.key)?;
+            return Ok(());
+        }
+        for (index, new) in change.paths.iter().enumerate() {
+            if let Some(old) = old.get(index) {
+                self.relocate_current_prefix(change.key.volume, old, new, change.key)?;
+            }
+            if let Some(base) = baseline.get(index) {
+                self.update_prefix(change.key.volume, base, new)?;
             }
         }
         Ok(())
     }
-
-    /// Commit the complete metadata paths reported for one object.  Directory
-    /// prefix movement has already been applied to the pre-batch overlay, so
-    /// this pass deliberately never relocates other fresh paths.
-    fn commit_change(&mut self, change: Change) -> Result<()> {
-        let records = self.identities.paths_for(change.key)?;
-        if records.iter().any(|record| record.is_dir != change.is_dir) {
-            return Err(invalid("live change directory type disagrees with identity table").into());
+    fn commit_change(&mut self, change: Change, identity_only: bool) -> Result<()> {
+        let records = self.validate_change(&change, identity_only)?;
+        self.shadow_range(&records);
+        if change.paths.is_empty() {
+            self.remove_object(change.key)?;
+            return Ok(());
         }
-        let baseline_paths = if change.is_dir {
+        let baseline = if change.is_dir {
             self.baseline_paths(&records)?
         } else {
             Vec::new()
         };
-        self.shadow_range(&records);
-        if change.paths.is_empty() {
-            self.objects.remove(&change.key);
-            return Ok(());
-        }
-
         if change.is_dir {
-            for (index, new) in change.paths.iter().enumerate() {
-                if let Some(base) = baseline_paths.get(index) {
-                    // Reassert the fresh directory target after phase one;
-                    // this also restores the directory's own state when a
-                    // parent delete/rename removed or moved it earlier in
-                    // the same batch.
-                    self.update_prefix(change.key.volume, base, new);
+            for (index, path) in change.paths.iter().enumerate() {
+                if let Some(base) = baseline.get(index) {
+                    self.update_prefix(change.key.volume, base, path)?;
                 }
             }
         }
-        let new_paths = change.paths;
-        let state = self
-            .objects
-            .entry(change.key)
-            .or_insert_with(|| ObjectState {
-                is_dir: change.is_dir,
-                baseline_ordinals: records.iter().map(|record| record.ordinal).collect(),
-                baseline_paths: baseline_paths.clone(),
-                paths: Vec::new(),
-            });
-        if state.is_dir != change.is_dir {
-            return Err(invalid("live object type changed").into());
-        }
+        let mut state = self.object(change.key)?.unwrap_or(ObjectState {
+            is_dir: change.is_dir,
+            baseline_ordinals: Vec::new(),
+            baseline_paths: Vec::new(),
+            paths: Vec::new(),
+        });
         if state.baseline_ordinals.is_empty() {
             state.baseline_ordinals = records.iter().map(|record| record.ordinal).collect();
         }
         if state.is_dir && state.baseline_paths.is_empty() {
-            state.baseline_paths = baseline_paths;
+            state.baseline_paths = baseline;
         }
-        state.paths = new_paths;
-        Ok(())
+        state.paths = change.paths;
+        self.put_object(change.key, &state)
     }
-
-    fn apply_batch(&mut self, seq: u64, changes: Vec<Change>, pending_objects: u64) -> Result<()> {
-        crate::cancel::check()?;
-        if self.stale.is_some() {
+    fn sequence(&self, seq: u64) -> Result<()> {
+        if seq != self.last_seq.saturating_add(1) {
+            Err(invalid("live feed sequence gap").into())
+        } else {
+            Ok(())
+        }
+    }
+    fn apply_batch(
+        &mut self,
+        seq: u64,
+        changes: Vec<Change>,
+        pending: u64,
+        identity_only: bool,
+        cursors: &Value,
+    ) -> Result<()> {
+        self.sequence(seq)?;
+        if self.round.is_some() || (changes.is_empty() && pending != 0) {
+            if !changes.is_empty() {
+                return Err(invalid("nonempty batch interleaved with live round").into());
+            }
+            self.last_seq = seq;
+            self.pending_objects = pending;
+            self.batches += 1;
             return Ok(());
         }
-        if seq != self.last_seq.saturating_add(1) {
-            return Err(invalid("live feed sequence gap").into());
+        if changes.is_empty() && self.store.cursors()?.as_ref() == Some(cursors) {
+            self.last_seq = seq;
+            self.pending_objects = pending;
+            self.batches += 1;
+            return Ok(());
         }
-        if changes.len() > MAX_OBJECTS {
-            return Err(invalid("live batch exceeds object limit").into());
-        }
-        let mut projected_objects = self.objects.len();
-        let mut projected_sizes: HashMap<Key, usize> = HashMap::new();
         for change in &changes {
-            if !projected_sizes.contains_key(&change.key) {
-                projected_sizes.insert(change.key, self.state_size(change.key));
-            }
-            let old = projected_sizes[&change.key];
-            if change.paths.is_empty() {
-                if old != 0 {
-                    projected_objects = projected_objects.saturating_sub(1);
+            self.validate_change(change, identity_only)?;
+        }
+        self.store.begin()?;
+        let result = (|| {
+            if !identity_only {
+                for change in &changes {
+                    self.apply_directory_transform(change)?;
                 }
-                projected_sizes.insert(change.key, 0);
-            } else {
-                if old == 0 {
-                    projected_objects += 1;
-                }
-                let paths_bytes = change
-                    .paths
-                    .iter()
-                    .map(|path| path.len() * 2 + 24)
-                    .sum::<usize>();
-                projected_sizes.insert(change.key, 128 + paths_bytes);
             }
-        }
-        let mut projected_bytes = self
-            .shadowed
-            .len()
-            .saturating_add(
-                self.prefixes
-                    .iter()
-                    .map(|p| 64 + (p.base.len() + p.current.len()) * 2)
-                    .sum::<usize>(),
-            )
-            .saturating_add(
-                self.objects
-                    .values()
-                    .map(ObjectState::estimate_bytes)
-                    .sum::<usize>(),
-            );
-        for (key, projected) in &projected_sizes {
-            projected_bytes = projected_bytes
-                .saturating_sub(self.state_size(*key))
-                .saturating_add(*projected);
-        }
-        if projected_objects > MAX_OBJECTS || projected_bytes > MAX_BYTES {
-            return Err(invalid("rebuild_required: live overlay bound exceeded").into());
-        }
-        let change_count = changes.len() as u64;
-        // First move only the pre-existing overlay.  The journal refresh paths
-        // are a same-round snapshot of the final namespace and are committed
-        // untouched in the second pass, independent of FRN ordering.
-        let mut snapshot_deletes = SnapshotDeleteBatch::default();
-        for change in &changes {
-            let prefix_revision = self.prefix_revision;
-            self.apply_directory_transform(change, &mut snapshot_deletes)?;
-            if self.prefix_revision != prefix_revision {
-                // Do not retain older mapping snapshots while later renames
-                // clone and extend the prefix table.  Deletes within one
-                // unchanged revision remain merged.
-                std::mem::take(&mut snapshot_deletes).apply(self)?;
+            self.flush_pending_deletes()?;
+            let count = changes.len() as u64;
+            for change in changes {
+                self.commit_change(change, identity_only)?;
             }
-        }
-        // Directory deletion effects above were applied in feed order.  Only
-        // the immutable baseline membership checks are merged, grouped by the
-        // exact prefix state captured at each delete.
-        snapshot_deletes.apply(self)?;
-        for change in changes {
-            self.commit_change(change)?;
+            self.save_view_sequence(seq)?;
+            self.store.commit(cursors, &self.shadowed)?;
+            self.changes += count;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let _ = self.store.rollback();
+            self.pending_deletes.clear();
+            self.pending_delete_bytes = 0;
+            self.prefix_cache.borrow_mut().clear();
+            self.has_prefixes.set(None);
+            self.shadowed = self.store.load_shadow(self.shadowed.len())?;
+            return Err(error);
         }
         self.last_seq = seq;
+        self.pending_objects = pending;
         self.batches += 1;
-        self.changes += change_count;
-        self.pending_objects = pending_objects;
-        self.bytes_estimate = self.estimate_bytes();
-        if self.objects.len() > MAX_OBJECTS || self.bytes_estimate > MAX_BYTES {
-            self.mark_stale("rebuild_required: live overlay bound exceeded after apply");
-        }
+        self.store.maintenance()?;
         Ok(())
     }
-
+    fn stage_frame(&mut self, value: &Value) -> Result<()> {
+        let seq = value["seq"]
+            .as_u64()
+            .ok_or_else(|| invalid("round sequence missing"))?;
+        self.sequence(seq)?;
+        let round = value["round"]
+            .as_u64()
+            .ok_or_else(|| invalid("round identity missing"))?;
+        let pending = value["pending_objects"]
+            .as_u64()
+            .ok_or_else(|| invalid("round pending missing"))?;
+        if !value["cursors"].is_array() {
+            return Err(invalid("round cursors missing").into());
+        }
+        match value["kind"].as_str() {
+            Some("round_begin") => {
+                if self.round.is_some() {
+                    return Err(invalid("nested live round").into());
+                }
+                self.store.conn.execute("DELETE FROM staging", [])?;
+                self.round = Some(round);
+                self.stage_ordinal = 0;
+            }
+            Some("round_changes") => {
+                if self.round != Some(round) {
+                    return Err(invalid("round changes identity mismatch").into());
+                }
+                let changes = value["changes"]
+                    .as_array()
+                    .ok_or_else(|| invalid("round changes missing"))?;
+                if changes.len() > 128 {
+                    return Err(invalid("round changes frame exceeds object bound").into());
+                }
+                for value in changes {
+                    let change = parse_change(value)?;
+                    let identity_only = change_identity_only(value)?;
+                    self.validate_change(&change, identity_only)?;
+                }
+                self.store.conn.execute_batch("BEGIN IMMEDIATE")?;
+                let result = (|| -> Result<()> {
+                    for change in changes {
+                        self.stage_ordinal += 1;
+                        self.store.conn.execute(
+                            "INSERT INTO staging(ordinal,change) VALUES(?1,?2)",
+                            params![self.stage_ordinal, serde_json::to_string(change)?],
+                        )?;
+                    }
+                    self.store.conn.execute_batch("COMMIT")?;
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    let _ = self.store.conn.execute_batch("ROLLBACK");
+                    return Err(error);
+                }
+            }
+            Some("round_commit") => {
+                if self.round != Some(round) || pending != 0 {
+                    return Err(invalid("round commit mismatch").into());
+                }
+                self.store.begin()?;
+                let result = (|| -> Result<()> {
+                    for phase in 0..2 {
+                        if phase == 1 {
+                            self.flush_pending_deletes()?;
+                        }
+                        let mut ordinal = 0i64;
+                        loop {
+                            let row:Option<(i64,String)>=self.store.conn.prepare_cached("SELECT ordinal,change FROM staging WHERE ordinal>?1 ORDER BY ordinal LIMIT 1")?.query_row([ordinal],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+                            let Some((next, text)) = row else { break };
+                            ordinal = next;
+                            self.check_cancel()?;
+                            let value: Value = serde_json::from_str(&text)?;
+                            let change = parse_change(&value)?;
+                            let identity_only = change_identity_only(&value)?;
+                            if phase == 0 {
+                                if !identity_only {
+                                    self.apply_directory_transform(&change)?;
+                                }
+                            } else {
+                                self.commit_change(change, identity_only)?;
+                            }
+                        }
+                    }
+                    self.save_view_sequence(seq)?;
+                    self.store.commit(&value["cursors"], &self.shadowed)?;
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    let _ = self.store.rollback();
+                    self.pending_deletes.clear();
+                    self.pending_delete_bytes = 0;
+                    self.prefix_cache.borrow_mut().clear();
+                    self.has_prefixes.set(None);
+                    self.shadowed = self.store.load_shadow(self.shadowed.len())?;
+                    return Err(error);
+                }
+                self.changes = self
+                    .changes
+                    .saturating_add(u64::try_from(self.stage_ordinal)?);
+                self.round = None;
+                self.store.maintenance()?;
+            }
+            _ => return Err(invalid("unexpected round frame").into()),
+        }
+        self.last_seq = seq;
+        self.pending_objects = pending;
+        self.batches += 1;
+        Ok(())
+    }
     fn status(&self) -> Value {
         let shadowed = self
             .shadowed
             .iter()
             .map(|value| value.count_ones() as u64)
             .sum::<u64>();
-        json!({
-            "live": !self.journal_stopped,
-            "stale": self.stale.is_some(),
-            "error": self.stale,
-            "last_seq": self.last_seq,
-            "batches": self.batches,
-            "changes": self.changes,
-            "objects": self.objects.len(),
-            "prefix_mappings": self.prefixes.len(),
-            "shadowed_entries": shadowed,
-            "overlay_bytes": self.bytes_estimate,
-            "rebuild_required": self.stale.is_some(),
-            "error_code": if self.stale.is_some(){Some("NeedsRebuild")}else{None},
-            "journal_stopped": self.journal_stopped,
-            "pending_objects": self.pending_objects,
-            "end_seq": self.end_seq,
-            "last_operation": self.last_operation,
-        })
+        let objects: i64 = self
+            .store
+            .conn
+            .query_row("SELECT count(*) FROM objects", [], |row| row.get(0))
+            .unwrap_or(0);
+        let prefixes: i64 = self
+            .store
+            .conn
+            .query_row("SELECT count(*) FROM prefixes", [], |row| row.get(0))
+            .unwrap_or(0);
+        json!({"live":!self.journal_stopped,"stale":self.stale.is_some(),"error":self.stale,"last_seq":self.last_seq,"batches":self.batches,"changes":self.changes,"objects":objects,"prefix_mappings":prefixes,"shadowed_entries":shadowed,"overlay_bytes":self.shadowed.len()+8*1024*1024,"rebuild_required":self.stale.is_some(),"error_code":if self.stale.is_some(){Some("NeedsRebuild")}else{None},"journal_stopped":self.journal_stopped,"pending_objects":self.pending_objects,"end_seq":self.end_seq,"last_operation":self.last_operation,"resume_cursors":self.store.cursors().ok().flatten()})
+    }
+}
+
+fn change_identity_only(value: &Value) -> Result<bool> {
+    match value.get("identity_only") {
+        None => Ok(false),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| invalid("change identity_only must be boolean").into()),
     }
 }
 
@@ -1377,6 +1377,7 @@ fn live_query_inner(
         .split_whitespace()
         .map(|term| Finder::new(term.as_bytes()))
         .collect();
+    let mut transform_error = None;
     let (base_total, hits) = if !exact_total && limit == 0 {
         // Filter validation and overlay health have already happened above;
         // a limited zero-result query need not touch the immutable index.
@@ -1384,7 +1385,13 @@ fn live_query_inner(
     } else if filter.active() {
         let mut accept = |path: &[u16], is_dir: bool| {
             let volume = path.first().copied().map_or(0, |v| v as u8);
-            filter.accepts(&overlay.transform_path(volume, path), is_dir)
+            match overlay.transform_path(volume, path) {
+                Ok(path) => filter.accepts(&path, is_dir),
+                Err(error) => {
+                    transform_error = Some(error);
+                    false
+                }
+            }
         };
         if exact_total {
             search.query_base_filtered_with_shadow(query, &overlay.shadowed, limit, &mut accept)?
@@ -1407,6 +1414,9 @@ fn live_query_inner(
             search.query_base_limited_with_shadow(query, &overlay.shadowed, limit)?,
         )
     };
+    if let Some(error) = transform_error {
+        return Err(error);
+    }
     let mut total = base_total;
     let mut paths = Vec::with_capacity(limit);
     let mut paths_utf16 = Vec::with_capacity(limit);
@@ -1414,7 +1424,7 @@ fn live_query_inner(
     let mut seen = HashSet::<Vec<u16>>::new();
     for hit in hits {
         let volume = hit.path.first().copied().map_or(0, |value| value as u8);
-        let path = overlay.transform_path(volume, &hit.path);
+        let path = overlay.transform_path(volume, &hit.path)?;
         if seen.insert(path.clone()) && paths.len() < limit {
             let (text, bad) = decode_path(&path);
             paths.push(text);
@@ -1424,7 +1434,13 @@ fn live_query_inner(
     }
     if exact_total || paths.len() < limit {
         let mut overlay_steps = 0usize;
-        for state in overlay.objects.values() {
+        let mut statement = overlay
+            .store
+            .conn
+            .prepare("SELECT state FROM objects ORDER BY volume,frn")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let state: ObjectState = serde_json::from_str(row.get_ref(0)?.as_str()?)?;
             for current in &state.paths {
                 if !exact_total {
                     overlay_steps += 1;
@@ -1563,7 +1579,7 @@ fn first_complete_line(reader: &mut BufReader<File>) -> Result<Value> {
     Ok(serde_json::from_str(line.trim_end())?)
 }
 
-fn feed_batch(value: &Value) -> Result<(u64, Vec<Change>, u64)> {
+fn feed_batch(value: &Value) -> Result<(u64, Vec<Change>, u64, bool)> {
     let object = value
         .as_object()
         .ok_or_else(|| invalid("live batch must be an object"))?;
@@ -1585,11 +1601,21 @@ fn feed_batch(value: &Value) -> Result<(u64, Vec<Change>, u64)> {
         .get("pending_objects")
         .and_then(Value::as_u64)
         .ok_or_else(|| invalid("live batch pending_objects is missing"))?;
+    let identity_only = match object.get("identity_only") {
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| invalid("live batch identity_only must be boolean"))?,
+        None => false,
+    };
     let mut parsed = Vec::with_capacity(changes.len());
     for change in changes {
-        parsed.push(parse_change(change)?);
+        let change = parse_change(change)?;
+        if identity_only && !change.paths.is_empty() {
+            return Err(invalid("identity-only live change must have no paths").into());
+        }
+        parsed.push(change);
     }
-    Ok((seq, parsed, pending_objects))
+    Ok((seq, parsed, pending_objects, identity_only))
 }
 
 fn validate_catchup(value: &Value, begin: &Value, state: &Overlay) -> Result<()> {
@@ -1598,6 +1624,7 @@ fn validate_catchup(value: &Value, begin: &Value, state: &Overlay) -> Result<()>
         || value["seq"].as_u64() != Some(state.last_seq)
         || value["pending_objects"] != 0
         || state.pending_objects != 0
+        || state.round.is_some()
     {
         return Err(invalid("catch-up marker generation/sequence/pending mismatch").into());
     }
@@ -1654,13 +1681,29 @@ fn tail_feed(
     bootstrap_done: Arc<AtomicBool>,
     begin: Value,
     allow_recorded_end: bool,
+    feed_path: PathBuf,
+    ack: Arc<dyn Fn(u64) + Send + Sync>,
 ) {
+    let parent = match feed_path.parent().and_then(|path| path.canonicalize().ok()) {
+        Some(parent) => parent,
+        None => {
+            if let Ok(mut state) = shared.lock() {
+                state.mark_stale("live feed parent missing");
+            }
+            return;
+        }
+    };
+    let mut last_segment = 0u64;
+    let mut crossed_bootstrap = false;
     let mut partial = String::new();
     let mut last_activity = Instant::now();
     let mut read_offset = bootstrap_start;
     while !stop.load(Ordering::Acquire) {
         let mut line = String::new();
-        match reader.read_line(&mut line) {
+        match Read::by_ref(&mut reader)
+            .take(MAX_FRAME_BYTES + 1)
+            .read_line(&mut line)
+        {
             Ok(0) => {
                 if let Ok(mut state) = shared.lock() {
                     if !state.journal_stopped && last_activity.elapsed() > HEARTBEAT_TIMEOUT {
@@ -1674,6 +1717,12 @@ fn tail_feed(
                 read_offset = read_offset.saturating_add(line.len() as u64);
                 last_activity = Instant::now();
                 partial.push_str(&line);
+                if partial.len() as u64 > MAX_FRAME_BYTES {
+                    if let Ok(mut state) = shared.lock() {
+                        state.mark_stale("live feed frame exceeds transport bound");
+                    }
+                    break;
+                }
                 if !line.ends_with('\n') {
                     continue;
                 }
@@ -1688,13 +1737,93 @@ fn tail_feed(
                     }
                 };
                 let kind = value.get("kind").and_then(Value::as_str);
-                if kind == Some("batch") {
-                    let parsed = feed_batch(&value).and_then(|(seq, changes, pending_objects)| {
-                        let mut state = shared
+                if kind == Some("rotate") {
+                    let rotated = (|| -> Result<BufReader<File>> {
+                        let name = value["next"]
+                            .as_str()
+                            .ok_or_else(|| invalid("rotation filename missing"))?;
+                        let digits = name
+                            .strip_prefix("feed-")
+                            .and_then(|s| s.strip_suffix(".jsonl"))
+                            .ok_or_else(|| invalid("invalid rotation filename"))?;
+                        if !(6..=20).contains(&digits.len())
+                            || !digits.bytes().all(|byte| byte.is_ascii_digit())
+                        {
+                            return Err(invalid("invalid rotation filename").into());
+                        }
+                        let segment = digits.parse::<u64>()?;
+                        if segment <= last_segment {
+                            return Err(invalid("rotation segment did not advance").into());
+                        }
+                        let through = value["through_seq"]
+                            .as_u64()
+                            .ok_or_else(|| invalid("rotation sequence missing"))?;
+                        if shared
                             .lock()
-                            .map_err(|_| invalid("live overlay lock poisoned"))?;
-                        state.apply_batch(seq, changes, pending_objects)
-                    });
+                            .map_err(|_| invalid("live overlay lock poisoned"))?
+                            .last_seq
+                            != through
+                        {
+                            return Err(invalid("rotation sequence mismatch").into());
+                        }
+                        let next = parent.join(name);
+                        if next.symlink_metadata()?.file_type().is_symlink()
+                            || next.canonicalize()?.parent() != Some(parent.as_path())
+                        {
+                            return Err(invalid("rotation escapes protected feed parent").into());
+                        }
+                        let file = File::open(next)?;
+                        if !file.metadata()?.is_file() {
+                            return Err(invalid("rotation target is not regular file").into());
+                        }
+                        last_segment = segment;
+                        Ok(BufReader::new(file))
+                    })();
+                    match rotated {
+                        Ok(next) => {
+                            reader = next;
+                            read_offset = 0;
+                            crossed_bootstrap = true;
+                        }
+                        Err(error) => {
+                            if let Ok(mut state) = shared.lock() {
+                                state.mark_stale(error.to_string());
+                            }
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                if matches!(kind, Some("round_begin" | "round_changes" | "round_commit")) {
+                    let result = shared
+                        .lock()
+                        .map_err(|_| invalid("live overlay lock poisoned"))
+                        .and_then(|mut state| {
+                            state
+                                .stage_frame(&value)
+                                .map_err(|error| invalid(&error.to_string()))
+                        });
+                    if let Err(error) = result {
+                        if let Ok(mut state) = shared.lock() {
+                            state.mark_stale(error.to_string());
+                        }
+                        break;
+                    }
+                } else if kind == Some("batch") {
+                    let parsed = feed_batch(&value).and_then(
+                        |(seq, changes, pending_objects, identity_only)| {
+                            let mut state = shared
+                                .lock()
+                                .map_err(|_| invalid("live overlay lock poisoned"))?;
+                            state.apply_batch(
+                                seq,
+                                changes,
+                                pending_objects,
+                                identity_only,
+                                &value["cursors"],
+                            )
+                        },
+                    );
                     if let Err(error) = parsed {
                         if let Ok(mut state) = shared.lock() {
                             state.mark_stale(error.to_string());
@@ -1726,7 +1855,9 @@ fn tail_feed(
                     let mut end_ok = false;
                     if let Ok(mut state) = shared.lock() {
                         let end_seq = value.get("seq").and_then(Value::as_u64);
-                        if end_seq != Some(state.last_seq.saturating_add(1)) {
+                        if state.round.is_some() || state.pending_objects != 0 {
+                            state.mark_stale("live feed ended before its round committed");
+                        } else if end_seq != Some(state.last_seq.saturating_add(1)) {
                             state.mark_stale(
                                 "live feed end sequence does not follow the last batch",
                             );
@@ -1736,10 +1867,15 @@ fn tail_feed(
                             end_ok = true;
                         }
                     }
+                    if end_ok {
+                        if let Some(seq) = value["seq"].as_u64() {
+                            ack(seq);
+                        }
+                    }
                     if end_ok
                         && allow_recorded_end
                         && partial.is_empty()
-                        && read_offset >= bootstrap_cutoff
+                        && (crossed_bootstrap || read_offset >= bootstrap_cutoff)
                     {
                         bootstrap_done.store(true, Ordering::Release);
                     } else if end_ok {
@@ -1756,6 +1892,12 @@ fn tail_feed(
                 } else {
                     break;
                 }
+                if let Some(seq) = value["seq"].as_u64() {
+                    ack(seq);
+                }
+                // Local transaction work must not consume the producer's
+                // heartbeat grace period after ACK releases its backpressure.
+                last_activity = Instant::now();
             }
             Err(error) => {
                 if let Ok(mut state) = shared.lock() {
@@ -1767,12 +1909,28 @@ fn tail_feed(
     }
 }
 
+fn snapshot_binding(begin: &Value, entries: u64, bytes: u64) -> Value {
+    json!({"scope":begin["scope"],"generation":begin["generation"],"volumes":begin["volumes"],"snapshot_entries":entries,"snapshot_bytes":bytes})
+}
+
+struct ScratchDatabase(PathBuf);
+impl Drop for ScratchDatabase {
+    fn drop(&mut self) {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(PathBuf::from(format!("{}{suffix}", self.0.display())));
+        }
+    }
+}
+
 /// Serve the existing paged index with a bounded USN/metadata overlay.
 pub struct LiveSearch {
     search: paged::Search,
+    query_overlay: Overlay,
+    status_cache: RefCell<Value>,
     shared: Arc<Mutex<Overlay>>,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
+    _scratch: Option<ScratchDatabase>,
 }
 impl LiveSearch {
     pub fn open(generation: &crate::Generation, feed_jsonl: &Path) -> Result<Self> {
@@ -1783,7 +1941,7 @@ impl LiveSearch {
         feed_jsonl: &Path,
         cancel: crate::CancelToken,
     ) -> Result<Self> {
-        Self::open_inner(generation, feed_jsonl, cancel, false)
+        Self::open_inner(generation, feed_jsonl, cancel, false, Arc::new(|_| {}))
     }
     /// Offline inspection of a complete recorded feed; status remains journal_stopped.
     pub fn open_recorded(
@@ -1791,13 +1949,50 @@ impl LiveSearch {
         feed_jsonl: &Path,
         cancel: crate::CancelToken,
     ) -> Result<Self> {
-        Self::open_inner(generation, feed_jsonl, cancel, true)
+        Self::open_inner(generation, feed_jsonl, cancel, true, Arc::new(|_| {}))
+    }
+    /// Recovery cursors belong to a fully committed overlay for this exact base.
+    pub fn resume_cursors(generation: &crate::Generation) -> Result<Option<Value>> {
+        let database = generation.root.join("live-state.sqlite");
+        if !database.is_file() {
+            return Ok(None);
+        }
+        let file = File::open(&generation.snapshot)?;
+        let bytes = file.metadata()?.len();
+        let entries = snapshot_header(&mut BufReader::new(file))?;
+        let provenance = provenance_candidates(&generation.identities)
+            .into_iter()
+            .find(|path| path.is_file())
+            .ok_or_else(|| invalid("identity provenance sidecar missing"))?;
+        let sidecar: Value = serde_json::from_reader(BufReader::new(File::open(&provenance)?))?;
+        let begin = provenance_begin(&sidecar);
+        validate_provenance(&provenance, begin, bytes, entries)?;
+        let store = live_store::Store::open(
+            &database,
+            &snapshot_binding(begin, entries, bytes),
+            usize::try_from(
+                entries
+                    .checked_add(7)
+                    .ok_or_else(|| invalid("shadow bitset overflow"))?
+                    / 8,
+            )?,
+        )?;
+        store.cursors()
+    }
+    pub fn open_with_resume_and_ack(
+        generation: &crate::Generation,
+        feed_jsonl: &Path,
+        cancel: crate::CancelToken,
+        ack: Arc<dyn Fn(u64) + Send + Sync>,
+    ) -> Result<Self> {
+        Self::open_inner(generation, feed_jsonl, cancel, false, ack)
     }
     fn open_inner(
         generation: &crate::Generation,
         feed_jsonl: &Path,
         cancel: crate::CancelToken,
         allow_recorded_end: bool,
+        ack: Arc<dyn Fn(u64) + Send + Sync>,
     ) -> Result<Self> {
         let _guard = crate::cancel::enter(cancel.clone());
         let snapshot = &generation.snapshot;
@@ -1823,13 +2018,64 @@ impl LiveSearch {
         if search.entries() as u64 != entries {
             return Err(invalid("paged index entry count differs from snapshot").into());
         }
-        let overlay = Overlay::new(snapshot, identities, entries, snapshot_bytes)?;
-        let shared = Arc::new(Mutex::new(overlay));
+        if allow_recorded_end
+            && !begin
+                .get("resume_cursors")
+                .unwrap_or(&Value::Null)
+                .is_null()
+        {
+            return Err(invalid("recorded resumed feed requires its matching initial overlay; replay a complete feed from the base").into());
+        }
+        let scratch = if allow_recorded_end {
+            static NEXT_SCRATCH: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos();
+            Some(ScratchDatabase(feed_jsonl.with_file_name(format!(
+                "live-replay-{}-{nonce}-{}.sqlite",
+                std::process::id(),
+                NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed)
+            ))))
+        } else {
+            None
+        };
+        let database = scratch
+            .as_ref()
+            .map(|scratch| scratch.0.clone())
+            .unwrap_or_else(|| generation.root.join("live-state.sqlite"));
+        let store = live_store::Store::open(
+            &database,
+            &snapshot_binding(&begin, entries, snapshot_bytes),
+            usize::try_from(
+                entries
+                    .checked_add(7)
+                    .ok_or_else(|| invalid("shadow bitset overflow"))?
+                    / 8,
+            )?,
+        )?;
+        if !allow_recorded_end
+            && begin.get("resume_cursors").unwrap_or(&Value::Null)
+                != store.cursors()?.as_ref().unwrap_or(&Value::Null)
+        {
+            return Err(invalid("live feed resume cursors disagree with committed overlay").into());
+        }
+        let mut overlay = Overlay::new(snapshot, identities, entries, snapshot_bytes, store)?;
+        let query_overlay = Overlay::new(
+            snapshot,
+            identities,
+            entries,
+            snapshot_bytes,
+            live_store::Store::open_reader(&database)?,
+        )?;
         let stop = Arc::new(AtomicBool::new(false));
+        overlay.work_stop = Some(stop.clone());
+        let shared = Arc::new(Mutex::new(overlay));
         let bootstrap_done = Arc::new(AtomicBool::new(false));
         let thread_shared = Arc::clone(&shared);
         let thread_stop = Arc::clone(&stop);
         let thread_bootstrap_done = Arc::clone(&bootstrap_done);
+        let feed_path = feed_jsonl.to_owned();
         let worker = thread::spawn(move || {
             let _guard = crate::cancel::enter(cancel);
             tail_feed(
@@ -1841,6 +2087,8 @@ impl LiveSearch {
                 thread_bootstrap_done,
                 begin,
                 allow_recorded_end,
+                feed_path,
+                ack,
             )
         });
 
@@ -1901,48 +2149,103 @@ impl LiveSearch {
             }
         }
 
+        let status_cache = RefCell::new(
+            shared
+                .lock()
+                .map_err(|_| invalid("live overlay lock poisoned"))?
+                .status(),
+        );
         Ok(Self {
             search,
+            query_overlay,
+            status_cache,
             shared,
             stop,
             worker: Some(worker),
+            _scratch: scratch,
         })
     }
     pub fn query(&mut self, query: &crate::Query) -> Result<Value> {
-        let filter = crate::filter::Filter::new(query)?;
-        let value = serde_json::json!({"query":query.query,"limit":query.limit});
-        let state = self
-            .shared
-            .lock()
-            .map_err(|_| invalid("live overlay lock poisoned"))?;
-        live_query(&mut self.search, &state, &value, &filter)
+        self.query_committed(query, true)
     }
-    /// Run the interactive limited query with cooperative cancellation.
-    ///
-    /// The response deliberately omits `total`; the base scan may stop once
-    /// the pre-dedup limit is filled.  Existing `query` callers retain their
-    /// exact-total behavior and response shape.
+    /// Query a stable committed WAL snapshot without taking the writer lock.
     pub fn query_limited_with_cancel(
         &mut self,
         query: &crate::Query,
         cancel: crate::CancelToken,
     ) -> Result<Value> {
-        let filter = crate::filter::Filter::new(query)?;
-        let value = serde_json::json!({"query":query.query,"limit":query.limit});
         let _guard = crate::cancel::enter(cancel);
-        let state = self
-            .shared
-            .lock()
-            .map_err(|_| invalid("live overlay lock poisoned"))?;
-        live_query_limited(&mut self.search, &state, &value, &filter)
+        self.query_committed(query, false)
+    }
+    fn query_committed(&mut self, query: &crate::Query, exact_total: bool) -> Result<Value> {
+        crate::cancel::check()?;
+        let filter = crate::filter::Filter::new(query)?;
+        // Health refresh is constant-time: full status counts are reserved
+        // for explicit status requests, rather than every search keystroke.
+        match self.shared.try_lock() {
+            Ok(state) => {
+                self.query_overlay.stale = state.stale.clone();
+                self.query_overlay.journal_stopped = state.journal_stopped;
+                let mut cache = self.status_cache.borrow_mut();
+                cache["stale"] = json!(state.stale.is_some());
+                cache["error"] = json!(state.stale);
+                cache["journal_stopped"] = json!(state.journal_stopped);
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                let cache = self.status_cache.borrow();
+                self.query_overlay.stale = cache["error"].as_str().map(str::to_owned);
+                self.query_overlay.journal_stopped = cache["journal_stopped"] == true;
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                self.query_overlay.stale = Some("live overlay lock poisoned".into());
+            }
+        }
+        let overlay = &mut self.query_overlay;
+        overlay.store.conn.execute_batch("BEGIN DEFERRED")?;
+        let result = (|| -> Result<Value> {
+            // First read pins both the persisted bitmap and namespace rows to
+            // one complete writer commit. No staging rows enter this view.
+            overlay.shadowed = overlay.store.load_shadow(overlay.shadowed.len())?;
+            overlay.prefix_cache.borrow_mut().clear();
+            overlay.has_prefixes.set(None);
+            let seq: Option<String> = overlay
+                .store
+                .conn
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='view_seq'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            overlay.last_seq = seq.map(|seq| seq.parse()).transpose()?.unwrap_or(0);
+            let value = json!({"query":query.query,"limit":query.limit});
+            if exact_total {
+                live_query(&mut self.search, overlay, &value, &filter)
+            } else {
+                live_query_limited(&mut self.search, overlay, &value, &filter)
+            }
+        })();
+        let rollback = overlay.store.conn.execute_batch("ROLLBACK");
+        match result {
+            Err(error) => Err(error),
+            Ok(value) => {
+                rollback?;
+                Ok(value)
+            }
+        }
     }
     pub fn status(&self) -> Value {
-        self.shared
-            .lock()
-            .map(|state| state.status())
-            .unwrap_or_else(
-                |_| serde_json::json!({"stale":true,"reason":"live overlay lock poisoned"}),
-            )
+        match self.shared.try_lock() {
+            Ok(state) => {
+                let value = state.status();
+                *self.status_cache.borrow_mut() = value.clone();
+                value
+            }
+            Err(std::sync::TryLockError::WouldBlock) => self.status_cache.borrow().clone(),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                json!({"stale":true,"error":"live overlay lock poisoned"})
+            }
+        }
     }
 }
 impl Drop for LiveSearch {

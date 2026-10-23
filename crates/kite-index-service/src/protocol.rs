@@ -82,6 +82,11 @@ pub enum Request {
         checkpoint_path: Option<String>,
         #[serde(default)]
         checkpoint_json: Option<Vec<u8>>,
+        #[serde(default)]
+        resume_cursors: Option<Value>,
+    },
+    Acknowledge {
+        seq: u64,
     },
     Cancel,
     Ping,
