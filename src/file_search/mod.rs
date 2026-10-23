@@ -102,6 +102,7 @@ struct SearchRequest {
     query: String,
     limit: usize,
     filter: FileFilter,
+    cancel: kite_file_index::CancelToken,
     response: mpsc::SyncSender<Result<Vec<Hit>, String>>,
 }
 
@@ -118,6 +119,7 @@ struct Shared {
     exclusions: RwLock<Vec<String>>,
     active: AtomicU64,
     running: Mutex<Option<Running>>,
+    query_cancel: Mutex<Option<kite_file_index::CancelToken>>,
 }
 
 pub struct Controller {
@@ -146,6 +148,7 @@ impl Controller {
                 exclusions: RwLock::new(Vec::new()),
                 active: AtomicU64::new(0),
                 running: Mutex::new(None),
+                query_cancel: Mutex::new(None),
             }),
         })
     }
@@ -195,6 +198,7 @@ impl Controller {
         {
             return;
         }
+        self.cancel_query();
         let previous = slot.take();
         if let Some(previous) = &previous {
             cancel_running(previous);
@@ -254,6 +258,7 @@ impl Controller {
 
     /// Nonblocking cancellation; the service also cancels on process death.
     pub fn stop(&self) {
+        self.cancel_query();
         let id = self.shared.active.fetch_add(1, Ordering::AcqRel) + 1;
         if let Some(run) = self
             .shared
@@ -270,6 +275,46 @@ impl Controller {
 
     /// Run from the existing asynchronous file-query path, never an Iced update.
     pub fn query(&self, query: &str, limit: usize, filter: FileFilter) -> Result<Vec<Hit>, String> {
+        self.query_with_cancel(query, limit, filter, self.begin_query())
+    }
+
+    /// Capture on the UI thread, before spawning: an older task cannot cancel
+    /// a newer query merely because the scheduler starts it later.
+    pub fn begin_query(&self) -> kite_file_index::CancelToken {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut current = self
+            .shared
+            .query_cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(previous) = current.replace(Arc::clone(&cancel)) {
+            previous.store(true, Ordering::Release);
+        }
+        cancel
+    }
+
+    pub fn cancel_query(&self) {
+        if let Some(cancel) = self
+            .shared
+            .query_cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            cancel.store(true, Ordering::Release);
+        }
+    }
+
+    pub fn query_with_cancel(
+        &self,
+        query: &str,
+        limit: usize,
+        filter: FileFilter,
+        cancel: kite_file_index::CancelToken,
+    ) -> Result<Vec<Hit>, String> {
+        if cancel.load(Ordering::Acquire) {
+            return Ok(Vec::new());
+        }
         if self.snapshot().phase != Phase::Ready {
             return Err(self.snapshot().detail);
         }
@@ -287,17 +332,23 @@ impl Controller {
                 query: query.to_owned(),
                 limit,
                 filter,
+                cancel: Arc::clone(&cancel),
                 response,
             })
             .map_err(|_| "文件搜索已停止".to_string())?;
-        receiver
+        let result = receiver
             .recv_timeout(Duration::from_secs(15))
             .map_err(|error| -> String {
                 match error {
                     mpsc::RecvTimeoutError::Disconnected => "查询已更新".into(),
                     mpsc::RecvTimeoutError::Timeout => "文件查询耗时较长，请重试".into(),
                 }
-            })?
+            });
+        if cancel.load(Ordering::Acquire) {
+            Ok(Vec::new())
+        } else {
+            result?
+        }
     }
 }
 
@@ -530,7 +581,12 @@ fn run(
                 Ok(mut request) => {
                     // Obsolete keystrokes must not queue behind expensive queries.
                     while let Ok(newer) = requests.try_recv() {
-                        request = newer;
+                        if !newer.cancel.load(Ordering::Acquire) {
+                            request = newer;
+                        }
+                    }
+                    if request.cancel.load(Ordering::Acquire) {
+                        continue;
                     }
                     let exclusions = shared
                         .exclusions
@@ -546,7 +602,7 @@ fn run(
                         excluded_folders: exclusions,
                     };
                     let result = engine
-                        .query(&query)
+                        .query_limited_with_cancel(&query, Arc::clone(&request.cancel))
                         .map_err(|error| error.to_string())
                         .and_then(decode_hits);
                     let _ = request.response.send(result);

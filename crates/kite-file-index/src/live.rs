@@ -1335,6 +1335,29 @@ fn live_query(
     value: &Value,
     filter: &crate::filter::Filter,
 ) -> Result<Value> {
+    live_query_inner(search, overlay, value, filter, true)
+}
+
+/// Limited interactive query.  It intentionally omits `total`: the base
+/// table walk stops once the pre-dedup result limit is filled, so any count
+/// would only be a lower bound.  The path arrays retain the full query's
+/// ordering and base-before-overlay merge semantics.
+fn live_query_limited(
+    search: &mut paged::Search,
+    overlay: &Overlay,
+    value: &Value,
+    filter: &crate::filter::Filter,
+) -> Result<Value> {
+    live_query_inner(search, overlay, value, filter, false)
+}
+
+fn live_query_inner(
+    search: &mut paged::Search,
+    overlay: &Overlay,
+    value: &Value,
+    filter: &crate::filter::Filter,
+    exact_total: bool,
+) -> Result<Value> {
     let started = Instant::now();
     let query = value
         .get("query")
@@ -1346,19 +1369,43 @@ fn live_query(
             json!({"error":"live feed stale","error_code":"NeedsRebuild","stale":true,"reason":reason}),
         );
     }
+    if !exact_total {
+        crate::cancel::check()?;
+    }
     let lowercase = query.to_lowercase();
     let terms: Vec<_> = lowercase
         .split_whitespace()
         .map(|term| Finder::new(term.as_bytes()))
         .collect();
-    let (base_total, hits) = if filter.active() {
+    let (base_total, hits) = if !exact_total && limit == 0 {
+        // Filter validation and overlay health have already happened above;
+        // a limited zero-result query need not touch the immutable index.
+        (0, Vec::new())
+    } else if filter.active() {
         let mut accept = |path: &[u16], is_dir: bool| {
             let volume = path.first().copied().map_or(0, |v| v as u8);
             filter.accepts(&overlay.transform_path(volume, path), is_dir)
         };
-        search.query_base_filtered_with_shadow(query, &overlay.shadowed, limit, &mut accept)?
-    } else {
+        if exact_total {
+            search.query_base_filtered_with_shadow(query, &overlay.shadowed, limit, &mut accept)?
+        } else {
+            (
+                0,
+                search.query_base_filtered_limited_with_shadow(
+                    query,
+                    &overlay.shadowed,
+                    limit,
+                    &mut accept,
+                )?,
+            )
+        }
+    } else if exact_total {
         search.query_base_with_shadow(query, &overlay.shadowed, limit)?
+    } else {
+        (
+            0,
+            search.query_base_limited_with_shadow(query, &overlay.shadowed, limit)?,
+        )
     };
     let mut total = base_total;
     let mut paths = Vec::with_capacity(limit);
@@ -1375,24 +1422,54 @@ fn live_query(
             paths_utf16.push(if bad { Some(path) } else { None });
         }
     }
-    for state in overlay.objects.values() {
-        for current in &state.paths {
-            // Delta paths are already the current full metadata paths.  Prefix
-            // relocation is applied when a directory event arrives; applying
-            // the baseline rewrite again here would move a newly-created
-            // sibling under an old directory rename.
-            let path = current;
-            if !matches_basename(path, &terms) || !filter.accepts(path, state.is_dir) {
-                continue;
+    if exact_total || paths.len() < limit {
+        let mut overlay_steps = 0usize;
+        for state in overlay.objects.values() {
+            for current in &state.paths {
+                if !exact_total {
+                    overlay_steps += 1;
+                    if overlay_steps % 64 == 0 {
+                        crate::cancel::check()?;
+                    }
+                }
+                // Delta paths are already the current full metadata paths.
+                // Prefix relocation is applied when a directory event arrives;
+                // applying the baseline rewrite again here would move a
+                // newly-created sibling under an old directory rename.
+                let path = current;
+                if !matches_basename(path, &terms) || !filter.accepts(path, state.is_dir) {
+                    continue;
+                }
+                if exact_total {
+                    total += 1;
+                }
+                if paths.len() < limit && seen.insert(path.clone()) {
+                    let (text, bad) = decode_path(path);
+                    paths.push(text);
+                    is_dirs.push(state.is_dir);
+                    paths_utf16.push(if bad { Some(path.clone()) } else { None });
+                }
+                if !exact_total && paths.len() >= limit {
+                    break;
+                }
             }
-            total += 1;
-            if paths.len() < limit && seen.insert(path.clone()) {
-                let (text, bad) = decode_path(path);
-                paths.push(text);
-                is_dirs.push(state.is_dir);
-                paths_utf16.push(if bad { Some(path.clone()) } else { None });
+            if !exact_total && paths.len() >= limit {
+                break;
             }
         }
+    }
+
+    if !exact_total {
+        crate::cancel::check()?;
+        return Ok(json!({
+            "query": query,
+            "paths": paths,
+            "paths_utf16": paths_utf16,
+            "is_dirs": is_dirs,
+            "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
+            "live": !overlay.journal_stopped,
+            "last_seq": overlay.last_seq,
+        }));
     }
     Ok(json!({
         "query": query,
@@ -1839,6 +1916,25 @@ impl LiveSearch {
             .lock()
             .map_err(|_| invalid("live overlay lock poisoned"))?;
         live_query(&mut self.search, &state, &value, &filter)
+    }
+    /// Run the interactive limited query with cooperative cancellation.
+    ///
+    /// The response deliberately omits `total`; the base scan may stop once
+    /// the pre-dedup limit is filled.  Existing `query` callers retain their
+    /// exact-total behavior and response shape.
+    pub fn query_limited_with_cancel(
+        &mut self,
+        query: &crate::Query,
+        cancel: crate::CancelToken,
+    ) -> Result<Value> {
+        let filter = crate::filter::Filter::new(query)?;
+        let value = serde_json::json!({"query":query.query,"limit":query.limit});
+        let _guard = crate::cancel::enter(cancel);
+        let state = self
+            .shared
+            .lock()
+            .map_err(|_| invalid("live overlay lock poisoned"))?;
+        live_query_limited(&mut self.search, &state, &value, &filter)
     }
     pub fn status(&self) -> Value {
         self.shared

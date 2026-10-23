@@ -19,7 +19,8 @@ mod tests;
 pub(crate) use direct_path::{build_direct_path_results, prepend_direct_path_results};
 pub(crate) use empty_query::build_empty_query_lists;
 pub(crate) use file_search::{
-    build_indexed_file_results, is_current_file_response, prepend_dependency_status,
+    build_indexed_file_results, build_indexed_file_results_with_cancel, is_current_file_response,
+    prepend_dependency_status,
 };
 
 impl State {
@@ -51,6 +52,7 @@ impl State {
     /// 这是用户主动改变 query/filter/mode 或配置时的严格代际边界。旧线程
     /// 仍可能完成，但它的结果会因 generation 不同而被丢弃。
     pub(super) fn invalidate_file_search(&mut self) {
+        self.file_search_controller.cancel_query();
         self.file_query_generation = self.file_query_generation.wrapping_add(1);
         self.file_query_in_flight = false;
         self.file_query_dirty = false;
@@ -112,10 +114,17 @@ impl State {
         self.file_query_in_flight = true;
         self.file_query_dirty = false;
         self.file_query_revision = controller.snapshot().revision;
+        let cancel = controller.begin_query();
         std::thread::spawn(move || {
             let started = Instant::now();
-            let results =
-                build_indexed_file_results(&query, &icon_dir, filter, &controller, enabled);
+            let results = build_indexed_file_results_with_cancel(
+                &query,
+                &icon_dir,
+                filter,
+                &controller,
+                enabled,
+                cancel,
+            );
             let elapsed_us = started.elapsed().as_micros();
             send_event(Message::FileSearchReady(
                 generation, query, results, elapsed_us,

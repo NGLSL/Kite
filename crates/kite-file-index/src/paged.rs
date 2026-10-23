@@ -565,11 +565,17 @@ pub(crate) struct BaseHit {
 }
 
 impl Search {
-    fn scan_names(&mut self, terms: Option<&[Finder<'_>]>) -> Result<()> {
+    fn scan_names(&mut self, terms: Option<&[Finder<'_>]>, check_cancel: bool) -> Result<()> {
         self.reader.seek_to(self.h.names_start()?)?;
         let mut id = 0u64;
         let mut pool = 0u64;
         for _ in 0..self.h.blocks {
+            // A limited interactive query installs the thread-local token;
+            // checking once per compressed block bounds cancellation latency
+            // without adding work to the exact-total query path.
+            if check_cancel {
+                crate::cancel::check()?;
+            }
             let mut b = [0u8; 16];
             self.reader.read_exact(&mut b)?;
             let count = u32_at(&b, 0) as u64;
@@ -663,7 +669,7 @@ impl Search {
             }
             remaining -= n as u64;
         }
-        s.scan_names(None)?;
+        s.scan_names(None, true)?;
         Ok(s)
     }
     fn query_terms(
@@ -671,7 +677,46 @@ impl Search {
         query: &str,
         shadowed: Option<&[u8]>,
         limit: usize,
+        accept: Option<&mut dyn FnMut(&[u16], bool) -> bool>,
+    ) -> Result<(u64, Vec<BaseHit>)> {
+        self.query_terms_inner(query, shadowed, limit, accept, false)
+    }
+
+    /// Search the base with the interactive result limit as an early-stop
+    /// condition.  The full query above deliberately keeps scanning to return
+    /// an exact total; this variant is used only when the caller omits total.
+    fn query_terms_limited(
+        &mut self,
+        query: &str,
+        shadowed: Option<&[u8]>,
+        limit: usize,
+        accept: Option<&mut dyn FnMut(&[u16], bool) -> bool>,
+    ) -> Result<Vec<BaseHit>> {
+        if limit == 0 {
+            if let Some(bits) = shadowed {
+                let required = self
+                    .h
+                    .entries
+                    .checked_add(7)
+                    .ok_or_else(|| invalid("shadow bitset length overflow"))?
+                    / 8;
+                if bits.len() != usize::try_from(required)? {
+                    return Err(invalid("shadow bitset does not match paged entry count").into());
+                }
+            }
+            return Ok(Vec::new());
+        }
+        let (_, hits) = self.query_terms_inner(query, shadowed, limit, accept, true)?;
+        Ok(hits)
+    }
+
+    fn query_terms_inner(
+        &mut self,
+        query: &str,
+        shadowed: Option<&[u8]>,
+        limit: usize,
         mut accept: Option<&mut dyn FnMut(&[u16], bool) -> bool>,
+        stop_after_limit: bool,
     ) -> Result<(u64, Vec<BaseHit>)> {
         if let Some(bits) = shadowed {
             let required = self
@@ -691,7 +736,7 @@ impl Search {
             .map(|x| Finder::new(x.as_bytes()))
             .collect();
         self.bits.fill(0);
-        self.scan_names(Some(&terms))?;
+        self.scan_names(Some(&terms), stop_after_limit)?;
         let mut total = 0u64;
         let mut selected = Vec::with_capacity(limit);
         let mut filtered = Vec::with_capacity(limit);
@@ -699,10 +744,22 @@ impl Search {
         self.reader.seek_to(ALIGN as u64)?;
         let mut remaining = self.h.entries * 8;
         let mut ordinal = 0usize;
+        let mut records_since_cancel_check = 0usize;
         while remaining > 0 {
+            if stop_after_limit {
+                crate::cancel::check()?;
+            }
             let n = remaining.min(IO as u64) as usize;
             self.reader.read_exact(&mut self.table[..n])?;
+            let mut reached_limit = false;
             for record in self.table[..n].chunks_exact(8) {
+                if stop_after_limit {
+                    if records_since_cancel_check >= 256 {
+                        crate::cancel::check()?;
+                        records_since_cancel_check = 0;
+                    }
+                    records_since_cancel_check += 1;
+                }
                 if let Some(bits) = shadowed {
                     if bits[ordinal / 8] & (1 << (ordinal % 8)) != 0 {
                         ordinal += 1;
@@ -723,16 +780,24 @@ impl Search {
                             total += 1;
                             if filtered.len() < limit {
                                 filtered.push(hit);
+                                reached_limit = stop_after_limit && filtered.len() >= limit;
                             }
                         }
                     } else {
                         total += 1;
                         if selected.len() < limit {
                             selected.push(offset);
+                            reached_limit = stop_after_limit && selected.len() >= limit;
                         }
                     }
                 }
                 ordinal += 1;
+                if reached_limit {
+                    break;
+                }
+            }
+            if reached_limit {
+                break;
             }
             remaining -= n as u64;
         }
@@ -766,6 +831,26 @@ impl Search {
     ) -> Result<(u64, Vec<BaseHit>)> {
         self.query_terms(query, Some(shadowed), limit, Some(accept))
     }
+
+    pub(crate) fn query_base_limited_with_shadow(
+        &mut self,
+        query: &str,
+        shadowed: &[u8],
+        limit: usize,
+    ) -> Result<Vec<BaseHit>> {
+        self.query_terms_limited(query, Some(shadowed), limit, None)
+    }
+
+    pub(crate) fn query_base_filtered_limited_with_shadow(
+        &mut self,
+        query: &str,
+        shadowed: &[u8],
+        limit: usize,
+        accept: &mut dyn FnMut(&[u16], bool) -> bool,
+    ) -> Result<Vec<BaseHit>> {
+        self.query_terms_limited(query, Some(shadowed), limit, Some(accept))
+    }
+
     pub(crate) fn entries(&self) -> usize {
         self.h.entries as usize
     }

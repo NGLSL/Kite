@@ -14,6 +14,28 @@ pub(crate) fn build_indexed_file_results(
     controller: &Arc<crate::file_search::Controller>,
     enabled: bool,
 ) -> Vec<SearchResult> {
+    build_indexed_file_results_with_cancel(
+        query,
+        icon_dir,
+        filter,
+        controller,
+        enabled,
+        controller.begin_query(),
+    )
+}
+
+pub(crate) fn build_indexed_file_results_with_cancel(
+    query: &str,
+    icon_dir: &std::path::Path,
+    filter: crate::file_search::FileFilter,
+    controller: &Arc<crate::file_search::Controller>,
+    enabled: bool,
+    cancel: kite_file_index::CancelToken,
+) -> Vec<SearchResult> {
+    use std::sync::atomic::Ordering;
+    if cancel.load(Ordering::Acquire) {
+        return Vec::new();
+    }
     if !enabled {
         return vec![file_control_result(
             "kite:file-search:enable",
@@ -82,9 +104,10 @@ pub(crate) fn build_indexed_file_results(
         return Vec::new();
     }
 
-    match controller.query(query, 20, filter) {
+    match controller.query_with_cancel(query, 20, filter, Arc::clone(&cancel)) {
         Ok(hits) => hits
             .into_iter()
+            .take_while(|_| !cancel.load(Ordering::Acquire))
             .map(|hit| {
                 let (id, source, action) = if let Some(raw_path) = hit.raw_path {
                     (
@@ -110,6 +133,7 @@ pub(crate) fn build_indexed_file_results(
                     .with_source_action(ResultSource::File, action)
             })
             .collect(),
+        Err(_) if cancel.load(Ordering::Acquire) => Vec::new(),
         Err(error) => vec![file_control_result(
             "kite:file-search:error",
             "文件搜索暂不可用",
