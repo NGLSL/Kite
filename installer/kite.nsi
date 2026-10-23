@@ -24,6 +24,8 @@ RequestExecutionLevel admin
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
+Var HadFileIndexService
+
 Function LaunchKiteUnelevated
   ; 安装器以管理员权限运行，但 Kite 本身不需要提权。
   ; ShellExecute 让 Explorer 使用当前用户上下文启动，避免 UIPI 阻断外部快捷键。
@@ -33,6 +35,15 @@ FunctionEnd
 ; 用户确认开始安装后才关闭旧 Kite。取消安装向导时，旧版继续运行。
 Section "-关闭旧版 Kite" SEC_CLOSE_OLD
   SectionIn RO
+  StrCpy $HadFileIndexService "0"
+  ; 读取组件只在用户曾启用时存在。升级前正常停止，不通过 taskkill 中断写入。
+  IfFileExists "$PROGRAMFILES64\Kite\file-index\kite-index-host.exe" 0 file_index_stopped
+    StrCpy $HadFileIndexService "1"
+    ExecWait '"$PROGRAMFILES64\Kite\file-index\kite-index-host.exe" --kite-index-stop-for-update' $0
+    StrCmp $0 "0" file_index_stopped
+    MessageBox MB_OK|MB_ICONSTOP "文件索引组件尚未停止。请关闭文件搜索后重试安装。"
+    Abort
+  file_index_stopped:
   ; 只结束 Kite 自身，不递归结束它唤起的应用。
   ExecWait '"$SYSDIR\taskkill.exe" /F /IM kite.exe'
   ; 插件是独立子进程，旧版宿主退出异常时可能仍占用待覆盖的官方插件文件。
@@ -60,6 +71,12 @@ Section "Kite 主程序" SEC_MAIN
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Kite" "DisplayName" "Kite"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Kite" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Kite" "UninstallString" "$INSTDIR\uninstall.exe"
+  ; 已使用组件的用户随主程序更新；首次安装保持默认关闭，不注册服务。
+  StrCmp $HadFileIndexService "1" 0 file_index_updated
+    ExecWait '"$INSTDIR\kite.exe" --kite-index-install' $0
+    StrCmp $0 "0" file_index_updated
+    MessageBox MB_OK|MB_ICONEXCLAMATION "Kite 已安装，文件索引组件更新失败。可在插件页重新授权修复。"
+  file_index_updated:
 SectionEnd
 
 Section "开始菜单快捷方式" SEC_START
@@ -72,6 +89,16 @@ Section "桌面快捷方式" SEC_DESKTOP
 SectionEnd
 
 Section "Uninstall"
+  IfFileExists "$PROGRAMFILES64\Kite\file-index\kite-index-host.exe" 0 file_index_removed
+    ExecWait '"$PROGRAMFILES64\Kite\file-index\kite-index-host.exe" --kite-index-uninstall' $0
+    StrCmp $0 "0" 0 file_index_remove_failed
+    Delete "$PROGRAMFILES64\Kite\file-index\kite-index-host.exe"
+    RMDir "$PROGRAMFILES64\Kite\file-index"
+    Goto file_index_removed
+  file_index_remove_failed:
+    MessageBox MB_OK|MB_ICONSTOP "文件索引组件尚未移除。请关闭文件搜索后重试卸载。"
+    Abort
+  file_index_removed:
   Delete "$DESKTOP\Kite.lnk"
   Delete "$SMPROGRAMS\Kite\Kite.lnk"
   RMDir "$SMPROGRAMS\Kite"

@@ -1627,6 +1627,8 @@ dependencies = [
  "iced",
  "iced_core",
  "image",
+ "kite-file-index",
+ "kite-index-service",
  "notify",
  "nucleo-matcher",
  "pinyin",
@@ -1639,6 +1641,26 @@ dependencies = [
  "walkdir",
  "windows",
  "winres",
+]
+
+[[package]]
+name = "kite-file-index"
+version = "0.1.0"
+dependencies = [
+ "memchr",
+ "memmap2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kite-index-service"
+version = "0.1.0"
+dependencies = [
+ "kite-file-index",
+ "serde",
+ "serde_json",
+ "windows",
 ]
 
 [[package]]

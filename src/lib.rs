@@ -1,6 +1,7 @@
 //! Kite 启动入口：只做模块装配，业务不写在本文件。
 
 pub mod app;
+pub mod file_search;
 pub mod history;
 pub mod log;
 pub mod model;
@@ -16,11 +17,14 @@ pub mod ui;
 
 /// 应用入口：原生 UI（iced + tiny-skia 软渲染，无 WebView2）。
 pub fn run() {
+    // The metadata service and its explicit installer run before the normal
+    // UI's de-elevation and singleton claim. They never create a Kite window.
+    if kite_index_service::dispatch_entry() {
+        return;
+    }
     // Initialize file logging before elevation handling so bootstrap failures
     // and a guarded de-elevation retry are visible even when the UI never starts.
-    let data_dir = dirs::data_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("com.kite.launcher");
+    let data_dir = system::paths::data_dir();
     let _ = std::fs::create_dir_all(&data_dir);
     log::init(log::default_path_under(&data_dir));
     log::info(&format!(
@@ -41,6 +45,10 @@ pub fn run() {
             ));
             eprintln!("kite: elevated launch could not be converted to a user launch: {error}");
         }
+    }
+
+    if file_search::dispatch_entry() {
+        return;
     }
 
     // 降权之后再 claim，避免提权 bootstrap 短暂占位误伤正常实例。

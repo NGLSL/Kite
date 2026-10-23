@@ -16,6 +16,15 @@ pub(super) fn update(state: &mut State, message: Message) -> Task<Message> {
         | Message::HoverSelect(..)
         | Message::LaunchIndex(..)
         | Message::ToggleFiles
+        | Message::FileSearchEnableConfirm
+        | Message::FileSearchEnableCancel
+        | Message::FileSearchSetEnabled(..)
+        | Message::FileSearchRetry
+        | Message::FileSearchRebuild
+        | Message::FileSearchExcludeInputChanged(..)
+        | Message::FileSearchExcludeAdd
+        | Message::FileSearchExcludeRemove(..)
+        | Message::FileSearchStatusTick
         | Message::FileFilterChanged(..)
         | Message::FileSearchReady(..)
         | Message::DirectPathReady(..)

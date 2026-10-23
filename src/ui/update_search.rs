@@ -6,7 +6,7 @@ use super::actions::{
 };
 use super::interaction::{apply_pending_full, request_rescan};
 use super::results;
-use super::{alt_digit_from_query_change, Message, NavigationMode, State};
+use super::{alt_digit_from_query_change, Message, NavigationMode, Section, State};
 use iced::Task;
 
 pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
@@ -86,6 +86,7 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
             state.files_mode = !state.files_mode;
             if !state.files_mode {
                 state.file_filter = crate::system::everything::FileFilter::All;
+                state.file_search_confirm_open = false;
             }
             state.navigation_mode = NavigationMode::Input;
             state.qlog(|| format!("files toggle -> {}", state.files_mode));
@@ -95,6 +96,144 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 sync_scroll(state),
                 iced::widget::operation::focus(state.input_id.clone()),
             ])
+        }
+        Message::FileSearchEnableConfirm => {
+            if let Err(error) = save_file_search_enabled(state, true) {
+                state.file_search_confirm_open = true;
+                return flash(state, &format!("文件搜索设置保存失败：{error}"));
+            }
+            state.file_search_confirm_open = false;
+            state.file_search_enabled = true;
+            state.file_search_controller.start(true);
+            state.invalidate_file_search();
+            state.request_file_search();
+            state.refresh_results();
+            Task::batch([
+                flash(state, "正在请求授权并建立文件索引…"),
+                sync_scroll(state),
+            ])
+        }
+        Message::FileSearchEnableCancel => {
+            state.file_search_confirm_open = false;
+            Task::none()
+        }
+        Message::FileSearchSetEnabled(enabled) => {
+            if enabled {
+                if state.file_search_enabled {
+                    if state.file_search_controller.snapshot().phase
+                        == crate::file_search::Phase::NeedsAuthorization
+                    {
+                        // 已保存启用但服务尚未获权时，复用首次授权确认卡；
+                        // 真正的 start(true) 仍只发生在用户确认之后。
+                        state.file_search_confirm_open = true;
+                    }
+                    return Task::none();
+                }
+                state.file_search_confirm_open = true;
+                if state.settings_open {
+                    // The plugin list is only an entry point. Keep the first-use
+                    // confirmation and subsequent progress on the dedicated page.
+                    state.settings_section = Section::FileSearch;
+                }
+                return Task::none();
+            }
+            if let Err(error) = save_file_search_enabled(state, false) {
+                return flash(state, &format!("文件搜索设置保存失败：{error}"));
+            }
+            state.file_search_confirm_open = false;
+            state.file_search_enabled = false;
+            state.file_search_controller.stop();
+            state.invalidate_file_search();
+            state.files_mode = false;
+            state.file_filter = crate::system::everything::FileFilter::All;
+            state.refresh_results();
+            flash(state, "文件搜索已关闭")
+        }
+        Message::FileSearchRetry => {
+            let phase = state.file_search_controller.snapshot().phase;
+            if matches!(
+                phase,
+                crate::file_search::Phase::Starting
+                    | crate::file_search::Phase::Indexing
+                    | crate::file_search::Phase::CatchingUp
+            ) {
+                return flash(state, "文件索引正在建立，请等待当前任务完成");
+            }
+            state.file_search_controller.start(false);
+            if state.files_mode {
+                state.invalidate_file_search();
+                state.request_file_search();
+                state.refresh_results();
+            }
+            flash(state, "正在重试文件索引连接…")
+        }
+        Message::FileSearchRebuild => {
+            if !state.file_search_enabled {
+                state.file_search_confirm_open = true;
+                return Task::none();
+            }
+            if matches!(
+                state.file_search_controller.snapshot().phase,
+                crate::file_search::Phase::Starting
+                    | crate::file_search::Phase::Indexing
+                    | crate::file_search::Phase::CatchingUp
+            ) {
+                return flash(state, "文件索引正在建立，请等待当前任务完成");
+            }
+            state.file_search_controller.rebuild(false);
+            state.invalidate_file_search();
+            state.request_file_search();
+            state.refresh_results();
+            flash(state, "已开始重建文件索引…")
+        }
+        Message::FileSearchExcludeInputChanged(value) => {
+            state.file_search_exclusion_input = value;
+            Task::none()
+        }
+        Message::FileSearchExcludeAdd => add_file_search_exclusion(state),
+        Message::FileSearchExcludeRemove(index) => remove_file_search_exclusion(state, index),
+        Message::FileSearchStatusTick => {
+            let snapshot = state.file_search_controller.snapshot();
+            let changed = snapshot.revision != state.file_search_snapshot.revision
+                || snapshot.phase != state.file_search_snapshot.phase
+                || snapshot.entries != state.file_search_snapshot.entries
+                || snapshot.detail != state.file_search_snapshot.detail;
+            if !changed {
+                return Task::none();
+            }
+            let was_ready = state.file_search_snapshot.phase == crate::file_search::Phase::Ready;
+            let is_ready = snapshot.phase == crate::file_search::Phase::Ready;
+            let revision_changed = snapshot.revision != state.file_search_snapshot.revision;
+            state.file_search_snapshot = snapshot;
+            // Snapshot 继续在后台更新；仅主搜索窗口可见时才消费 metadata
+            // revision 做查询/状态重绘，避免隐藏窗口因 USN 变化持续扫全库。
+            let visible_main_search = state.files_mode
+                && !state.hidden
+                && !state.settings_open
+                && !state.any_tool_open()
+                && state.provider_mode.is_none();
+            if visible_main_search {
+                if is_ready && !was_ready {
+                    // 采集/追平完成是阶段边界，丢弃阶段中的状态结果并开始
+                    // 当前 query；这和用户修改 query 一样需要严格失效旧代际。
+                    state.request_file_search();
+                    state.refresh_results();
+                } else if is_ready && revision_changed {
+                    // Ready 后的增量 revision 不改变 query 代际，也不清空已
+                    // 显示的命中。若查询在途只记 dirty，返回后补一次。
+                    state.request_file_search_refresh();
+                } else if was_ready && !is_ready {
+                    // 索引离开 Ready 时，之前的命中不再代表当前可查询状态；
+                    // 先使在途响应失效，再展示读取/构建/追平状态。
+                    state.invalidate_file_search();
+                    refresh_file_status_result(state);
+                } else {
+                    // 采集中只更新轻量状态行，让“读取/构建/追平”进度即时
+                    // 可见，不触碰正在显示的文件命中。
+                    refresh_file_status_result(state);
+                }
+            }
+            Task::none()
         }
         Message::FileFilterChanged(filter) => {
             if !state.files_mode || state.file_filter == filter {
@@ -124,6 +263,7 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 });
                 return Task::none();
             }
+            state.file_query_in_flight = false;
             state.qlog(|| {
                 format!(
                     "file search ready generation={generation} query={query:?} hits={} elapsed={elapsed_us}us",
@@ -132,6 +272,15 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
             });
             state.file_results = hits;
             state.refresh_results();
+            let revision_changed =
+                state.file_search_controller.snapshot().revision != state.file_query_revision;
+            let refresh_needed = state.file_query_dirty || revision_changed;
+            state.file_query_dirty = false;
+            if refresh_needed {
+                // 当前结果已经可见；只补一个同代际查询，不走严格失效，
+                // 这样连续 USN 变化也不会造成列表饥饿或无限排队。
+                state.request_file_search_refresh();
+            }
             Task::none()
         }
         Message::DirectPathReady(generation, query, hits) => {
@@ -209,6 +358,86 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
             flash(state, "正在重新扫描应用索引…")
         }
         _ => Task::none(),
+    }
+}
+
+fn add_file_search_exclusion(state: &mut State) -> Task<Message> {
+    let path = match crate::storage::settings::normalize_file_search_exclusion(
+        &state.file_search_exclusion_input,
+    ) {
+        Ok(path) => path,
+        Err(error) => return flash(state, &error),
+    };
+    let key = path.to_ascii_lowercase();
+    if state
+        .file_search_exclusions
+        .iter()
+        .any(|item| item.to_ascii_lowercase() == key)
+    {
+        return flash(state, "该文件夹已经在排除列表中");
+    }
+    state.file_search_exclusions.push(path);
+    if let Err(error) = persist_file_search_exclusions(state) {
+        state.file_search_exclusions.pop();
+        return flash(state, &format!("排除文件夹保存失败：{error}"));
+    }
+    state.file_search_exclusion_input.clear();
+    state.invalidate_file_search();
+    state.request_file_search();
+    state.refresh_results();
+    flash(state, "排除文件夹已立即生效")
+}
+
+fn remove_file_search_exclusion(state: &mut State, index: usize) -> Task<Message> {
+    if index >= state.file_search_exclusions.len() {
+        return Task::none();
+    }
+    let removed = state.file_search_exclusions.remove(index);
+    if let Err(error) = persist_file_search_exclusions(state) {
+        state.file_search_exclusions.insert(index, removed);
+        return flash(state, &format!("排除文件夹保存失败：{error}"));
+    }
+    state.invalidate_file_search();
+    state.request_file_search();
+    state.refresh_results();
+    flash(state, "已取消排除，文件搜索结果已更新")
+}
+
+fn persist_file_search_exclusions(state: &mut State) -> Result<(), String> {
+    let saved = if let Some(db) = &mut state.history {
+        db.set_file_search_exclude_dirs(&state.file_search_exclusions)?
+    } else {
+        state.file_search_exclusions.clone()
+    };
+    state.file_search_exclusions = saved.clone();
+    state.file_search_controller.set_exclusions(saved);
+    Ok(())
+}
+
+fn save_file_search_enabled(state: &mut State, enabled: bool) -> Result<(), String> {
+    let Some(db) = &mut state.history else {
+        return Ok(());
+    };
+    db.save_setting("file_search_enabled", if enabled { "1" } else { "0" })
+        .map_err(|error| error.to_string())
+}
+
+fn refresh_file_status_result(state: &mut State) {
+    state.file_results = super::results::build_indexed_file_results(
+        &state.query,
+        &state.icon_dir,
+        state.file_filter,
+        &state.file_search_controller,
+        state.file_search_enabled,
+    );
+    let status = state.file_results.iter().find(|result| {
+        result.item.source == "file-search-status" || result.item.source == "everything-status"
+    });
+    state.results.retain(|result| {
+        result.item.source != "file-search-status" && result.item.source != "everything-status"
+    });
+    if let Some(status) = status.cloned() {
+        state.results.insert(0, status);
     }
 }
 

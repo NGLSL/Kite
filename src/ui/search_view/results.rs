@@ -1,7 +1,7 @@
 //! 搜索结果区：网格、单列/双列结果卡片与滚动条。
 
 use iced::widget::{
-    column, container, image, mouse_area, row, scrollable, space::Space, text, MouseArea,
+    button, column, container, image, mouse_area, row, scrollable, space::Space, text, MouseArea,
     Scrollable,
 };
 use iced::{alignment, border, color, Background, Border, Color, Element, Length, Padding, Theme};
@@ -14,11 +14,27 @@ use super::text::{first_char, truncate_display_label, truncate_middle};
 use super::{enabled_plugin_samples, provider_meta, scroll_id, Message, State};
 use crate::model::AppItem;
 pub(super) fn results_area<'a>(state: &'a State, tokens: ThemeTokens) -> Element<'a, Message> {
+    if state.file_search_confirm_open {
+        return file_search_confirmation(tokens);
+    }
     if let Some(panel) = &state.plugin_panel {
         return panel_area(state, panel, tokens);
     }
 
-    if state.query.trim().is_empty() && state.provider_mode.is_none() {
+    // 文件模式保持“搜索列表”语义：短 Query 不要落回最近应用仪表盘，
+    // 否则启用入口会和最近项混在网格里，也会污染 recent_count 的分区。
+    if state.files_mode
+        && state.provider_mode.is_none()
+        && state.file_search_snapshot.phase == crate::file_search::Phase::Ready
+        && crate::search::normalize_for_index(&state.query)
+            .chars()
+            .count()
+            < 2
+    {
+        return file_search_empty_state(tokens);
+    }
+
+    if state.query.trim().is_empty() && state.provider_mode.is_none() && !state.files_mode {
         return grid_dashboard(state, tokens);
     }
 
@@ -85,6 +101,96 @@ pub(super) fn results_area<'a>(state: &'a State, tokens: ThemeTokens) -> Element
 
     // 非空 Query：横向双列卡片流（2-Column Cards）
     two_column_results(state, tokens)
+}
+
+fn file_search_empty_state(tokens: ThemeTokens) -> Element<'static, Message> {
+    let empty = column![
+        text("输入文件名关键词")
+            .size(14.0)
+            .color(tokens.text_primary)
+            .font(name_font()),
+        text("输入至少 2 个字符开始搜索文件")
+            .size(12.0)
+            .color(tokens.text_muted),
+    ]
+    .spacing(6.0)
+    .align_x(alignment::Alignment::Center);
+    container(empty)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(alignment::Alignment::Center)
+        .align_y(alignment::Alignment::Center)
+        .padding(40.0)
+        .into()
+}
+
+fn file_search_confirmation(tokens: ThemeTokens) -> Element<'static, Message> {
+    let card = container(
+        column![
+            text("启用文件搜索")
+                .size(16.0)
+                .font(name_font())
+                .color(tokens.text_primary),
+            text("首次使用需管理员授权安装索引服务，仅读取本机 NTFS 的文件名和目录变化，不读取文件内容。已有索引会自动复用；建库期间 Kite 仍可使用。")
+                .size(12.5)
+                .color(tokens.text_muted)
+                .width(Length::Fill)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+            text("关闭文件搜索或退出 Kite 后，后台读取会停止。")
+                .size(12.5)
+                .color(tokens.text_muted)
+                .width(Length::Fill)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+            row![
+                button(text("启用文件搜索").size(12.5).color(tokens.bg_window))
+                    .padding([8.0, 14.0])
+                    .on_press(Message::FileSearchEnableConfirm)
+                    .style(move |_t, _s| iced::widget::button::Style {
+                        background: Some(Background::Color(tokens.accent)),
+                        text_color: tokens.bg_window,
+                        border: Border::default().rounded(8.0),
+                        ..iced::widget::button::Style::default()
+                    }),
+                button(text("暂不启用").size(12.5).color(tokens.text_muted))
+                    .padding([8.0, 14.0])
+                    .on_press(Message::FileSearchEnableCancel)
+                    .style(move |_t, status| iced::widget::button::Style {
+                        background: if status == iced::widget::button::Status::Hovered {
+                            Some(Background::Color(tokens.active_bg))
+                        } else {
+                            None
+                        },
+                        text_color: tokens.text_muted,
+                        border: Border::default().rounded(8.0),
+                        ..iced::widget::button::Style::default()
+                    }),
+            ]
+            .spacing(8.0),
+        ]
+        .spacing(10.0)
+        .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .padding([18.0, 20.0])
+    .style(move |_t| container::Style {
+        background: Some(Background::Color(tokens.bg_elevated)),
+        border: Border {
+            color: tokens.active_border,
+            width: 1.0,
+            radius: border::radius(10.0),
+        },
+        ..container::Style::default()
+    });
+    container(card)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(Padding {
+            top: 48.0,
+            right: 36.0,
+            bottom: 48.0,
+            left: 36.0,
+        })
+        .into()
 }
 
 fn render_grid_row<'a>(
@@ -244,8 +350,19 @@ fn grid_tile<'a>(
 
 /// 横向双列卡片流（非空 Query 状态）：左右对称充分利用 640px 空间
 fn two_column_results<'a>(state: &'a State, tokens: ThemeTokens) -> Element<'a, Message> {
-    let mut list = column![].spacing(6.0);
-    let n = state.results.len();
+    let mut list = column![].spacing(6.0).width(Length::Fill);
+    // File-search status is a control row, not a normal result. Give it the
+    // whole list width so its next action and progress detail stay readable;
+    // regular results continue to use the compact two-column layout below.
+    let mut regular: Vec<(usize, &'a crate::model::SearchResult)> = Vec::new();
+    for (index, result) in state.results.iter().enumerate() {
+        if result.item.source == "file-search-status" {
+            list = list.push(file_search_status_card(state, result, index, tokens));
+        } else {
+            regular.push((index, result));
+        }
+    }
+    let n = regular.len();
     let chunks = (n + 7) / 8;
 
     for c in 0..chunks {
@@ -256,9 +373,11 @@ fn two_column_results<'a>(state: &'a State, tokens: ThemeTokens) -> Element<'a, 
             if left_idx >= n {
                 break;
             }
-            let left_elem = result_card(state, &state.results[left_idx], left_idx, tokens);
+            let (left_result_index, left_result) = regular[left_idx];
+            let left_elem = result_card(state, left_result, left_result_index, tokens);
             let right_elem: Element<'_, Message> = if right_idx < n {
-                result_card(state, &state.results[right_idx], right_idx, tokens)
+                let (right_result_index, right_result) = regular[right_idx];
+                result_card(state, right_result, right_result_index, tokens)
             } else {
                 Space::new().width(Length::FillPortion(1)).into()
             };
@@ -286,6 +405,105 @@ fn two_column_results<'a>(state: &'a State, tokens: ThemeTokens) -> Element<'a, 
         .into()
 }
 
+/// 文件搜索状态行：全宽展示下一步操作，不占用普通结果的快捷键槽位。
+fn file_search_status_card<'a>(
+    state: &State,
+    r: &'a crate::model::SearchResult,
+    i: usize,
+    tokens: ThemeTokens,
+) -> Element<'a, Message> {
+    let active = state.navigation_mode == NavigationMode::Results && i == state.selected;
+    let icon = render_icon(&r.item, 34.0, tokens);
+    let title = text(r.item.display_name.clone())
+        .size(13.5)
+        .font(name_font())
+        .color(tokens.text_primary)
+        .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
+    let detail = text(r.item.target.clone())
+        .size(11.5)
+        .color(tokens.text_muted)
+        .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+        .width(Length::Fill);
+    let info = column![title, detail]
+        .spacing(2.0)
+        .width(Length::Fill)
+        .align_x(alignment::Alignment::Start);
+
+    let action: Option<Element<'a, Message>> = file_search_status_action(&r.item.id).map(|label| {
+        container(
+            text(label)
+                .size(11.5)
+                .font(name_font())
+                .color(tokens.accent)
+                .wrapping(iced::widget::text::Wrapping::None),
+        )
+        .padding([5.0, 10.0])
+        .style(move |_t| container::Style {
+            background: Some(Background::Color(Color {
+                a: 0.12,
+                ..tokens.accent
+            })),
+            border: Border {
+                color: Color {
+                    a: 0.35,
+                    ..tokens.accent
+                },
+                width: 1.0,
+                radius: border::radius(6.0),
+            },
+            ..container::Style::default()
+        })
+        .into()
+    });
+    let trailing: Element<'a, Message> = action.unwrap_or_else(|| Space::new().into());
+    let content = row![icon, info, trailing]
+        .spacing(10.0)
+        .align_y(alignment::Alignment::Center)
+        .width(Length::Fill);
+
+    let card = container(content)
+        .width(Length::Fill)
+        .padding(Padding {
+            top: 8.0,
+            right: 12.0,
+            bottom: 8.0,
+            left: 10.0,
+        })
+        .style(move |_t| container::Style {
+            background: Some(Background::Color(if active {
+                tokens.active_bg
+            } else {
+                tokens.bg_elevated
+            })),
+            border: Border {
+                color: if active {
+                    tokens.active_border
+                } else {
+                    tokens.border_subtle
+                },
+                width: 1.0,
+                radius: border::radius(8.0),
+            },
+            ..container::Style::default()
+        });
+
+    mouse_area(card)
+        .on_enter(Message::HoverSelect(i))
+        .on_press(Message::LaunchIndex(i))
+        .on_right_press(Message::ContextMenu(i))
+        .into()
+}
+
+fn file_search_status_action(id: &str) -> Option<&'static str> {
+    match id {
+        "kite:file-search:enable" => Some("启用"),
+        "kite:file-search:authorize" => Some("授权"),
+        "kite:file-search:rebuild" => Some("重建"),
+        "kite:file-search:error" => Some("重试"),
+        _ => None,
+    }
+}
+
 /// 双列卡片项：左列 Alt 1~4，右列 Alt 5~8，带分类胶囊与实体键帽
 fn result_card<'a>(
     state: &State,
@@ -297,7 +515,9 @@ fn result_card<'a>(
     let icon = render_icon(&r.item, 36.0, tokens);
 
     let tag = match r.item.source.as_str() {
-        "everything" | "direct-path" => Some("文件"),
+        "everything" | "file-search" | "file-search-raw" | "direct-path" | "file-search-status" => {
+            Some("文件")
+        }
         "plugin" | "plugin-command" => Some("插件"),
         "browser" | "websearch" => Some("网页"),
         _ => Some("应用"),

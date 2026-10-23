@@ -61,7 +61,24 @@ pub fn claim() -> Result<(), AlreadyRunning> {
     if PRIMARY.get().is_some() {
         return Ok(());
     }
-    match claim_with(MUTEX_NAME, EVENT_NAME) {
+    let (mutex_name, event_name) = (MUTEX_NAME, EVENT_NAME);
+    #[cfg(any(debug_assertions, feature = "isolated-profile"))]
+    let (mutex_name, event_name) = if std::env::var_os("KITE_DEV_DATA_DIR").is_some() {
+        if cfg!(debug_assertions) {
+            (
+                r"Local\com.kite.launcher.dev-file-search.instance",
+                r"Local\com.kite.launcher.dev-file-search.activate",
+            )
+        } else {
+            (
+                r"Local\com.kite.launcher.release-file-search.instance",
+                r"Local\com.kite.launcher.release-file-search.activate",
+            )
+        }
+    } else {
+        (mutex_name, event_name)
+    };
+    match claim_with(mutex_name, event_name) {
         Ok(instance) => {
             // 同进程若已 claim（理论不应发生），丢弃本次 Instance 的额外句柄即可；
             // 命名对象在 PRIMARY 持有的句柄关闭前仍存在。
