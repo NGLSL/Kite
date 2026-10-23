@@ -289,7 +289,7 @@ jobs:
               $loaded = @($resumed.loaded_resume_cursors | Where-Object volume -eq $cursor.volume)
               if ($loaded.Count -ne 1 -or $loaded[0].journal_id -ne $cursor.journal_id -or [long]$loaded[0].next_usn -lt [long]$cursor.next_usn) { throw 'Restart recovery cursor regressed or changed identity' }
             }
-            $anchor = Get-Content (Join-Path $beforeRestart.generation_root 'journal-start.json') -Raw | ConvertFrom-Json
+            $anchor = Get-Content -LiteralPath (Join-Path $beforeRestart.generation_root 'journal-start.json') -Raw | ConvertFrom-Json
             $fileVolume = [IO.Path]::GetPathRoot($fileRoot).TrimEnd('\')
             $originalCursor = @($anchor.volumes | Where-Object volume -eq $fileVolume)
             $loadedCursor = @($resumed.loaded_resume_cursors | Where-Object volume -eq $fileVolume)
