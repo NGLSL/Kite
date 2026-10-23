@@ -103,7 +103,7 @@ pub fn register_backend(backend: Arc<dyn MetadataBackend>) -> ServiceResult<()> 
 
 /// Enumerate mounted NTFS drive roots at the point a session starts.  The
 /// service does not keep a hard-coded C/D/E list, and removable/non-NTFS
-/// volumes are left to the caller's normal Everything fallback.
+/// volumes are reported to the caller so it can request an explicit rebuild.
 pub fn local_ntfs_volumes() -> ServiceResult<Vec<String>> {
     let mask = unsafe { GetLogicalDrives() };
     if mask == 0 {

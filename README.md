@@ -63,7 +63,7 @@ Kite 是面向 Windows 的原生应用启动器：按下快捷键，输入你记
 
 - Windows 10 / 11 x64
 - 无需安装 WebView2 或 Node.js
-- 文件搜索可选：面向本机 NTFS 磁盘，首次启用需管理员授权安装按需读取组件；无需 Everything
+- 文件搜索可选：面向本机 NTFS 磁盘，首次启用需管理员授权安装按需读取组件
 
 点击主界面“文件”，从列表启用；建库会显示进度。在“设置 → 文件搜索”管理索引和排除文件夹，也可从插件页点击“管理”进入，详见[内置文件搜索](docs/FILE-SEARCH.md)。
 
@@ -71,7 +71,7 @@ Kite 是面向 Windows 的原生应用启动器：按下快捷键，输入你记
 
 从 GitHub Releases 下载 `kite-setup.exe` 并运行。安装器会部署程序与运行资源、创建开始菜单 / 桌面快捷方式，并注册卸载入口。
 
-当前**只发布安装版**，避免便携运行时遗漏 DLL、音效或注册信息。安装包尚未代码签名，Windows 可能提示「未知发布者」；请从本仓库 [Releases](https://github.com/NGLSL/Kite/releases) 下载，并核对发布页上的 SHA-256。
+当前**只发布安装版**，完整部署音效、官方插件与卸载信息。安装包尚未代码签名，Windows 可能提示「未知发布者」；请从本仓库 [Releases](https://github.com/NGLSL/Kite/releases) 下载，并核对发布页上的 SHA-256。
 
 覆盖安装会就地更新；设置、历史、固定项、别名与用户插件一般无需迁移。
 
@@ -101,7 +101,7 @@ src/search/          规范化、拼音、召回与排序
 src/file_search/     内置文件搜索控制器与后台生命周期
 crates/             低内存文件索引内核与按需元数据服务
 src/storage/         SQLite 设置、固定项、历史
-src/system/          热键、托盘、图标、Everything、窗口定位
+src/system/          热键、托盘、图标、音效、窗口定位
 src/plugin/          插件 Host / 协议 / 安装
 src/ui/              Iced 窗口与交互
 official-plugins/    官方插件 Rust workspace（独立进程）
@@ -114,9 +114,9 @@ docs/                需求、性能、插件与开发规范
 
 ## 性能
 
-Kite 为原生桌面程序；启用文件搜索时，按需元数据服务单独运行，关闭插件或退出后停止读取。0.3.7 起默认性能基线走代码路径（搜索热路径、插件故障、Everything 兼容路径、存储升级等）；真窗口唤起延迟保留脚本抽检。
+Kite 为原生桌面程序；启用文件搜索时，按需元数据服务单独运行，关闭插件或退出后停止读取。默认性能基线覆盖应用搜索热路径、插件故障、系统恢复与存储升级；真窗口唤起延迟保留脚本抽检。
 
-本机实测、复现命令与口径说明见 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)。数字随硬件与索引规模变化，请以文档内测量条件为准。
+代码基线入口与历史数据见 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)，百万级文件索引的查询延迟、就绪时间与常驻内存见[文件搜索验证摘要](docs/FILE-SEARCH-VALIDATION.md)。数字随硬件与索引规模变化，请以文档内测量条件为准。
 
 ## 插件与扩展
 
@@ -160,5 +160,3 @@ Kite 不会把本地索引、启动历史或日志发给维护者。用户主动
 ## 许可证
 
 [Apache License 2.0](LICENSE)
-
-安装包内的 Everything SDK DLL 使用 MIT 许可，原文见 [第三方声明](THIRD_PARTY_NOTICES.txt)。

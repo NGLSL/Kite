@@ -1,8 +1,16 @@
 # Kite 性能分析报告
 
+## 当前验证入口
+
+应用搜索、插件故障、系统恢复、DPI 与存储的代码基线入口为 `cargo test --release report_perf_baseline -- --ignored --nocapture`，不主动唤起窗口。内置文件搜索的百万级索引、查询延迟与常驻内存见[文件搜索验证摘要](FILE-SEARCH-VALIDATION.md)。
+
+当前代码基线已移除旧 Everything 后端的场景。下文保留 v0.3.7 批次的原始数值、模块名和测量条件，用于历史对照；旧后端的脚本客户端结果不用于评价当前内置索引。
+
+## 历史基线：v0.3.7
+
 **0.3.7 代码级基线** · **测量日期：2026-09-27** · **Windows 11 教育版 10.0.26200** · **Intel i5-13490F** · **32 GB RAM** · **rustc 1.97.1** · **crate version 0.3.6（0.3.7 基线批次）**
 
-本版默认性能基线**不主动唤起 Kite 窗口**，改为通过代码路径压测热路径、故障恢复与升级兼容。真 UI 唤起延迟（Alt+Space）降级为发布抽检，沿用 `scripts/measure-performance.ps1`；其历史数据见文末附录，**不与本轮代码基线混比**。
+该批次默认性能基线**不主动唤起 Kite 窗口**，通过代码路径压测热路径、故障恢复与升级兼容。真 UI 唤起延迟（Alt+Space）采用 `scripts/measure-performance.ps1`；其历史数据见文末附录，**不与该批次代码基线混比**。
 
 > 口径：所有延迟单位为 **µs**（除非注明 ms）；来自本机 `cargo test --release`，是基线数据，不代表所有硬件环境。
 
@@ -19,7 +27,7 @@
 | 存储升级 | 旧 `user_version=1` fixture → 当前 `HistoryDb::open`；快照 Warm/Cold；原子写 |
 | 原始输出 | [`performance-code-baseline-037.txt`](performance-code-baseline-037.txt) |
 
-复现：
+当时的复现命令（需对应版本源码）：
 
 ```powershell
 cargo test --release report_perf_baseline -- --ignored --nocapture
@@ -104,7 +112,7 @@ cargo test --release report_perf_baseline -- --ignored --nocapture
 4. **升级路径**：v1 历史库迁移保留 usage；不兼容 snapshot 正确拒绝 Warm。
 5. **未纳入本报告**：真 UI 唤起延迟/驻留内存/CPU、真睡眠·Explorer·Everything 进程、多屏热插拔、实机安装器升级。发布前建议抽检 UI 脚本；其余 OS 行为见下方清单。
 
-### OS-only 清单
+### 当时的 OS-only 清单
 
 | 场景 | 方式 |
 |---|---|

@@ -113,10 +113,4 @@ mod tests {
         assert!(db.pinned_ids().is_empty());
     }
 
-    #[test]
-    fn settings_table_still_works() {
-        let db = temp_db();
-        let s = db.load_settings();
-        assert!(!s.search_files);
-    }
 }

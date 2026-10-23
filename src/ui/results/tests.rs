@@ -2,12 +2,11 @@
 
 use super::super::test_support::{settings_result, test_state};
 use super::{
-    build_direct_path_results, build_empty_query_lists, build_file_results,
-    everything_status_result, is_current_file_response, prepend_dependency_status,
+    build_direct_path_results, build_empty_query_lists, is_current_file_response,
     prepend_direct_path_results,
 };
+use crate::file_search::FileFilter;
 use crate::model::ResultAction;
-use crate::system::everything::{self, Availability};
 use crate::ui::actions::menu_action;
 use crate::ui::MenuAction;
 
@@ -283,7 +282,7 @@ fn stale_or_disabled_file_results_are_rejected() {
 }
 
 #[test]
-fn files_mode_ranks_everything_hits_before_apps() {
+fn files_mode_ranks_file_hits_before_apps() {
     let mut state = test_state("test");
     state.files_mode = true;
     state.query = "test".into();
@@ -294,7 +293,7 @@ fn files_mode_ranks_everything_hits_before_apps() {
         r"C:\Tools\test.png".into(),
         None,
         None,
-        "everything",
+        "file-search",
     );
     file_item.attach_search_fields();
     let file_hit = crate::model::SearchResult::scored(file_item, 400, "file");
@@ -317,8 +316,8 @@ fn files_mode_ranks_everything_hits_before_apps() {
 
     assert!(!state.results.is_empty(), "文件模式下合并结果不得为空");
     assert_eq!(
-        state.results[0].item.source, "everything",
-        "文件模式下 Everything 命中必须排在应用之前，实际 top={:?}",
+        state.results[0].item.source, "file-search",
+        "文件模式下 文件命中必须排在应用之前，实际 top={:?}",
         state.results.first().map(|r| &r.item.display_name)
     );
     assert!(
@@ -345,7 +344,7 @@ fn non_files_mode_still_appends_file_hits_after_apps() {
         r"C:\Tools\test.png".into(),
         None,
         None,
-        "everything",
+        "file-search",
     );
     file_item.attach_search_fields();
     state.file_results = vec![crate::model::SearchResult::scored(file_item, 400, "file")];
@@ -371,7 +370,7 @@ fn non_files_mode_still_appends_file_hits_after_apps() {
         "非文件模式不应把未请求的文件结果抬到应用前"
     );
     assert!(
-        state.results.iter().all(|r| r.item.source != "everything"),
+        state.results.iter().all(|r| r.item.source != "file-search"),
         "非文件模式不得合并 file_results"
     );
 }
@@ -386,11 +385,11 @@ fn changing_file_filter_invalidates_previous_query() {
     state.file_query_generation = 4;
     let _ = update(
         &mut state,
-        Message::FileFilterChanged(everything::FileFilter::Images),
+        Message::FileFilterChanged(FileFilter::Images),
     );
 
     assert_eq!(state.query, "Kite");
-    assert_eq!(state.file_filter, everything::FileFilter::Images);
+    assert_eq!(state.file_filter, FileFilter::Images);
     assert_eq!(state.file_query_generation, 5);
     assert!(!is_current_file_response(
         true,
@@ -399,60 +398,6 @@ fn changing_file_filter_invalidates_previous_query() {
         4,
         "Kite"
     ));
-}
-
-#[test]
-fn missing_everything_is_visible_as_a_search_result() {
-    if everything::availability() != Availability::NotInstalled {
-        return;
-    }
-
-    let results = build_file_results(
-        "logo",
-        &std::env::temp_dir(),
-        everything::FileFilter::Images,
-    );
-
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].item.id, "kite:everything-download");
-    assert!(results[0].item.display_name.contains("未安装 Everything"));
-}
-
-#[test]
-fn dependency_status_distinguishes_missing_and_not_running() {
-    let missing = everything_status_result(Availability::NotInstalled).expect("missing status");
-    assert_eq!(missing.item.id, everything::DOWNLOAD_RESULT_ID);
-    assert_eq!(missing.item.target, everything::DOWNLOAD_URL);
-    assert!(missing.item.display_name.contains("官方下载"));
-
-    let stopped =
-        everything_status_result(Availability::InstalledButNotRunning).expect("not-running status");
-    assert_eq!(stopped.item.id, everything::NOT_RUNNING_RESULT_ID);
-    assert!(stopped.item.display_name.contains("未运行"));
-    assert!(everything_status_result(Availability::Ready).is_none());
-}
-
-#[test]
-fn missing_dependency_is_always_visible_ahead_of_application_results() {
-    let mut results = (0..crate::search::MAX_RESULTS)
-        .map(|index| {
-            let item = crate::model::AppItem::scanned(
-                format!("app:{index}"),
-                format!("Application {index}"),
-                format!(r"C:\Apps\app-{index}.exe"),
-                None,
-                None,
-                "start-menu",
-            );
-            crate::model::SearchResult::scored(item, 1000, "exact")
-        })
-        .collect::<Vec<_>>();
-    let status = everything_status_result(Availability::NotInstalled).unwrap();
-
-    prepend_dependency_status(&mut results, &[status]);
-
-    assert_eq!(results[0].item.id, everything::DOWNLOAD_RESULT_ID);
-    assert_eq!(results.len(), crate::search::MAX_RESULTS);
 }
 
 #[test]
@@ -518,7 +463,7 @@ fn direct_path_actions_lead_and_replace_duplicate_file_hits() {
             path.to_uppercase(),
             None,
             None,
-            "everything",
+            "file-search",
         ),
         400,
         "file",

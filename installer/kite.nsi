@@ -49,6 +49,10 @@ Section "-关闭旧版 Kite" SEC_CLOSE_OLD
   ; 插件是独立子进程，旧版宿主退出异常时可能仍占用待覆盖的官方插件文件。
   ; 这里只结束 Kite 官方插件进程，不影响用户启动的其他程序或第三方插件。
   ExecWait '"$SYSDIR\taskkill.exe" /F /IM kite-plugin-calculator.exe /IM kite-plugin-window-switcher.exe /IM kite-plugin-devtools.exe'
+  ; v0.6.0 及更早版本随安装包部署的旧 Everything SDK 与声明文件不再使用。
+  ; 只清理当前 Kite 安装目录中的固定旧产物，不触碰系统中的 Everything。
+  Delete "$INSTDIR\resources\Everything64.dll"
+  Delete "$INSTDIR\THIRD_PARTY_NOTICES.txt"
   Sleep 300
 SectionEnd
 
@@ -60,9 +64,7 @@ Section "Kite 主程序" SEC_MAIN
   SectionIn RO
   SetOutPath "$INSTDIR"
   File "..\target\release\kite.exe"
-  File "..\THIRD_PARTY_NOTICES.txt"
   SetOutPath "$INSTDIR\resources"
-  File "..\resources\Everything64.dll"
   File "..\resources\open.wav"
   SetOutPath "$INSTDIR\resources\official-plugins"
   File /r "..\resources\official-plugins\*"

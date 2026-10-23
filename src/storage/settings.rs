@@ -12,10 +12,7 @@ pub struct Settings {
     /// 可解析的快捷键，如 Alt+Space。
     pub hotkey: String,
     pub hotkey_label: String,
-    /// 搜索时是否带上 Everything 文件结果；默认关闭，选择要记住。
-    pub search_files: bool,
-    /// Kite 内置文件搜索插件是否启用。与遗留的 Everything 开关分开保存，
-    /// 避免旧版本的设置让新索引在首次启动时意外开始采集。
+    /// Kite 内置文件搜索是否启用；默认关闭。
     #[serde(default)]
     pub file_search_enabled: bool,
     /// 文件搜索结果排除目录（目录本身及其子树）；只影响结果，不触发重建。
@@ -45,7 +42,6 @@ impl Default for Settings {
             autostart: false,
             hotkey: crate::system::hotkey::DEFAULT_HOTKEY.into(),
             hotkey_label: crate::system::hotkey::DEFAULT_HOTKEY.into(),
-            search_files: false,
             file_search_enabled: false,
             file_search_exclude_dirs: Vec::new(),
             history_recording: true,
@@ -103,9 +99,6 @@ impl HistoryDb {
                 s.hotkey_label = crate::system::hotkey::display_label(&v);
                 s.hotkey = v;
             }
-        }
-        if let Ok(v) = self.get_setting("search_files") {
-            s.search_files = v == "1";
         }
         if let Ok(v) = self.get_setting("file_search_enabled") {
             s.file_search_enabled = v == "1";
@@ -440,7 +433,7 @@ mod tests {
     fn new_settings_defaults() {
         let db = temp_db();
         let s = db.load_settings();
-        assert!(!s.search_files, "搜文件默认关闭");
+        assert!(!s.file_search_enabled, "文件搜索默认关闭");
         assert!(s.history_recording, "历史记录默认开启");
         assert!(s.query_log, "查询日志默认开启，默认仍保留可诊断性");
     }
@@ -448,11 +441,9 @@ mod tests {
     #[test]
     fn settings_roundtrip_for_new_fields() {
         let mut db = temp_db();
-        db.save_setting("search_files", "1").unwrap();
         db.save_setting("history_recording", "0").unwrap();
         db.save_setting("query_log", "0").unwrap();
         let s = db.load_settings();
-        assert!(s.search_files);
         assert!(!s.history_recording);
         assert!(!s.query_log);
     }

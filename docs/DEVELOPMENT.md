@@ -4,19 +4,21 @@
 
 Kite 是 Windows x64 原生桌面应用，使用 Rust 2021、Iced 0.14 和 tiny-skia。项目不使用 Tauri、WebView2、React 或 Node.js。
 
-程序入口为 `src/main.rs`，业务和 UI 位于同一个 Cargo crate。Iced 负责窗口、输入、设置页、托盘交互和渲染；Rust 模块负责扫描、搜索、启动、持久化及 Windows 集成。
+程序入口为 `src/main.rs`，主 crate 负责装配业务和 UI，文件索引内核与按需元数据服务位于 `crates/`。Iced 负责窗口、输入、设置页、托盘交互和渲染；Rust 模块负责扫描、搜索、启动、持久化及 Windows 集成。
 
 ## 目录职责
 
 - `src/app/`：应用扫描、快捷方式解析、UWP 和启动逻辑
 - `src/search/`：规范化、别名、拼音、召回和排序
+- `src/file_search/`：内置文件搜索控制器、索引构建与后台生命周期
+- `crates/`：低内存文件索引内核与按需元数据服务
 - `src/storage/`：SQLite 设置、固定项和历史
 - `src/system/`：快捷键、托盘、图标、音效和 Windows API
 - `src/ui/`：Iced 状态、视图、后台任务和交互
 - `src/plugin/`：插件 Registry / Activation / Host / 协议（见 `docs/PLUGIN-DEVELOPMENT.md`）
 - `official-plugins/`：官方插件 Rust workspace（性能考虑；协议语言无关，不编入主 crate）
 - `icons/`：程序及托盘图标
-- `resources/`：Everything DLL、音效、官方插件打包目录（`official-plugins/`，构建生成）等运行资源
+- `resources/`：音效、官方插件打包目录（`official-plugins/`，构建生成）等运行资源
 - `installer/`：NSIS 安装脚本
 - `scripts/`：构建辅助脚本
 - `docs/`：需求、性能、架构决策、插件开发说明和开发规范

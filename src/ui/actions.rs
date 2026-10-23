@@ -66,8 +66,7 @@ pub(super) fn is_app_entry(item: &AppItem) -> bool {
 /// narrower application-source check above, while file, web and plugin
 /// results may still carry their existing preference actions.
 fn can_personalize_entry(item: &AppItem) -> bool {
-    item.source != "everything-status"
-        && item.source != "file-search-status"
+    item.source != "file-search-status"
         && item.source != "direct-path"
 }
 
@@ -558,7 +557,7 @@ pub(super) fn on_key(
                     return focus(search_view::input_id());
                 } else if state.files_mode {
                     state.files_mode = false;
-                    state.file_filter = system::everything::FileFilter::All;
+                    state.file_filter = crate::file_search::FileFilter::All;
                     state.file_search_confirm_open = false;
                     state.request_file_search();
                     state.refresh_results();
@@ -921,7 +920,7 @@ pub(super) fn exec_result_action(
             if item.id == "kite:action:files" {
                 state.files_mode = !state.files_mode;
                 if !state.files_mode {
-                    state.file_filter = system::everything::FileFilter::All;
+                    state.file_filter = crate::file_search::FileFilter::All;
                     state.file_search_confirm_open = false;
                 }
                 state.request_file_search();
@@ -949,18 +948,6 @@ pub(super) fn exec_result_action(
             // 非内联工具：选中「JSON 工具」后 Enter 打开（列表无取消行）。
             if item.id == super::json_tool::CONFIRM_RESULT_ID {
                 return super::tools::confirm_open(state);
-            }
-            if let Some(url) = everything_download_url(&item.id) {
-                let result = app::uwp::launch_shell_path(url);
-                state.qlog(|| format!("open Everything download err={result:?}"));
-                return if result.is_ok() {
-                    launch_and_hide(state)
-                } else {
-                    flash(state, "无法打开 Everything 官方下载页")
-                };
-            }
-            if item.id == system::everything::NOT_RUNNING_RESULT_ID {
-                return flash(state, "请先启动 Everything，再使用文件搜索");
             }
             if let Some((kind, browser_id, payload)) = app::web::parse_id(&item.id) {
                 let t0 = Instant::now();
@@ -1207,27 +1194,6 @@ fn exec_plugin_action(
         }
     });
     Task::none()
-}
-
-fn everything_download_url(item_id: &str) -> Option<&'static str> {
-    (item_id == system::everything::DOWNLOAD_RESULT_ID).then_some(system::everything::DOWNLOAD_URL)
-}
-
-#[cfg(test)]
-mod everything_action_tests {
-    use super::*;
-
-    #[test]
-    fn missing_dependency_result_targets_official_download_page() {
-        assert_eq!(
-            everything_download_url(system::everything::DOWNLOAD_RESULT_ID),
-            Some("https://www.voidtools.com/downloads/")
-        );
-        assert_eq!(
-            everything_download_url(system::everything::NOT_RUNNING_RESULT_ID),
-            None
-        );
-    }
 }
 
 #[cfg(test)]

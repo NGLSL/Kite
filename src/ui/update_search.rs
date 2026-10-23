@@ -85,7 +85,7 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::ToggleFiles => {
             state.files_mode = !state.files_mode;
             if !state.files_mode {
-                state.file_filter = crate::system::everything::FileFilter::All;
+                state.file_filter = crate::file_search::FileFilter::All;
                 state.file_search_confirm_open = false;
             }
             state.navigation_mode = NavigationMode::Input;
@@ -145,7 +145,7 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
             state.file_search_controller.stop();
             state.invalidate_file_search();
             state.files_mode = false;
-            state.file_filter = crate::system::everything::FileFilter::All;
+            state.file_filter = crate::file_search::FileFilter::All;
             state.refresh_results();
             flash(state, "文件搜索已关闭")
         }
@@ -430,11 +430,12 @@ fn refresh_file_status_result(state: &mut State) {
         &state.file_search_controller,
         state.file_search_enabled,
     );
-    let status = state.file_results.iter().find(|result| {
-        result.item.source == "file-search-status" || result.item.source == "everything-status"
-    });
+    let status = state
+        .file_results
+        .iter()
+        .find(|result| result.item.source == "file-search-status");
     state.results.retain(|result| {
-        result.item.source != "file-search-status" && result.item.source != "everything-status"
+        result.item.source != "file-search-status"
     });
     if let Some(status) = status.cloned() {
         state.results.insert(0, status);

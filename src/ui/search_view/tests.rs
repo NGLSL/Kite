@@ -71,7 +71,7 @@ fn test_view_active_search_two_column() {
     }
 
     state.files_mode = true;
-    state.file_filter = crate::system::everything::FileFilter::Images;
+    state.file_filter = crate::file_search::FileFilter::Images;
     state.theme_mode = ThemeMode::Dark;
     {
         let _elem = view(&state);
@@ -315,7 +315,7 @@ fn test_backspace_exits_files_mode() {
 
     let mut state = test_state("");
     state.files_mode = true;
-    state.file_filter = crate::system::everything::FileFilter::Images;
+    state.file_filter = crate::file_search::FileFilter::Images;
 
     let _ = on_key(
         &mut state,
@@ -326,7 +326,7 @@ fn test_backspace_exits_files_mode() {
     assert!(!state.files_mode);
     assert_eq!(
         state.file_filter,
-        crate::system::everything::FileFilter::All
+        crate::file_search::FileFilter::All
     );
 }
 

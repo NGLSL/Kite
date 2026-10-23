@@ -226,8 +226,8 @@ enum Message {
     FileSearchExcludeRemove(usize),
     /// 索引服务状态轮询；仅在快照变化时触发结果刷新。
     FileSearchStatusTick,
-    FileFilterChanged(system::everything::FileFilter),
-    /// 后台 Everything 查询完成；代际和查询文本用于丢弃过期结果。
+    FileFilterChanged(crate::file_search::FileFilter),
+    /// 后台文件查询完成；代际和查询文本用于丢弃过期结果。
     FileSearchReady(u64, String, Vec<SearchResult>, u128),
     /// 后台检查用户输入的绝对路径。
     DirectPathReady(u64, String, Vec<SearchResult>),
@@ -395,7 +395,7 @@ enum MenuAction {
 struct State {
     #[allow(dead_code)]
     data_dir: PathBuf,
-    /// Everything64.dll 所在资源目录（文件搜索用）。
+    /// 捆绑资源所在目录（图标/音效/官方插件使用）。
     icon_dir: PathBuf,
     index: std::sync::Arc<Mutex<AppIndex>>,
     scan_options: std::sync::Arc<std::sync::RwLock<app::scanner::ScanOptions>>,
@@ -418,7 +418,7 @@ struct State {
     /// 用户主动点了重新扫描；完成后给设置页一条可见反馈。
     rescan_pending: bool,
     files_mode: bool,
-    file_filter: system::everything::FileFilter,
+    file_filter: crate::file_search::FileFilter,
     /// 内置文件搜索控制器。查询与采集均在控制器后台线程执行；UI 只消费快照。
     pub(crate) file_search_controller: std::sync::Arc<crate::file_search::Controller>,
     /// 文件搜索设置与确认态。

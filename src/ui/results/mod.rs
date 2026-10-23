@@ -18,8 +18,6 @@ mod tests;
 
 pub(crate) use direct_path::{build_direct_path_results, prepend_direct_path_results};
 pub(crate) use empty_query::build_empty_query_lists;
-#[cfg(test)]
-pub(crate) use file_search::{build_file_results, everything_status_result};
 pub(crate) use file_search::{
     build_indexed_file_results, is_current_file_response, prepend_dependency_status,
 };
@@ -321,8 +319,8 @@ impl State {
 
     /// 最终列表组装的唯一实现。
     ///
-    /// - 非文件模式：应用命中 → 网址直达 → 追加 Everything 文件 → 截断 → 网页搜索槽位
-    /// - 文件模式：Everything 文件优先，再拼应用/网址等其余命中（依赖状态仍由调用方置顶）
+    /// - 非文件模式：应用命中 → 网址直达 → 截断 → 网页搜索槽位
+    /// - 文件模式：内置文件结果优先，再拼应用/网址等其余命中（状态由调用方置顶）
     ///
     /// 调用方只有异步主路径（`apply_app_search_ready`）；同步刷新不再内联一份，
     /// 避免「第 5 位网页搜索」「文件结果过滤」这类规则改一处漏一处。
@@ -354,8 +352,7 @@ impl State {
                 .file_results
                 .iter()
                 .filter(|result| {
-                    result.item.source != "everything-status"
-                        && result.item.source != "file-search-status"
+                    result.item.source != "file-search-status"
                 })
                 .cloned()
                 .collect();
@@ -369,11 +366,10 @@ impl State {
             && !q_norm.is_empty()
             && app::actions::direct_path_candidate(&self.query).is_none()
         {
-            // 文件模式已把 Everything 命中置顶：再插网页槽位会打散文件列表。
+            // 文件模式已把文件命中置顶：再插网页槽位会打散文件列表。
             let files_mode_has_files = self.files_mode
                 && hits.iter().any(|h| {
-                    h.item.source == "everything"
-                        || h.item.source == "file-search"
+                    h.item.source == "file-search"
                         || h.item.source == "file-search-raw"
                 });
             if !files_mode_has_files {
@@ -475,7 +471,6 @@ impl State {
                 .iter()
                 .filter(|result| {
                     result.item.source == "file-search-status"
-                        || result.item.source == "everything-status"
                 })
                 .cloned()
                 .collect();

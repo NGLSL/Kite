@@ -5,12 +5,56 @@
 
 mod build;
 
+use std::fmt;
+
+/// File-search categories shared by the UI and the native index.
+///
+/// This type belongs to the built-in file-search feature rather than to an
+/// operating-system integration or a third-party backend.  The native index
+/// applies the extension rules in its own query layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FileFilter {
+    #[default]
+    All,
+    Images,
+    Documents,
+    Videos,
+    Audio,
+    Archives,
+    Folders,
+}
+
+impl FileFilter {
+    pub const ALL: [Self; 7] = [
+        Self::All,
+        Self::Images,
+        Self::Documents,
+        Self::Videos,
+        Self::Audio,
+        Self::Archives,
+        Self::Folders,
+    ];
+}
+
+impl fmt::Display for FileFilter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::All => "全部",
+            Self::Images => "图片",
+            Self::Documents => "文档",
+            Self::Videos => "视频",
+            Self::Audio => "音频",
+            Self::Archives => "压缩包",
+            Self::Folders => "文件夹",
+        })
+    }
+}
+
 /// Dispatch the ordinary-permission, short-lived builder before claiming a UI instance.
 pub fn dispatch_entry() -> bool {
     build::dispatch_entry()
 }
 
-use crate::system::everything::FileFilter;
 use kite_file_index::{Generation, LiveSearch, Query};
 use kite_index_service::{CancelHandle, Client, ErrorKind, ServiceError, ServiceState};
 use serde::{Deserialize, Serialize};

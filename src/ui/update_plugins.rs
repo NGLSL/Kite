@@ -4,9 +4,7 @@ use super::actions::{
     close_settings, flash, launch_and_hide, open_path_and_hide, open_url_and_hide,
     settings_window_task, sync_scroll,
 };
-use super::{
-    plog, plugin, system, with_plugin_host, with_plugin_registry, Message, Section, State,
-};
+use super::{plog, plugin, with_plugin_host, with_plugin_registry, Message, Section, State};
 use crate::app;
 use iced::Task;
 
@@ -146,9 +144,6 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
         Message::PluginCancelToolConfirm => super::tools::cancel_confirm(state),
         Message::Tool(kind, op) => super::tools::handle_op(state, kind, op),
         Message::ToolWindowClosed(id) => super::tools::handle_window_closed(state, id),
-        _ => {
-            let _ = system::everything::FileFilter::All;
-            Task::none()
-        }
+        _ => Task::none(),
     }
 }

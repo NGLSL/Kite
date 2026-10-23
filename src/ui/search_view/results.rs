@@ -515,7 +515,7 @@ fn result_card<'a>(
     let icon = render_icon(&r.item, 36.0, tokens);
 
     let tag = match r.item.source.as_str() {
-        "everything" | "file-search" | "file-search-raw" | "direct-path" | "file-search-status" => {
+        "file-search" | "file-search-raw" | "direct-path" | "file-search-status" => {
             Some("文件")
         }
         "plugin" | "plugin-command" => Some("插件"),
