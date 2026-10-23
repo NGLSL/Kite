@@ -21,6 +21,9 @@ pub(super) fn settings_result() -> SearchResult {
 
 /// 空索引、无历史库的最小状态，结果预置 [`settings_result`]。
 pub(super) fn test_state(query: &str) -> State {
+    let file_search_controller = crate::file_search::Controller::new(std::env::temp_dir());
+    let file_search_snapshot = file_search_controller.snapshot();
+    let file_query_revision = file_search_snapshot.revision;
     State {
         data_dir: std::env::temp_dir(),
         icon_dir: std::env::temp_dir(),
@@ -44,7 +47,16 @@ pub(super) fn test_state(query: &str) -> State {
         rescan_pending: false,
         files_mode: false,
         file_filter: system::everything::FileFilter::All,
+        file_search_controller,
+        file_search_enabled: false,
+        file_search_exclusions: Vec::new(),
+        file_search_exclusion_input: String::new(),
+        file_search_confirm_open: false,
+        file_search_snapshot,
         file_query_generation: 0,
+        file_query_in_flight: false,
+        file_query_dirty: false,
+        file_query_revision,
         file_results: Vec::new(),
         direct_path_generation: 0,
         direct_path_latest: Default::default(),

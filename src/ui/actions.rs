@@ -4,8 +4,13 @@ use super::*;
 
 /// Build the single action list shared by mouse and Shift+F10.
 pub(super) fn menu_entries(state: &State, item: &AppItem) -> Vec<(String, MenuAction)> {
-    let target_is_fs = std::path::Path::new(&item.target).is_file()
-        || std::path::Path::new(&item.target).is_dir();
+    let is_non_revealable_file_search = matches!(
+        item.source.as_str(),
+        "file-search-status" | "file-search-raw"
+    );
+    let target_is_fs = !is_non_revealable_file_search
+        && (std::path::Path::new(&item.target).is_file()
+            || std::path::Path::new(&item.target).is_dir());
     let mut entries = Vec::new();
     if target_is_fs {
         entries.push(("打开所在文件夹".to_string(), MenuAction::OpenFolder));
@@ -61,7 +66,9 @@ pub(super) fn is_app_entry(item: &AppItem) -> bool {
 /// narrower application-source check above, while file, web and plugin
 /// results may still carry their existing preference actions.
 fn can_personalize_entry(item: &AppItem) -> bool {
-    item.source != "everything-status" && item.source != "direct-path"
+    item.source != "everything-status"
+        && item.source != "file-search-status"
+        && item.source != "direct-path"
 }
 
 fn resolve_from_index(state: &State, captured: &AppItem) -> Option<AppItem> {
@@ -482,6 +489,10 @@ pub(super) fn on_key(
             if state.pending_tool_confirm.is_some() {
                 return super::tools::cancel_confirm(state);
             }
+            if state.file_search_confirm_open {
+                state.file_search_confirm_open = false;
+                return focus(search_view::input_id());
+            }
             if state.settings_open {
                 return close_settings(state);
             }
@@ -548,6 +559,7 @@ pub(super) fn on_key(
                 } else if state.files_mode {
                     state.files_mode = false;
                     state.file_filter = system::everything::FileFilter::All;
+                    state.file_search_confirm_open = false;
                     state.request_file_search();
                     state.refresh_results();
                     return Task::batch([sync_scroll(state), focus(search_view::input_id())]);
@@ -845,6 +857,26 @@ pub(super) fn exec_result_action(
                 }
             }
         }
+        ResultAction::OpenFileUtf16 { path } => {
+            let t0 = Instant::now();
+            system::env::refresh_process_env();
+            match app::actions::open_file_utf16(&path) {
+                Ok(()) => {
+                    state.qlog(|| {
+                        format!(
+                            "open_file_utf16 units={} in {}us",
+                            path.len(),
+                            t0.elapsed().as_micros()
+                        )
+                    });
+                    launch_and_hide(state)
+                }
+                Err(error) => {
+                    state.qlog(|| format!("open_file_utf16 failed: {error}"));
+                    flash(state, "无法打开该文件路径")
+                }
+            }
+        }
         ResultAction::OpenLocalPath { path } => exec_direct_path(state, &path, false),
         ResultAction::RevealPath { path } => exec_direct_path(state, &path, true),
         ResultAction::OpenUrl { url } => {
@@ -890,10 +922,29 @@ pub(super) fn exec_result_action(
                 state.files_mode = !state.files_mode;
                 if !state.files_mode {
                     state.file_filter = system::everything::FileFilter::All;
+                    state.file_search_confirm_open = false;
                 }
                 state.request_file_search();
                 state.refresh_results();
                 return sync_scroll(state);
+            }
+            // 内置文件搜索控制行：主界面点击“文件”后，启用/重建等动作
+            // 仍经过统一结果入口，避免另起一套窗口或命令协议。
+            if item.id == "kite:file-search:enable" || item.id == "kite:file-search:authorize" {
+                return update_file_search_enable(state);
+            }
+            if item.id == "kite:file-search:rebuild" {
+                return super::interaction::update(state, Message::FileSearchRebuild);
+            }
+            if item.id == "kite:file-search:error" {
+                state.file_search_controller.start(false);
+                state.invalidate_file_search();
+                state.request_file_search();
+                state.refresh_results();
+                return flash(state, "正在重试文件索引…");
+            }
+            if item.id.starts_with("kite:file-search:") {
+                return flash(state, &item.target);
             }
             // 非内联工具：选中「JSON 工具」后 Enter 打开（列表无取消行）。
             if item.id == super::json_tool::CONFIRM_RESULT_ID {
@@ -968,6 +1019,11 @@ pub(super) fn exec_result_action(
             }
         }
     }
+}
+
+fn update_file_search_enable(state: &mut State) -> Task<Message> {
+    state.file_search_confirm_open = true;
+    Task::none()
 }
 
 fn exec_direct_path(state: &mut State, path: &str, reveal: bool) -> Task<Message> {

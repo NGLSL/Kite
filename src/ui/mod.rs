@@ -123,6 +123,7 @@ enum Section {
     Hotkey,
     Alias,
     Index,
+    FileSearch,
     Plugins,
     About,
 }
@@ -136,12 +137,13 @@ enum NavigationMode {
 }
 
 impl Section {
-    const ALL: [Section; 7] = [
+    const ALL: [Section; 8] = [
         Section::General,
         Section::SearchEngine,
         Section::Hotkey,
         Section::Alias,
         Section::Index,
+        Section::FileSearch,
         Section::Plugins,
         Section::About,
     ];
@@ -152,6 +154,7 @@ impl Section {
             Section::Hotkey => "热键",
             Section::Alias => "别名",
             Section::Index => "应用索引",
+            Section::FileSearch => "文件搜索",
             Section::Plugins => "插件",
             Section::About => "关于",
         }
@@ -209,6 +212,20 @@ enum Message {
     LaunchIndex(usize),
     /// 「文件」胶囊开关（css .files-toggle）。
     ToggleFiles,
+    /// 首次启用确认卡中的操作。
+    FileSearchEnableConfirm,
+    FileSearchEnableCancel,
+    /// 设置页内置文件搜索卡的启停与重建。
+    FileSearchSetEnabled(bool),
+    /// 错误状态下仅重试连接，不触发全盘重建。
+    FileSearchRetry,
+    FileSearchRebuild,
+    /// 排除目录编辑。
+    FileSearchExcludeInputChanged(String),
+    FileSearchExcludeAdd,
+    FileSearchExcludeRemove(usize),
+    /// 索引服务状态轮询；仅在快照变化时触发结果刷新。
+    FileSearchStatusTick,
     FileFilterChanged(system::everything::FileFilter),
     /// 后台 Everything 查询完成；代际和查询文本用于丢弃过期结果。
     FileSearchReady(u64, String, Vec<SearchResult>, u128),
@@ -402,7 +419,21 @@ struct State {
     rescan_pending: bool,
     files_mode: bool,
     file_filter: system::everything::FileFilter,
+    /// 内置文件搜索控制器。查询与采集均在控制器后台线程执行；UI 只消费快照。
+    pub(crate) file_search_controller: std::sync::Arc<crate::file_search::Controller>,
+    /// 文件搜索设置与确认态。
+    pub(crate) file_search_enabled: bool,
+    pub(crate) file_search_exclusions: Vec<String>,
+    pub(crate) file_search_exclusion_input: String,
+    pub(crate) file_search_confirm_open: bool,
+    pub(crate) file_search_snapshot: crate::file_search::Snapshot,
     file_query_generation: u64,
+    /// 当前代际是否有一个后台文件查询在途。旧代际返回时不能修改这个状态。
+    file_query_in_flight: bool,
+    /// 索引在当前查询期间发生变化，等当前结果落地后补一次查询。
+    file_query_dirty: bool,
+    /// 发起在途查询时观察到的索引 revision，用于漏掉轮询事件时兜底。
+    file_query_revision: u64,
     file_results: Vec<SearchResult>,
     direct_path_generation: u64,
     direct_path_latest: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -510,6 +541,14 @@ impl State {
     /// 启动/固定/降权/清空历史等路径上作废个性化共享缓存。
     pub(crate) fn invalidate_prefs_cache(&mut self) {
         self.prefs_cache = None;
+    }
+}
+
+impl Drop for State {
+    fn drop(&mut self) {
+        // daemon 的 Quit 路径会显式调用 stop；Drop 覆盖窗口创建失败、测试和
+        // 其它退出路径，确保管理员读取会话不会悬挂在 Kite 进程之外。
+        self.file_search_controller.stop();
     }
 }
 

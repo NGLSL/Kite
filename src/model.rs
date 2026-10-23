@@ -24,6 +24,11 @@ pub enum ResultAction {
     OpenFile {
         path: String,
     },
+    /// NTFS 名字包含无法解码为 Rust `String` 的 UTF-16 单元；保持原始路径，
+    /// 由 Win32 宽字符 API 直接打开，避免 lossy 路径误指向另一条文件。
+    OpenFileUtf16 {
+        path: Vec<u16>,
+    },
     /// 用户输入且经文件系统确认的本地路径。
     OpenLocalPath {
         path: String,
@@ -63,7 +68,7 @@ impl ResultSource {
         }
 
         let id = item.id.as_str();
-        if id.starts_with("file:") {
+        if id.starts_with("file:") || id.starts_with("file:utf16:") {
             return ResultSource::File;
         }
         if id.starts_with("url:") || id.starts_with("websearch:") {
@@ -74,7 +79,7 @@ impl ResultSource {
         }
 
         match item.source.as_str() {
-            "everything" => return ResultSource::File,
+            "everything" | "file-search" | "file-search-raw" => return ResultSource::File,
             "websearch" | "url" | "browser" => return ResultSource::Web,
             "builtin" | "builtin-system" | "win-settings" | "everything-status" => {
                 return ResultSource::Builtin

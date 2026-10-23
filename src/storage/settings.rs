@@ -14,6 +14,13 @@ pub struct Settings {
     pub hotkey_label: String,
     /// 搜索时是否带上 Everything 文件结果；默认关闭，选择要记住。
     pub search_files: bool,
+    /// Kite 内置文件搜索插件是否启用。与遗留的 Everything 开关分开保存，
+    /// 避免旧版本的设置让新索引在首次启动时意外开始采集。
+    #[serde(default)]
+    pub file_search_enabled: bool,
+    /// 文件搜索结果排除目录（目录本身及其子树）；只影响结果，不触发重建。
+    #[serde(default)]
+    pub file_search_exclude_dirs: Vec<String>,
     /// 是否记录启动历史（Usage + Query History）；暂停后 record 直接跳过。
     pub history_recording: bool,
     /// 输入与查询级诊断日志（Alt/IME 按键、结果就绪／过期等）；默认开启，排查时再关。
@@ -39,6 +46,8 @@ impl Default for Settings {
             hotkey: crate::system::hotkey::DEFAULT_HOTKEY.into(),
             hotkey_label: crate::system::hotkey::DEFAULT_HOTKEY.into(),
             search_files: false,
+            file_search_enabled: false,
+            file_search_exclude_dirs: Vec::new(),
             history_recording: true,
             query_log: true,
             portable_dirs: Vec::new(),
@@ -97,6 +106,18 @@ impl HistoryDb {
         }
         if let Ok(v) = self.get_setting("search_files") {
             s.search_files = v == "1";
+        }
+        if let Ok(v) = self.get_setting("file_search_enabled") {
+            s.file_search_enabled = v == "1";
+        }
+        if let Ok(v) = self.get_setting("file_search_exclude_dirs") {
+            let mut seen = std::collections::HashSet::new();
+            s.file_search_exclude_dirs = serde_json::from_str::<Vec<String>>(&v)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|path| normalize_file_search_exclusion(&path).ok())
+                .filter(|path| seen.insert(path.to_ascii_lowercase()))
+                .collect();
         }
         if let Ok(v) = self.get_setting("history_recording") {
             s.history_recording = v != "0";
@@ -163,6 +184,27 @@ impl HistoryDb {
         }
         let value = serde_json::to_string(&normalized).unwrap_or_else(|_| "[]".into());
         self.save_setting("portable_dirs", &value)?;
+        Ok(normalized)
+    }
+
+    /// 保存文件搜索的排除目录。
+    ///
+    /// 过滤器使用 Windows 内核路径语义，不能接受看起来像路径、但实际是
+    /// UNC、相对驱动器路径、点目录或 ADS 的输入。规范化在写库前完成，避免
+    /// 重启后把坏配置重新交给索引服务。
+    pub fn set_file_search_exclude_dirs(&mut self, dirs: &[String]) -> Result<Vec<String>, String> {
+        let mut normalized = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for raw in dirs {
+            let path = normalize_file_search_exclusion(raw)?;
+            let key = path.to_ascii_lowercase();
+            if seen.insert(key) {
+                normalized.push(path);
+            }
+        }
+        let value = serde_json::to_string(&normalized).map_err(|error| error.to_string())?;
+        self.save_setting("file_search_exclude_dirs", &value)
+            .map_err(|error| error.to_string())?;
         Ok(normalized)
     }
 
@@ -311,6 +353,64 @@ impl HistoryDb {
     pub(crate) fn conn_mut(&mut self) -> &mut Connection {
         self.raw_conn_mut()
     }
+}
+
+/// Normalize a user-entered file-search exclusion without touching the file
+/// system. Exclusions may point at a directory that is not present yet, so
+/// canonicalization would make a valid setting impossible to enter.
+///
+/// The index service accepts only absolute drive paths. UNC paths, dot
+/// components and alternate data streams are deliberately rejected instead of
+/// being silently rewritten into a different subtree.
+pub(crate) fn normalize_file_search_exclusion(raw: &str) -> Result<String, String> {
+    let mut path = raw.trim();
+    if path.is_empty() {
+        return Err("请输入要排除的文件夹路径".into());
+    }
+
+    let starts_with_quote = matches!(path.as_bytes().first(), Some(b'"' | b'\''));
+    let ends_with_quote = matches!(path.as_bytes().last(), Some(b'"' | b'\''));
+    if starts_with_quote || ends_with_quote {
+        let matching = path.as_bytes().first().copied();
+        if matching.is_none() || path.as_bytes().last().copied() != matching || path.len() < 2 {
+            return Err("路径引号不完整".into());
+        }
+        path = &path[1..path.len() - 1];
+        path = path.trim();
+    }
+    if path.is_empty() {
+        return Err("请输入要排除的文件夹路径".into());
+    }
+    if path.chars().any(|ch| ch == '\0' || ch == '"' || ch == '\'') {
+        return Err("路径不能包含引号或空字符".into());
+    }
+
+    let normalized = path.replace('/', "\\");
+    let bytes = normalized.as_bytes();
+    let drive = bytes
+        .first()
+        .copied()
+        .is_some_and(|ch| ch.is_ascii_alphabetic());
+    if !drive || bytes.get(1) != Some(&b':') || !matches!(bytes.get(2), Some(&b'\\')) {
+        return Err("请输入绝对盘符路径，例如 C:\\Work\\Cache（不支持 UNC 路径）".into());
+    }
+    if normalized[2..].contains(':') {
+        return Err("排除路径不能包含 ADS 数据流（额外的冒号）".into());
+    }
+
+    let mut trimmed = normalized;
+    while trimmed.len() > 3 && trimmed.ends_with('\\') {
+        trimmed.pop();
+    }
+    for component in trimmed[3..].split('\\') {
+        if component.is_empty() {
+            return Err("路径中不能包含连续的目录分隔符".into());
+        }
+        if component == "." || component == ".." {
+            return Err("排除路径不能包含 . 或 .. 目录".into());
+        }
+    }
+    Ok(trimmed)
 }
 
 #[cfg(test)]

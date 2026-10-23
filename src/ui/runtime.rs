@@ -5,13 +5,8 @@ use super::*;
 /// 原生 UI 启动入口（lib::run 调用）。
 pub fn run() -> iced::Result {
     // 数据/缓存目录与旧版 Kite 完全一致（com.kite.launcher）
-    let data_dir = dirs::data_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("com.kite.launcher");
-    let icon_dir = dirs::cache_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("com.kite.launcher")
-        .join("icons");
+    let data_dir = crate::system::paths::data_dir();
+    let icon_dir = crate::system::paths::cache_dir().join("icons");
     let _ = std::fs::create_dir_all(&data_dir);
     let _ = std::fs::create_dir_all(&icon_dir);
     let _ = ICON_DIR.set(icon_dir.clone());
@@ -109,7 +104,12 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
 
     let tx = setup_event_bridge();
     spawn_hotkey_worker(saved_settings.hotkey.clone());
-    spawn_index_builders(index.clone(), icon_dir.clone(), scan_options.clone(), tx);
+    spawn_index_builders(
+        index.clone(),
+        icon_dir.clone(),
+        scan_options.clone(),
+        tx.clone(),
+    );
     init_resources();
     spawn_tray();
     spawn_activation_listener();
@@ -141,8 +141,40 @@ fn boot(data_dir: PathBuf, icon_dir: PathBuf) -> (State, Task<Message>) {
     super::actions::load_hidden(&mut state);
     spawn_idle_sweep(&state.plugin_host);
     apply_saved_settings(&mut state, saved_settings);
+    // 已启用的内置索引只尝试连接已安装服务；首次授权仍由用户在主界面
+    // 明确点击“授权并建立索引”后触发，不在启动时弹 UAC。
+    if state.file_search_enabled {
+        state.file_search_controller.start(false);
+    }
+    spawn_file_search_status_poller(state.file_search_controller.clone(), tx.clone());
     state.refresh_results();
     open_main_window(state)
+}
+
+/// 以低频快照轮询把索引进度送入 iced；实际采集和查询始终由 Controller
+/// 自己的后台线程完成。事件只在快照内容变化时让 State 刷新结果，避免每秒
+/// 重复发起搜索。
+fn spawn_file_search_status_poller(
+    controller: std::sync::Arc<crate::file_search::Controller>,
+    tx: iced::futures::channel::mpsc::UnboundedSender<Message>,
+) {
+    std::thread::spawn(move || {
+        let mut previous = controller.snapshot();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            // Snapshot comparison keeps the disabled/idle path from sending an
+            // Iced message every tick. The controller snapshot is metadata-only;
+            // the index payload is never touched by this poller.
+            let current = controller.snapshot();
+            if current == previous {
+                continue;
+            }
+            previous = current;
+            if tx.unbounded_send(Message::FileSearchStatusTick).is_err() {
+                break;
+            }
+        }
+    });
 }
 
 fn warm_start_index() -> (std::sync::Arc<Mutex<AppIndex>>, bool) {
@@ -407,6 +439,11 @@ fn apply_saved_settings(state: &mut State, saved_settings: storage::settings::Se
         .unwrap_or_default();
     state.hotkey = saved_settings.hotkey;
     state.hotkey_label = saved_settings.hotkey_label;
+    state.file_search_enabled = saved_settings.file_search_enabled;
+    state.file_search_exclusions = saved_settings.file_search_exclude_dirs;
+    state
+        .file_search_controller
+        .set_exclusions(state.file_search_exclusions.clone());
 }
 
 fn build_state(
@@ -421,6 +458,10 @@ fn build_state(
         .as_ref()
         .map(HistoryDb::load_settings)
         .unwrap_or_default();
+    let file_search_controller = crate::file_search::Controller::new(data_dir.clone());
+    file_search_controller.set_exclusions(saved_settings.file_search_exclude_dirs.clone());
+    let file_search_snapshot = file_search_controller.snapshot();
+    let file_query_revision = file_search_snapshot.revision;
     State {
         data_dir: data_dir.clone(),
         icon_dir: icon_dir.clone(),
@@ -442,7 +483,16 @@ fn build_state(
         rescan_pending: false,
         files_mode: false,
         file_filter: system::everything::FileFilter::All,
+        file_search_controller,
+        file_search_enabled: saved_settings.file_search_enabled,
+        file_search_exclusions: saved_settings.file_search_exclude_dirs.clone(),
+        file_search_exclusion_input: String::new(),
+        file_search_confirm_open: false,
+        file_search_snapshot,
         file_query_generation: 0,
+        file_query_in_flight: false,
+        file_query_dirty: false,
+        file_query_revision,
         file_results: Vec::new(),
         direct_path_generation: 0,
         direct_path_latest: Default::default(),

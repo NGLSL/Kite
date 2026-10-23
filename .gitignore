@@ -27,6 +27,11 @@ dist-ssr
 # will have compiled files and executables
 target/
 
+# Local metadata inventories and integration evidence (may contain private paths).
+/.data/
+# Internal libraries use the application's authoritative lockfile.
+/crates/*/Cargo.lock
+
 artifacts/
 
 # Official plugin packages (built by scripts/build-official-plugins.ps1)

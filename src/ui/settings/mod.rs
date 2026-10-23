@@ -3,6 +3,7 @@
 
 mod about;
 mod alias;
+mod file_search;
 mod general;
 mod hotkey;
 mod index;
@@ -75,6 +76,7 @@ fn body<'a>(state: &'a State, tokens: ThemeTokens) -> Element<'a, Message> {
         Section::Hotkey => hotkey::hotkey_card(state, tokens),
         Section::Alias => alias::alias_card(state, tokens),
         Section::Index => index::index_card(state, tokens),
+        Section::FileSearch => file_search::settings_card(state, tokens),
         Section::Plugins => plugins::plugins_card(state, tokens),
         Section::About => about::about_card(state, tokens),
     }
@@ -227,7 +229,11 @@ fn nav_panel<'a>(state: &'a State, tokens: ThemeTokens) -> Element<'a, Message> 
 
 fn header(section: Section, tokens: ThemeTokens) -> Element<'static, Message> {
     let title = text(section.label())
-        .size(20.0)
+        .size(if section == Section::Plugins {
+            18.0
+        } else {
+            20.0
+        })
         .color(tokens.text_primary)
         .font(Font {
             weight: Weight::Semibold,

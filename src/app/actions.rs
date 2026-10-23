@@ -3,6 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
+use windows::core::PCWSTR;
+use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
 /// 仅接受普通盘符绝对路径或 UNC 路径；返回去掉成对外引号后的路径。
 /// 不对文件名中的合法符号做 shell 规则过滤，因为打开时不经过 shell 命令拼接。
 pub fn direct_path_candidate(input: &str) -> Option<PathBuf> {
@@ -77,6 +81,39 @@ pub fn open_containing_folder(target: &str) -> Result<(), String> {
             .spawn()
             .map(|_| ())
             .map_err(|e| format!("打开所在文件夹失败: {e}"))
+    }
+}
+
+/// Open a path whose NTFS name is only available as raw UTF-16.
+///
+/// Invalid UTF-16 must not be converted through `String`/`to_string_lossy`,
+/// because that can silently point ShellExecute at a different, valid path.
+/// The index service supplies trusted metadata; this helper only validates the
+/// terminator contract and passes the original code units to Win32.
+pub fn open_file_utf16(path: &[u16]) -> Result<(), String> {
+    if path.is_empty() || path.iter().any(|unit| *unit == 0) {
+        return Err("文件路径为空或包含无效终止符".into());
+    }
+    let mut path_wide = Vec::with_capacity(path.len() + 1);
+    path_wide.extend_from_slice(path);
+    path_wide.push(0);
+    let code = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR::null(),
+            PCWSTR(path_wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if code.0 as isize > 32 {
+        Ok(())
+    } else {
+        Err(format!(
+            "打开 UTF-16 文件路径失败（ShellExecute code {}）",
+            code.0 as isize
+        ))
     }
 }
 

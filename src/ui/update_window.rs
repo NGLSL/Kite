@@ -76,7 +76,22 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::WindowBlur => {
-            if state.settings_open || state.any_tool_open() {
+            // Keep the launcher visible while an explicit file-search confirmation
+            // or an index build is in progress. The UAC window necessarily steals
+            // focus; hiding here would leave the user unable to see the next step
+            // or the live build progress. Once the controller is Ready, normal
+            // hide-on-blur behavior resumes.
+            if !state.hide_on_blur || state.settings_open || state.any_tool_open() {
+                return Task::none();
+            }
+            let file_search_busy = state.file_search_confirm_open
+                || matches!(
+                    state.file_search_controller.snapshot().phase,
+                    crate::file_search::Phase::Starting
+                        | crate::file_search::Phase::Indexing
+                        | crate::file_search::Phase::CatchingUp
+                );
+            if file_search_busy {
                 return Task::none();
             }
             if !state.hidden {
@@ -104,6 +119,7 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
             .unwrap_or_else(Task::none),
         Message::Quit => {
             state.qlog(|| "quit requested".to_owned());
+            state.file_search_controller.stop();
             std::process::exit(0);
         }
         Message::FlashClear => {

@@ -28,6 +28,9 @@ fn plugins_list_page<'a>(state: &'a State, tokens: ThemeTokens) -> Element<'a, M
     // 产品区：先能力，后维护。导入/维护沉底，不再压住插件列表。
     let mut sections: Vec<Element<'_, Message>> = Vec::new();
 
+    // 内置能力与官方插件完全分区；文件搜索不经过 PluginHost/Registry。
+    sections.push(super::file_search::plugin_card(state, tokens));
+
     if reg.is_empty() {
         sections.push(elevated_card(
             column![
@@ -233,7 +236,7 @@ fn plugin_card(
 
     let title = row![
         text(name)
-            .size(14.5)
+            .size(13.0)
             .color(tokens.text_primary)
             .font(name_font()),
         text(format!("v{version}")).size(11.0).color(tokens.text_muted),

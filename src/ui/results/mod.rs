@@ -2,7 +2,7 @@
 //!
 //! 职责拆分：
 //! - 本文件：State 编排（请求、落地、合并、Provider / 空 Query 入口）
-//! - `file_search`：Everything 文件结果与依赖状态
+//! - `file_search`：内置文件索引结果与启用/恢复状态
 //! - `direct_path`：绝对路径直达动作
 //! - `empty_query`：空 Query 默认列表组装
 
@@ -18,11 +18,11 @@ mod tests;
 
 pub(crate) use direct_path::{build_direct_path_results, prepend_direct_path_results};
 pub(crate) use empty_query::build_empty_query_lists;
-pub(crate) use file_search::{
-    build_file_results, is_current_file_response, prepend_dependency_status,
-};
 #[cfg(test)]
-pub(crate) use file_search::everything_status_result;
+pub(crate) use file_search::{build_file_results, everything_status_result};
+pub(crate) use file_search::{
+    build_indexed_file_results, is_current_file_response, prepend_dependency_status,
+};
 
 impl State {
     pub(super) fn request_direct_path(&mut self) {
@@ -49,14 +49,51 @@ impl State {
     }
 
     /// 使正在运行的文件查询失效，并清除其结果。
+    ///
+    /// 这是用户主动改变 query/filter/mode 或配置时的严格代际边界。旧线程
+    /// 仍可能完成，但它的结果会因 generation 不同而被丢弃。
     pub(super) fn invalidate_file_search(&mut self) {
         self.file_query_generation = self.file_query_generation.wrapping_add(1);
+        self.file_query_in_flight = false;
+        self.file_query_dirty = false;
         self.file_results.clear();
     }
 
-    /// 探测依赖状态，并在可用时把 Everything 查询放到后台线程。
+    /// 将内置索引查询放到后台线程；服务状态和权限提示由同一入口返回。
+    ///
+    /// 每次显式请求都会建立新的 generation，并清除旧结果。索引自身的
+    /// revision 刷新走 [`Self::request_file_search_refresh`]，避免文件持续
+    /// 变化时把当前列表清空到查询完成。
     pub(super) fn request_file_search(&mut self) {
         self.invalidate_file_search();
+        self.spawn_file_search_query();
+    }
+
+    /// 在保持当前结果可见的前提下重新查询同一个 query/filter。
+    ///
+    /// 文件变化可以比一次查询更快；最多保留一个在途查询，变化只记在
+    /// dirty 标记中，当前响应落地后再补一次，不会为每个 revision 排队线程。
+    pub(super) fn request_file_search_refresh(&mut self) {
+        // 这是 metadata revision 专用入口。隐藏、设置页、工具窗和 Provider
+        // 面板都不需要把后台变化重新跑一遍全库；show_launcher 在恢复主搜索
+        // 窗口时会通过显式 request_file_search 取最新结果。
+        if !self.files_mode
+            || !self.file_search_enabled
+            || self.hidden
+            || self.settings_open
+            || self.any_tool_open()
+            || self.provider_mode.is_some()
+        {
+            return;
+        }
+        if self.file_query_in_flight {
+            self.file_query_dirty = true;
+            return;
+        }
+        self.spawn_file_search_query();
+    }
+
+    fn spawn_file_search_query(&mut self) {
         let query = self.query.trim().to_string();
         if !self.files_mode {
             return;
@@ -65,9 +102,22 @@ impl State {
         let generation = self.file_query_generation;
         let icon_dir = self.icon_dir.clone();
         let filter = self.file_filter;
+        let controller = self.file_search_controller.clone();
+        let enabled = self.file_search_enabled;
+        if !enabled {
+            // 默认关闭时只需同步放入一个轻量启用入口，保证点击“文件”后
+            // 空 Query 也立即给出下一步，不等待任何服务线程。
+            self.file_results =
+                build_indexed_file_results(&query, &icon_dir, filter, &controller, false);
+            return;
+        }
+        self.file_query_in_flight = true;
+        self.file_query_dirty = false;
+        self.file_query_revision = controller.snapshot().revision;
         std::thread::spawn(move || {
             let started = Instant::now();
-            let results = build_file_results(&query, &icon_dir, filter);
+            let results =
+                build_indexed_file_results(&query, &icon_dir, filter, &controller, enabled);
             let elapsed_us = started.elapsed().as_micros();
             send_event(Message::FileSearchReady(
                 generation, query, results, elapsed_us,
@@ -303,7 +353,10 @@ impl State {
             let mut files: Vec<SearchResult> = self
                 .file_results
                 .iter()
-                .filter(|result| result.item.source != "everything-status")
+                .filter(|result| {
+                    result.item.source != "everything-status"
+                        && result.item.source != "file-search-status"
+                })
                 .cloned()
                 .collect();
             if !files.is_empty() {
@@ -317,8 +370,12 @@ impl State {
             && app::actions::direct_path_candidate(&self.query).is_none()
         {
             // 文件模式已把 Everything 命中置顶：再插网页槽位会打散文件列表。
-            let files_mode_has_files =
-                self.files_mode && hits.iter().any(|h| h.item.source == "everything");
+            let files_mode_has_files = self.files_mode
+                && hits.iter().any(|h| {
+                    h.item.source == "everything"
+                        || h.item.source == "file-search"
+                        || h.item.source == "file-search-raw"
+                });
             if !files_mode_has_files {
                 let has_app_like = hits
                     .iter()
@@ -407,6 +464,28 @@ impl State {
         }
 
         let q_norm = search::normalize_for_index(&self.query);
+        if self.files_mode && q_norm.chars().count() < 2 {
+            // File mode is an explicit filename search, not the app launcher's
+            // recent-item dashboard. Keep only the current file-control row
+            // while the index is unavailable; once ready the view can show a
+            // focused “输入文件名关键词” empty state.
+            self.app_search_worker.cancel_current();
+            self.results = self
+                .file_results
+                .iter()
+                .filter(|result| {
+                    result.item.source == "file-search-status"
+                        || result.item.source == "everything-status"
+                })
+                .cloned()
+                .collect();
+            self.grid_recent_count = 0;
+            self.selected = 0;
+            self.navigation_mode = NavigationMode::Input;
+            self.hover_suppressed = false;
+            self.results_stale = false;
+            return;
+        }
         if q_norm.is_empty() && !self.query.trim().is_empty() {
             self.results = self.trigger_result().into_iter().collect();
             self.results_stale = false;
