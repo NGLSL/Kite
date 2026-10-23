@@ -46,7 +46,11 @@ impl Store {
              CREATE TABLE IF NOT EXISTS shadow (
                  page INTEGER PRIMARY KEY,
                  data BLOB
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS counters (
+                 name TEXT PRIMARY KEY,
+                 value INTEGER NOT NULL CHECK(value >= 0)
+             ) WITHOUT ROWID;",
         )?;
         let stored_binding: Option<String> = conn
             .query_row(
@@ -73,7 +77,7 @@ impl Store {
             let nonempty: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM objects) OR EXISTS(SELECT 1 FROM prefixes)
                  OR EXISTS(SELECT 1 FROM shadow) OR EXISTS(SELECT 1 FROM staging)
-                 OR EXISTS(SELECT 1 FROM metadata)",
+                 OR EXISTS(SELECT 1 FROM metadata) OR EXISTS(SELECT 1 FROM counters)",
                 [],
                 |row| row.get(0),
             )?;
@@ -91,6 +95,46 @@ impl Store {
             )?;
             conn.execute_batch("COMMIT")?;
         }
+        // Upgrade an existing bound store once. COUNT traverses the table's
+        // B-tree; periodic status reads must instead use these fixed rows.
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        for name in ["objects", "prefixes"] {
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM counters WHERE name = ?1)",
+                [name],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                let initialize = match name {
+                    "objects" => {
+                        "INSERT INTO counters(name,value) SELECT 'objects',count(*) FROM objects"
+                    }
+                    _ => {
+                        "INSERT INTO counters(name,value) SELECT 'prefixes',count(*) FROM prefixes"
+                    }
+                };
+                conn.execute(initialize, [])?;
+            }
+        }
+        conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS live_objects_insert_count
+             AFTER INSERT ON objects BEGIN
+                 UPDATE counters SET value = value + 1 WHERE name = 'objects';
+             END;
+             CREATE TRIGGER IF NOT EXISTS live_objects_delete_count
+             AFTER DELETE ON objects BEGIN
+                 UPDATE counters SET value = value - 1 WHERE name = 'objects';
+             END;
+             CREATE TRIGGER IF NOT EXISTS live_prefixes_insert_count
+             AFTER INSERT ON prefixes BEGIN
+                 UPDATE counters SET value = value + 1 WHERE name = 'prefixes';
+             END;
+             CREATE TRIGGER IF NOT EXISTS live_prefixes_delete_count
+             AFTER DELETE ON prefixes BEGIN
+                 UPDATE counters SET value = value - 1 WHERE name = 'prefixes';
+             END;
+             COMMIT;",
+        )?;
         // A staged round has no effect until its overlay and cursors commit.
         conn.execute("DELETE FROM staging", [])?;
         let mut store = Self {
@@ -99,6 +143,15 @@ impl Store {
         };
         store.previous_shadow = store.load_shadow(shadow_bytes)?;
         Ok(store)
+    }
+
+    pub fn counts(&self) -> Result<(i64, i64)> {
+        Ok(self.conn.query_row(
+            "SELECT (SELECT value FROM counters WHERE name = 'objects'),
+                    (SELECT value FROM counters WHERE name = 'prefixes')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?)
     }
 
     /// A query connection never initializes schema or discards staged rounds.

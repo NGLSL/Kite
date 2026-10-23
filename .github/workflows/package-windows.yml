@@ -134,6 +134,42 @@ jobs:
             if ((Get-FileHash $serviceHost -Algorithm SHA256).Hash -ne ($manifest.payload | Where-Object path -eq 'kite.exe').sha256) { throw 'Index service host payload mismatch' }
           }
           Assert-Service
+          # Environment preparation is confined to disposable GitHub-hosted runners.
+          # The product itself continues to query existing USN journals read-only.
+          if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'USN preparation requires a disposable GitHub-hosted runner' }
+          $journalPreparation = @()
+          $ntfsVolumes = @(Get-Volume | Where-Object { $_.FileSystemType -eq 'NTFS' -and [string]$_.DriveLetter -match '^[A-Za-z]$' } | Sort-Object DriveLetter)
+          if ($ntfsVolumes.Count -eq 0) { throw 'Runner has no mounted NTFS drive letters' }
+          Write-Host "Runner NTFS drive letters: $(($ntfsVolumes.DriveLetter | ForEach-Object { [string]$_ + ':' }) -join ', ')"
+          $nativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+          try {
+            $PSNativeCommandUseErrorActionPreference = $false
+            foreach ($volume in $ntfsVolumes) {
+              $drive = ([string]$volume.DriveLetter).ToUpperInvariant() + ':'
+              $query = (& fsutil.exe usn queryjournal $drive 2>&1 | Out-String).Trim()
+              $queryExitCode = $LASTEXITCODE
+              $created = $false
+              if ($queryExitCode -ne 0) {
+                if (-not $query.Contains('The volume change journal is not active.', [StringComparison]::OrdinalIgnoreCase)) {
+                  throw "Cannot query runner USN journal on $drive (exit $queryExitCode): $query"
+                }
+                Write-Host "Runner preparation: create inactive USN journal on $drive (maximum 256 MiB, allocation delta 32 MiB)"
+                $creation = (& fsutil.exe usn createjournal m=268435456 a=33554432 $drive 2>&1 | Out-String).Trim()
+                if ($LASTEXITCODE -ne 0) { throw "Cannot create runner USN journal on $drive : $creation" }
+                $created = $true
+              } else {
+                Write-Host "Runner preparation: preserve existing USN journal configuration on $drive"
+              }
+              $verified = (& fsutil.exe usn queryjournal $drive 2>&1 | Out-String).Trim()
+              if ($LASTEXITCODE -ne 0) { throw "Runner USN journal verification failed on $drive : $verified" }
+              $journalPreparation += @{
+                volume = $drive; createdOnDisposableRunner = $created
+                queryBefore = $query; queryAfter = $verified
+              }
+            }
+          } finally {
+            $PSNativeCommandUseErrorActionPreference = $nativeErrorPreference
+          }
           # The installed production controller consumes real NTFS changes.
           $exerciseRoot = Join-Path $env:RUNNER_TEMP ('kite-usn-' + [guid]::NewGuid().ToString('N'))
           $sessionDataDirectory = Join-Path $exerciseRoot 'profile'
@@ -329,6 +365,7 @@ jobs:
               userDataPreserved = $true; payloadHashes = $true; registry = $true
               serviceInstallUpdateUninstall = $true
             }
+            journalPreparation = @{ scope = 'disposable-github-hosted-runner-only'; volumes = $journalPreparation }
             fileSearch = $fileSearchEvidence
             payloadFiles = @($manifest.payload).Count
             limitations = @('Same-version overwrite; cross-version migration and interactive GUI/UAC are not exercised.', 'Real NTFS catch-up, committed-cursor restart and feed rotation/reclamation are exercised; forced crash and disk-full behavior are not exercised.')

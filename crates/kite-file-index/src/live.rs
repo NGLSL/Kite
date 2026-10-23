@@ -1284,16 +1284,7 @@ impl Overlay {
             .iter()
             .map(|value| value.count_ones() as u64)
             .sum::<u64>();
-        let objects: i64 = self
-            .store
-            .conn
-            .query_row("SELECT count(*) FROM objects", [], |row| row.get(0))
-            .unwrap_or(0);
-        let prefixes: i64 = self
-            .store
-            .conn
-            .query_row("SELECT count(*) FROM prefixes", [], |row| row.get(0))
-            .unwrap_or(0);
+        let (objects, prefixes) = self.store.counts().unwrap_or((0, 0));
         json!({"live":!self.journal_stopped,"stale":self.stale.is_some(),"error":self.stale,"last_seq":self.last_seq,"batches":self.batches,"changes":self.changes,"objects":objects,"prefix_mappings":prefixes,"shadowed_entries":shadowed,"overlay_bytes":self.shadowed.len()+8*1024*1024,"rebuild_required":self.stale.is_some(),"error_code":if self.stale.is_some(){Some("NeedsRebuild")}else{None},"journal_stopped":self.journal_stopped,"pending_objects":self.pending_objects,"end_seq":self.end_seq,"last_operation":self.last_operation,"resume_cursors":self.store.cursors().ok().flatten()})
     }
 }
