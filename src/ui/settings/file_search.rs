@@ -141,6 +141,13 @@ pub(super) fn settings_card<'a>(state: &'a State, tokens: ThemeTokens) -> Elemen
             .spacing(6.0)
         } else {
             let phase_actions = match snapshot.phase {
+                crate::file_search::Phase::RetryWaiting => row![ghost_button(
+                    "立即重试".into(),
+                    Message::FileSearchRetry,
+                    false,
+                    tokens,
+                )]
+                .spacing(6.0),
                 crate::file_search::Phase::Error => row![
                     ghost_button("重试连接".into(), Message::FileSearchRetry, false, tokens,),
                     ghost_button("重建索引".into(), Message::FileSearchRebuild, false, tokens),
@@ -262,6 +269,7 @@ pub(super) fn status_label(snapshot: &crate::file_search::Snapshot, enabled: boo
         crate::file_search::Phase::Indexing => "正在建立索引".into(),
         crate::file_search::Phase::CatchingUp => "正在追平变化".into(),
         crate::file_search::Phase::Recovering => "正在恢复".into(),
+        crate::file_search::Phase::RetryWaiting => "等待重试".into(),
         crate::file_search::Phase::Ready => "已就绪".into(),
         crate::file_search::Phase::NeedsAuthorization => "需要授权".into(),
         crate::file_search::Phase::NeedsRebuild => "恢复未完成".into(),

@@ -398,6 +398,62 @@ jobs:
               generationBefore = $resumed.generation_root; generationAfter = $recovered.generation_root
             }
             Stop-FileSession
+            # A real exclusive metadata lock exercises the normal timed reconnect path.
+            $currentManifest = Join-Path $sessionDataDirectory 'file-search\current.json'
+            $metadataLock = [IO.File]::Open($currentManifest, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+            $firstRetry = $null
+            $secondRetry = $null
+            $retryDeadline = [DateTime]::UtcNow.AddSeconds(100)
+            try {
+              Start-FileSession
+              do {
+                $retryState = (Invoke-FileCommand @{ command = 'status' }).state
+                if ($retryState.phase -eq 'retry_waiting') {
+                  if ([long]$retryState.retry_attempt -eq 1 -and $null -eq $firstRetry) {
+                    if ($retryState.retry_delay_secs -ne 30) { throw 'First background retry delay must be 30 seconds' }
+                    $firstRetry = $retryState
+                    $firstRetryObserved = [DateTime]::UtcNow
+                    Write-Host "Background retry: attempt=1 delay=$($retryState.retry_delay_secs) remaining=$($retryState.retry_remaining_secs)"
+                  }
+                  if ([long]$retryState.retry_attempt -eq 2) {
+                    if ($null -eq $firstRetry -or $retryState.retry_delay_secs -ne 60) { throw 'Second background retry must follow the first with a 60-second delay' }
+                    $secondRetry = $retryState
+                    $secondRetryObserved = [DateTime]::UtcNow
+                    Write-Host "Background retry: attempt=2 delay=$($retryState.retry_delay_secs) remaining=$($retryState.retry_remaining_secs)"
+                    break
+                  }
+                } elseif ($retryState.phase -in @('error', 'needs_rebuild', 'needs_authorization', 'stopped', 'ready')) {
+                  throw "Metadata lock did not enter scheduled retry: $($retryState | ConvertTo-Json -Compress -Depth 8)"
+                }
+                Start-Sleep -Seconds 1
+              } while ([DateTime]::UtcNow -lt $retryDeadline)
+              if ($null -eq $secondRetry -or ($secondRetryObserved - $firstRetryObserved).TotalSeconds -lt 25) { throw 'The first scheduled retry was not observed to fail while the real metadata lock remained held' }
+            } finally {
+              $metadataLock.Dispose()
+            }
+            # Releasing the obstruction is the only intervention; no retry/rebuild command is sent.
+            $retryReady = Wait-FileReady 120
+            if ($retryReady.generation_root -ne $recovered.generation_root -or
+                $retryReady.retry_attempt -ne 0 -or $retryReady.retry_delay_secs -ne 0 -or $retryReady.retry_remaining_secs -ne 0) {
+              throw 'Timed reconnect did not reuse the generation and reset retry counters'
+            }
+            Assert-FileHit $oldStem $oldPath $false
+            Assert-FileHit $deletedStem $deletedPath $false
+            Assert-FileHit $newStem $newPath
+            Assert-FileHit $addedStem $addedPath
+            $fileSearchEvidence.backgroundRetry = @{
+              checks = @{ exclusiveMetadataLock = $true; scheduledRetryWhileLocked = $true; lockReleased = $true; readyWithoutManualRetry = $true; sameGenerationReused = $true; countersReset = $true; sentinelsCorrect = $true }
+              phaseWhileLocked = 'retry_waiting'; phaseAfterRelease = $retryReady.phase
+              firstRetryAttempt = $firstRetry.retry_attempt; firstRetryDelaySecs = $firstRetry.retry_delay_secs
+              secondRetryAttempt = $secondRetry.retry_attempt; secondRetryDelaySecs = $secondRetry.retry_delay_secs
+              firstRetryObservedAtUtc = $firstRetryObserved.ToString('o')
+              secondRetryObservedAtUtc = $secondRetryObserved.ToString('o')
+              scheduledRetryElapsedSecs = ($secondRetryObserved - $firstRetryObserved).TotalSeconds
+              generationBefore = $recovered.generation_root; generationAfter = $retryReady.generation_root
+              retryAttemptAfterReady = $retryReady.retry_attempt; retryDelayAfterReadySecs = $retryReady.retry_delay_secs
+              retryRemainingAfterReadySecs = $retryReady.retry_remaining_secs
+            }
+            Stop-FileSession
           } finally {
             if ($null -ne $script:session -and -not $script:session.process.HasExited) {
               $script:session.process.Kill()

@@ -499,7 +499,7 @@ fn file_search_status_action(id: &str) -> Option<&'static str> {
         "kite:file-search:enable" => Some("启用"),
         "kite:file-search:authorize" => Some("授权"),
         "kite:file-search:rebuild" => Some("重试"),
-        "kite:file-search:error" => Some("重试"),
+        "kite:file-search:error" => Some("立即重试"),
         _ => None,
     }
 }

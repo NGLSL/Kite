@@ -70,6 +70,7 @@ pub fn watch_resumable(
     }
 }
 /// Ordinary-rights build into a new generation; caller publishes only on success.
+/// The destination may be absent or an empty ordinary directory owned by the caller.
 pub fn build(
     capture_root: &Path,
     destination: &Path,
@@ -291,7 +292,28 @@ fn build_impl(
     let _guard = crate::cancel::enter(cancel.clone());
     crate::cancel::check()?;
     let capture = CaptureManifest::load(capture_root)?;
-    std::fs::create_dir(destination)?;
+    match std::fs::create_dir(destination) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            use std::os::windows::fs::MetadataExt;
+            // The controller atomically claims a new empty directory before
+            // spawning its builder, so it can clean up interrupted builds.
+            let metadata = std::fs::symlink_metadata(destination)?;
+            if !metadata.is_dir()
+                || metadata.file_attributes() & 0x400 != 0
+                || std::fs::read_dir(destination)?
+                    .next()
+                    .transpose()?
+                    .is_some()
+            {
+                return Err(crate::invalid(
+                    "build destination must be an empty ordinary directory",
+                )
+                .into());
+            }
+        }
+        Err(error) => return Err(error.into()),
+    }
     let root = destination.canonicalize()?;
     let checkpoint = root.join("journal-start.json");
     std::fs::copy(&capture.checkpoint, &checkpoint)?;

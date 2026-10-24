@@ -45,6 +45,8 @@
 
 `installer-validation.json` 绑定具体提交、版本和安装器 SHA-256，记录真实执行结果；`payload-manifest.json` 记录构建负载。静态的 `scripts/test-installer-upgrade.ps1` 是源码契约检查，不能替代实际安装验收。正式发布附带 `kite-setup.exe`、`kite-setup.exe.sha256` 和 `installer-validation.json`；主程序及负载清单仅作为 Actions 内部产物。
 
+后台重试验收继续复用上述隔离 profile，使用真实 Windows 独占文件锁暂时阻止读取已有索引清单，观察第一次 30 秒、第二次 60 秒等待。释放锁后不发送人工重试或重建命令，必须自动恢复为就绪、复用同一索引代际并清零重试计数，查询仍正确。此过程不修改清单内容，实际等待及恢复结果随安装器报告记录。
+
 验收报告必须区分同版本覆盖、旧版本迁移、文件索引功能和人工桌面交互。干净 runner 的静默安装不会验证 UAC 拒绝、多屏、快捷键手感或长期在线稳定性；这些按具体变更记录为单独的人工或专项验收。
 
 ## 完成标准

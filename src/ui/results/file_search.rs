@@ -48,6 +48,13 @@ pub(crate) fn build_indexed_file_results_with_cancel(
     use crate::file_search::Phase;
     match snapshot.phase {
         Phase::Ready => {}
+        Phase::RetryWaiting => {
+            return vec![file_control_result(
+                "kite:file-search:error",
+                "文件索引等待自动重试",
+                &snapshot.detail,
+            )];
+        }
         Phase::NeedsAuthorization => {
             return vec![file_control_result(
                 "kite:file-search:authorize",

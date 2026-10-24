@@ -121,6 +121,20 @@ if (-not $autoRecovery.volume -or -not $autoRecovery.journalId -or
     -not $autoRecovery.generationAfter -or $autoRecovery.generationBefore -eq $autoRecovery.generationAfter) {
     throw "Automatic recovery must prove real same-journal retention loss, unchanged runner journal configuration and a new ready generation."
 }
+$backgroundRetry = $fileSearch.backgroundRetry
+foreach ($check in @("exclusiveMetadataLock", "scheduledRetryWhileLocked", "lockReleased", "readyWithoutManualRetry", "sameGenerationReused", "countersReset", "sentinelsCorrect")) {
+    if ($backgroundRetry.checks.$check -isnot [bool] -or $backgroundRetry.checks.$check -ne $true) {
+        throw "Required timed background reconnect did not pass: $check"
+    }
+}
+if ($backgroundRetry.phaseWhileLocked -ne "retry_waiting" -or $backgroundRetry.phaseAfterRelease -ne "ready" -or
+    $backgroundRetry.firstRetryAttempt -ne 1 -or $backgroundRetry.firstRetryDelaySecs -ne 30 -or
+    $backgroundRetry.secondRetryAttempt -ne 2 -or $backgroundRetry.secondRetryDelaySecs -ne 60 -or
+    [double]$backgroundRetry.scheduledRetryElapsedSecs -lt 25 -or
+    -not $backgroundRetry.generationBefore -or $backgroundRetry.generationBefore -ne $backgroundRetry.generationAfter -or
+    $backgroundRetry.retryAttemptAfterReady -ne 0 -or $backgroundRetry.retryDelayAfterReadySecs -ne 0 -or $backgroundRetry.retryRemainingAfterReadySecs -ne 0) {
+    throw "Timed background reconnect must prove scheduled 30/60-second retries under a real lock, same-generation reuse and reset counters after release."
+}
 $checksumPath = "artifacts/kite-setup.exe.sha256"
 $checksum = (Get-Content -Raw -LiteralPath $checksumPath).Trim()
 if ($checksum -notmatch ('(?i)^' + [regex]::Escape($sha256) + '\s+\*?kite-setup\.exe$')) {
@@ -143,6 +157,7 @@ $automatic = @(
     "- 真实 NTFS 补读：停机期间创建 $($fileSearch.createdSurvivingFiles) 个存活文件，查询变化层实际 $($fileSearch.observedOverlayObjects) 个对象；新增／改名／删除哨兵查询通过"
     "- 分段与恢复：实际生成 $($fileSearch.observedFeedSegments) 个 32 MiB feed 段，确认首段已回收；同一 generation 重启从已提交游标续读"
     "- 自动恢复：一次性 runner 的 $($autoRecovery.volume) 卷保持原 journal 身份和容量配置，通过 $($autoRecovery.realRenameRounds) 轮真实文件改名实际越过旧游标保留范围；普通启动观测到 recovering，自动建成新 generation 并通过哨兵查询，全程没有发送手动重建命令"
+    "- 后台重连：独占锁定现有 current.json，实际观测第 1 次 30 秒、第 2 次 60 秒定时重试；仅释放文件锁后自动就绪，复用同一 generation、计数归零并通过哨兵查询，没有发送手动重试或重建命令"
     "- 产物核对：发布 job 重新计算安装器大小和 SHA-256，与验收报告及校验和文件一致后才上传"
     "- 验收报告：[installer-validation.json](https://github.com/$Repository/releases/download/$Tag/installer-validation.json)"
     "- 验证边界：同版本覆盖不包含旧版本迁移；未验证人工 UAC 拒绝、桌面交互、强制崩溃或磁盘满恢复"
