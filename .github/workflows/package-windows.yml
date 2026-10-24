@@ -348,42 +348,30 @@ jobs:
             if ($journalBefore.journalId.ToString() -ne $savedApplied[0].journal_id -or $journalBefore.nextUsn -lt [long]$savedApplied[0].next_usn) { throw 'Recovery exercise journal identity/cursor mismatch' }
             $originalMaximum = $journalBefore.maximumSize
             $originalDelta = $journalBefore.allocationDelta
-            $recoveryDeadline = [DateTime]::UtcNow.AddMinutes(4)
+            $recoveryDeadline = [DateTime]::UtcNow.AddMinutes(6)
             $bulkPrefix = if ($renamedBulk) { 'bulkB' } else { 'bulkA' }
             $renameRounds = 0
-            $nativeErrorPreference = $PSNativeCommandUseErrorActionPreference
-            try {
-              $PSNativeCommandUseErrorActionPreference = $false
-              $resize = (& fsutil.exe usn createjournal m=1048576 a=1048576 $fileVolume 2>&1 | Out-String).Trim()
-              if ($LASTEXITCODE -ne 0) { throw "Cannot resize disposable recovery journal: $resize" }
-              do {
-                $journalExpired = Get-RunnerJournal $fileVolume
-                if ($journalExpired.journalId -ne $journalBefore.journalId) { throw 'Recovery exercise changed the journal identity' }
-                if ($journalExpired.maximumSize -ne 1048576 -or $journalExpired.allocationDelta -ne 1048576) { throw 'Recovery exercise journal size was not applied' }
-                if ($journalExpired.firstUsn -gt $journalBefore.nextUsn) { break }
-                if ($renameRounds -lt 8) {
-                  $nextPrefix = 'bulkR' + ($renameRounds % 2)
-                  for ($i = 0; $i -lt 70000; $i++) {
-                    [IO.File]::Move((Join-Path $fileRoot ('{0}_{1}_{2:D6}.txt' -f $bulkPrefix, $token, $i)), (Join-Path $fileRoot ('{0}_{1}_{2:D6}.txt' -f $nextPrefix, $token, $i)))
-                  }
-                  $bulkPrefix = $nextPrefix
-                  $renameRounds++
-                  Write-Host "Retention exercise: $renameRounds real rename rounds on $fileVolume"
+            Write-Host "Retention before: volume=$fileVolume First=$($journalBefore.firstUsn) Next=$($journalBefore.nextUsn) Maximum=$originalMaximum Delta=$originalDelta"
+            # Keep the existing journal configuration; expire records through real file renames.
+            do {
+              $journalExpired = Get-RunnerJournal $fileVolume
+              Write-Host "Retention progress: rounds=$renameRounds First=$($journalExpired.firstUsn) Next=$($journalExpired.nextUsn) Maximum=$($journalExpired.maximumSize) Delta=$($journalExpired.allocationDelta)"
+              if ($journalExpired.journalId -ne $journalBefore.journalId -or $journalExpired.maximumSize -ne $originalMaximum -or $journalExpired.allocationDelta -ne $originalDelta) { throw 'Recovery exercise journal identity or configuration changed' }
+              if ($journalExpired.firstUsn -gt $journalBefore.nextUsn) { break }
+              if ([DateTime]::UtcNow -ge $recoveryDeadline) { break }
+              if ($renameRounds -lt 24) {
+                $nextPrefix = 'bulkR' + ($renameRounds % 2)
+                for ($i = 0; $i -lt 70000; $i++) {
+                  if ($i % 5000 -eq 0 -and [DateTime]::UtcNow -ge $recoveryDeadline) { throw "Retention exercise exceeded six minutes during round $($renameRounds + 1)" }
+                  [IO.File]::Move((Join-Path $fileRoot ('{0}_{1}_{2:D6}.txt' -f $bulkPrefix, $token, $i)), (Join-Path $fileRoot ('{0}_{1}_{2:D6}.txt' -f $nextPrefix, $token, $i)))
                 }
-                Start-Sleep -Seconds 3
-              } while ([DateTime]::UtcNow -lt $recoveryDeadline)
-              if ($journalExpired.firstUsn -le $journalBefore.nextUsn) { throw 'Real journal retention did not advance past the stopped cursor upper bound' }
-            } finally {
-              try {
-                $PSNativeCommandUseErrorActionPreference = $false
-                $restore = (& fsutil.exe usn createjournal "m=$originalMaximum" "a=$originalDelta" $fileVolume 2>&1 | Out-String).Trim()
-                if ($LASTEXITCODE -ne 0) { throw "Cannot restore disposable runner journal configuration: $restore" }
-                $journalRestored = Get-RunnerJournal $fileVolume
-                if ($journalRestored.journalId -ne $journalBefore.journalId -or $journalRestored.maximumSize -ne $originalMaximum -or $journalRestored.allocationDelta -ne $originalDelta) { throw 'Runner journal restoration verification failed' }
-              } finally {
-                $PSNativeCommandUseErrorActionPreference = $nativeErrorPreference
+                $bulkPrefix = $nextPrefix
+                $renameRounds++
               }
-            }
+              Start-Sleep -Seconds 3
+            } while ($true)
+            Write-Host "Retention after: rounds=$renameRounds First=$($journalExpired.firstUsn) Next=$($journalExpired.nextUsn) Maximum=$($journalExpired.maximumSize) Delta=$($journalExpired.allocationDelta)"
+            if ($journalExpired.firstUsn -le $journalBefore.nextUsn) { throw 'Real journal retention did not advance past the stopped cursor upper bound within six minutes and 24 rename rounds' }
             $script:observedFilePhases.Clear()
             Start-FileSession
             $recovered = Wait-FileReady
@@ -393,15 +381,16 @@ jobs:
             Assert-FileHit $newStem $newPath
             Assert-FileHit $addedStem $addedPath
             $fileSearchEvidence.autoRecovery = @{
-              checks = @{ sameJournalRetentionLoss = $true; observedRecovering = $true; readyWithoutManualRebuild = $true; newGenerationPublished = $true; sentinelsCorrect = $true; journalConfigurationRestored = $true }
+              checks = @{ sameJournalRetentionLoss = $true; observedRecovering = $true; readyWithoutManualRebuild = $true; newGenerationPublished = $true; sentinelsCorrect = $true; journalConfigurationPreserved = $true }
               volume = $fileVolume; journalId = $journalBefore.journalId.ToString()
               journalIdAfterRetentionLoss = $journalExpired.journalId.ToString()
-              journalIdAfterRestore = $journalRestored.journalId.ToString()
               savedAppliedCursor = [string]$savedApplied[0].next_usn
               stoppedCursorUpperBound = $journalBefore.nextUsn.ToString()
               firstUsnAfterRetentionLoss = $journalExpired.firstUsn.ToString()
+              firstUsnBeforeRetentionLoss = $journalBefore.firstUsn.ToString()
+              nextUsnAfterRetentionLoss = $journalExpired.nextUsn.ToString()
               originalMaximumSize = $originalMaximum; originalAllocationDelta = $originalDelta
-              restoredMaximumSize = $journalRestored.maximumSize; restoredAllocationDelta = $journalRestored.allocationDelta
+              afterMaximumSize = $journalExpired.maximumSize; afterAllocationDelta = $journalExpired.allocationDelta
               realRenameRounds = $renameRounds
               automaticRebuild = $recovered.automatic_rebuild
               recoveryReason = $recovered.recovery_reason
