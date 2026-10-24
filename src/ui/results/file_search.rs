@@ -58,20 +58,25 @@ pub(crate) fn build_indexed_file_results_with_cancel(
         Phase::NeedsRebuild => {
             return vec![file_control_result(
                 "kite:file-search:rebuild",
-                "需要重建文件索引",
-                "索引已过期，点击重建即可恢复文件搜索",
+                "文件索引恢复未完成",
+                &format!("{}；点击重试恢复", snapshot.detail),
             )];
         }
-        Phase::Starting | Phase::Indexing | Phase::CatchingUp => {
+        Phase::Starting | Phase::Indexing | Phase::CatchingUp | Phase::Recovering => {
+            let activity = if snapshot.phase == Phase::Recovering {
+                "正在恢复文件索引"
+            } else {
+                "正在建立文件索引"
+            };
             let detail = if snapshot.detail.trim().is_empty() {
-                "正在建立文件索引，请稍候…".to_string()
+                format!("{activity}，请稍候…")
             } else {
                 snapshot.detail.clone()
             };
             let title = if snapshot.entries > 0 {
-                format!("正在建立文件索引 · {} 条", snapshot.entries)
+                format!("{activity} · {} 条", snapshot.entries)
             } else {
-                "正在建立文件索引".to_string()
+                activity.to_string()
             };
             return vec![file_control_result(
                 "kite:file-search:progress",
@@ -88,7 +93,7 @@ pub(crate) fn build_indexed_file_results_with_cancel(
             return vec![file_control_result(
                 "kite:file-search:error",
                 "文件索引暂不可用",
-                &format!("{detail}；点击重试，不会自动重建整个索引"),
+                &format!("{detail}；检查原因后点击重试"),
             )];
         }
         Phase::Stopped => {

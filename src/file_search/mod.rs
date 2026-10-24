@@ -74,6 +74,7 @@ pub enum Phase {
     Starting,
     Indexing,
     CatchingUp,
+    Recovering,
     Ready,
     NeedsAuthorization,
     NeedsRebuild,
@@ -109,6 +110,7 @@ struct SearchRequest {
 
 struct Running {
     cancel: Arc<AtomicBool>,
+    attempt_cancel: Arc<Mutex<Option<kite_file_index::CancelToken>>>,
     service: Arc<Mutex<Option<CancelHandle>>>,
     requests: mpsc::Sender<SearchRequest>,
     done: Arc<AtomicBool>,
@@ -209,6 +211,8 @@ impl Controller {
         let id = self.shared.active.fetch_add(1, Ordering::AcqRel) + 1;
         self.shared.set_diagnostics(id, serde_json::json!({}));
         let cancel = Arc::new(AtomicBool::new(false));
+        let attempt_cancel = Arc::new(Mutex::new(None));
+        let attempt_slot = Arc::clone(&attempt_cancel);
         let service = Arc::new(Mutex::new(None));
         let done = Arc::new(AtomicBool::new(false));
         let (requests, receiver) = mpsc::channel();
@@ -233,6 +237,7 @@ impl Controller {
                     allow_install,
                     Arc::clone(&token),
                     &service_handle,
+                    &attempt_slot,
                     receiver,
                 );
                 if let Err((phase, error)) = result {
@@ -253,6 +258,7 @@ impl Controller {
         });
         *slot = Some(Running {
             cancel,
+            attempt_cancel,
             service,
             requests,
             done,
@@ -364,6 +370,14 @@ impl Drop for Controller {
 
 fn cancel_running(run: &Running) {
     run.cancel.store(true, Ordering::Release);
+    if let Some(cancel) = run
+        .attempt_cancel
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+    {
+        cancel.store(true, Ordering::Release);
+    }
     if let Some(handle) = run
         .service
         .lock()
@@ -414,7 +428,7 @@ impl Shared {
         }
     }
 
-    fn progress(&self, id: u64, event: Value) {
+    fn progress(&self, id: u64, event: Value, recovering: bool) {
         let volume = event.get("volume").and_then(Value::as_str).unwrap_or("");
         let (phase, detail) = match event.get("stage").and_then(Value::as_str) {
             Some("capturing" | "capturing-fast-records") => {
@@ -429,6 +443,11 @@ impl Shared {
             Some("built") => (Phase::CatchingUp, "正在同步建库期间的文件变化".into()),
             _ => return,
         };
+        let (phase, detail) = if recovering {
+            (Phase::Recovering, format!("正在恢复文件索引：{detail}"))
+        } else {
+            (phase, detail)
+        };
         self.update(
             id,
             phase,
@@ -438,15 +457,17 @@ impl Shared {
     }
 }
 
-type RunResult<T> = Result<T, (Phase, String)>;
+type RunFailure = (Phase, String);
+type RunResult<T> = Result<T, RunFailure>;
 
 fn service_error(error: ServiceError) -> (Phase, String) {
     let phase = match error.kind {
         ErrorKind::NeedsInstall
         | ErrorKind::NotInstalled
         | ErrorKind::PathMismatch
-        | ErrorKind::AccessDenied
-        | ErrorKind::Cancelled => Phase::NeedsAuthorization,
+        | ErrorKind::AccessDenied => Phase::NeedsAuthorization,
+        ErrorKind::Cancelled => Phase::Stopped,
+        ErrorKind::NeedsRebuild => Phase::NeedsRebuild,
         _ => Phase::Error,
     };
     (phase, error.to_string())
@@ -460,8 +481,99 @@ fn run(
     allow_install: bool,
     cancel: Arc<AtomicBool>,
     service_handle: &Arc<Mutex<Option<CancelHandle>>>,
+    attempt_slot: &Arc<Mutex<Option<kite_file_index::CancelToken>>>,
     requests: mpsc::Receiver<SearchRequest>,
 ) -> RunResult<()> {
+    let mut force_rebuild = rebuild;
+    let mut recovery_reason = None::<String>;
+    loop {
+        check_cancel(&cancel)?;
+        let attempt_cancel = Arc::new(AtomicBool::new(false));
+        {
+            let mut slot = attempt_slot
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            *slot = Some(attempt_cancel.clone());
+            // stop() may have run between the initial check and token install.
+            if cancel.load(Ordering::Acquire) {
+                attempt_cancel.store(true, Ordering::Release);
+            }
+        }
+        let outcome = run_attempt(
+            shared,
+            id,
+            root,
+            force_rebuild,
+            allow_install,
+            Arc::clone(&cancel),
+            attempt_cancel.clone(),
+            service_handle,
+            &requests,
+            recovery_reason.as_deref(),
+        );
+        attempt_cancel.store(true, Ordering::Release);
+        if let Some(handle) = service_handle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            let _ = handle.cancel();
+        }
+        attempt_slot
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        check_cancel(&cancel)?;
+        match outcome {
+            Err((Phase::NeedsRebuild, reason)) if recovery_reason.is_none() => {
+                crate::log::info(&format!("file index automatic recovery: {reason}"));
+                let mut diagnostic = shared
+                    .diagnostics
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+                diagnostic["automatic_rebuild"] = Value::Bool(true);
+                diagnostic["recovery_reason"] = Value::String(reason.clone());
+                shared.set_diagnostics(id, diagnostic);
+                shared.update(
+                    id,
+                    Phase::Recovering,
+                    "正在恢复文件索引：正在重新建立索引",
+                    None,
+                );
+                while let Ok(request) = requests.try_recv() {
+                    let _ = request
+                        .response
+                        .send(Err("正在恢复文件索引，请稍后重试".into()));
+                }
+                force_rebuild = true;
+                recovery_reason = Some(reason);
+            }
+            Err((Phase::NeedsRebuild, reason)) => {
+                return Err((
+                    Phase::NeedsRebuild,
+                    format!("自动恢复未完成，请稍后重试：{reason}"),
+                ))
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
+fn run_attempt(
+    shared: &Arc<Shared>,
+    id: u64,
+    root: &Path,
+    rebuild: bool,
+    allow_install: bool,
+    user_cancel: Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
+    service_handle: &Arc<Mutex<Option<CancelHandle>>>,
+    requests: &mpsc::Receiver<SearchRequest>,
+    recovery_reason: Option<&str>,
+) -> RunResult<()> {
+    check_cancel(&cancel)?;
+    let recovering = recovery_reason.is_some();
     let state = kite_index_service::current_state().map_err(service_error)?;
     if matches!(state, ServiceState::Missing | ServiceState::PathMismatch) {
         if !allow_install {
@@ -472,8 +584,16 @@ fn run(
         }
         shared.update(
             id,
-            Phase::Starting,
-            "请在 Windows 授权窗口中确认安装索引组件",
+            if recovering {
+                Phase::Recovering
+            } else {
+                Phase::Starting
+            },
+            if recovering {
+                "正在恢复文件索引：请确认安装索引组件"
+            } else {
+                "请在 Windows 授权窗口中确认安装索引组件"
+            },
             None,
         );
         kite_index_service::request_install().map_err(service_error)?;
@@ -485,8 +605,16 @@ fn run(
             // Only the user's explicit authorization may replace that image.
             shared.update(
                 id,
-                Phase::Starting,
-                "请在 Windows 授权窗口中确认更新索引组件",
+                if recovering {
+                    Phase::Recovering
+                } else {
+                    Phase::Starting
+                },
+                if recovering {
+                    "正在恢复文件索引：请确认更新索引组件"
+                } else {
+                    "请在 Windows 授权窗口中确认更新索引组件"
+                },
                 None,
             );
             kite_index_service::request_install().map_err(service_error)?;
@@ -499,7 +627,7 @@ fn run(
     let acknowledge_handle = client.cancel_handle();
     check_cancel(&cancel)?;
     let progress_shared = Arc::clone(shared);
-    let progress = move |event: Value| progress_shared.progress(id, event);
+    let progress = move |event: Value| progress_shared.progress(id, event, recovering);
     let existing = if rebuild { None } else { load_current(root)? };
     let (generation, mut watch, new_generation, protected_checkpoint, loaded_resume_cursors) =
         if let Some((generation, checkpoint)) = existing {
@@ -509,15 +637,27 @@ fn run(
                 "正在补齐退出期间的文件变化",
                 Some(generation.entries),
             );
-            let resume = LiveSearch::resume_cursors(&generation)
-                .map_err(|error| (Phase::NeedsRebuild, format!("索引需要重建：{error}")))?;
+            let resume = LiveSearch::resume_cursors(&generation).map_err(kernel_error)?;
             let loaded_resume_cursors = resume.clone().unwrap_or(Value::Null);
             let watch = client
                 .watch_path_from(&checkpoint, resume, None)
                 .map_err(checkpoint_error)?;
             (generation, watch, false, checkpoint, loaded_resume_cursors)
         } else {
-            shared.update(id, Phase::Indexing, "正在读取本机 NTFS 磁盘的文件名", None);
+            shared.update(
+                id,
+                if recovering {
+                    Phase::Recovering
+                } else {
+                    Phase::Indexing
+                },
+                if recovering {
+                    "正在恢复文件索引：正在读取文件名"
+                } else {
+                    "正在读取本机 NTFS 磁盘的文件名"
+                },
+                None,
+            );
             let capture = client
                 .capture(&[], Some(&progress))
                 .map_err(service_error)?;
@@ -540,49 +680,45 @@ fn run(
         };
     check_cancel(&cancel)?;
     let feed = watch.feed_path().to_path_buf();
-    let watch_error = Arc::new(Mutex::new(None::<String>));
+    let watch_error = Arc::new(Mutex::new(None::<RunFailure>));
     let error_slot = Arc::clone(&watch_error);
     let watch_cancel = Arc::clone(&cancel);
-    let watch_shared = Arc::clone(shared);
+    let watch_user_cancel = Arc::clone(&user_cancel);
     let watch_worker = thread::spawn(move || {
         loop {
-            match watch.next(None) {
-                Ok(true) => {}
-                Ok(false) => {
-                    if !watch_cancel.load(Ordering::Acquire) {
-                        let message = "后台读取已停止，请重新启用文件搜索";
-                        *error_slot.lock().unwrap_or_else(|e| e.into_inner()) =
-                            Some(message.into());
-                        watch_shared.update(id, Phase::Error, message, None);
-                        watch_cancel.store(true, Ordering::Release);
-                    }
-                    break;
-                }
-                Err(error) => {
-                    if !watch_cancel.load(Ordering::Acquire) {
-                        let message = error.to_string();
-                        *error_slot.lock().unwrap_or_else(|e| e.into_inner()) =
-                            Some(message.clone());
-                        watch_shared.update(
-                            id,
-                            Phase::NeedsRebuild,
-                            &format!("同步已停止：{message}"),
-                            None,
-                        );
-                        // Also interrupt LiveSearch::open if failure happened
-                        // before its initial catch-up barrier was emitted.
-                        watch_cancel.store(true, Ordering::Release);
-                    }
-                    break;
-                }
+            if watch_cancel.load(Ordering::Acquire) || watch_user_cancel.load(Ordering::Acquire) {
+                break;
             }
+            let failure = match watch.next(None) {
+                Ok(true) => continue,
+                Ok(false) => (Phase::Error, "后台读取已停止，请重新启用文件搜索".into()),
+                Err(error) => service_error(error),
+            };
+            if !watch_cancel.load(Ordering::Acquire) && !watch_user_cancel.load(Ordering::Acquire) {
+                error_slot
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .get_or_insert(failure);
+                // Interrupt this attempt's bootstrap/build without cancelling
+                // the user's enabled operation or its one recovery allowance.
+                watch_cancel.store(true, Ordering::Release);
+            }
+            break;
         }
     });
     let outcome = (|| {
         shared.update(
             id,
-            Phase::CatchingUp,
-            "正在同步最新变化",
+            if recovering {
+                Phase::Recovering
+            } else {
+                Phase::CatchingUp
+            },
+            if recovering {
+                "正在恢复文件索引：正在同步最新变化"
+            } else {
+                "正在同步最新变化"
+            },
             Some(generation.entries),
         );
         let acknowledge = Arc::new(move |seq| {
@@ -594,9 +730,11 @@ fn run(
             Arc::clone(&cancel),
             acknowledge,
         )
-        .map_err(|error| (Phase::NeedsRebuild, format!("索引需要重建：{error}")))?;
-        check_cancel(&cancel)?;
+        .map_err(|error| watch_failure(&watch_error).unwrap_or_else(|| kernel_error(error)))?;
+        // The watcher cause is authoritative when its cancellation interrupts
+        // LiveSearch::open; do not replace it with an Interrupted fallback.
         live_health(&engine.status(), &watch_error)?;
+        check_cancel(&cancel)?;
         if new_generation {
             publish_current(root, &generation, &protected_checkpoint)?;
         }
@@ -607,6 +745,8 @@ fn run(
                 "protected_checkpoint":protected_checkpoint.to_string_lossy(),
                 "feed_path":feed.to_string_lossy(),
                 "loaded_resume_cursors":loaded_resume_cursors,
+                "automatic_rebuild":recovering,
+                "recovery_reason":recovery_reason,
                 "live":engine.status(),
             }),
         );
@@ -626,6 +766,8 @@ fn run(
                     "protected_checkpoint":protected_checkpoint.to_string_lossy(),
                     "feed_path":feed.to_string_lossy(),
                     "loaded_resume_cursors":loaded_resume_cursors,
+                    "automatic_rebuild":recovering,
+                    "recovery_reason":recovery_reason,
                     "live":state,
                 }),
             );
@@ -675,13 +817,19 @@ fn run(
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
+        if let Some(failure) = watch_failure(&watch_error) {
+            return Err(failure);
+        }
+        check_cancel(&cancel)?;
         Ok(())
     })();
-    // Explicit cancel also covers failure before Ready. Join before this worker exits.
+    // Every attempt releases its engine/client and joins its watcher before
+    // the outer loop may establish the replacement metadata session.
+    cancel.store(true, Ordering::Release);
     if let Some(handle) = service_handle
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
+        .take()
     {
         let _ = handle.cancel();
     }
@@ -689,22 +837,51 @@ fn run(
     outcome
 }
 
-fn live_health(state: &Value, watch_error: &Mutex<Option<String>>) -> RunResult<()> {
-    if state["stale"] == true || state["rebuild_required"] == true {
+fn watch_failure(watch_error: &Mutex<Option<RunFailure>>) -> Option<RunFailure> {
+    watch_error
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+}
+
+fn live_health(state: &Value, watch_error: &Mutex<Option<RunFailure>>) -> RunResult<()> {
+    if let Some(failure) = watch_failure(watch_error) {
+        return Err(failure);
+    }
+    if state["rebuild_required"] == true || state["error_code"] == "NeedsRebuild" {
         let detail = state["error"].as_str().unwrap_or("变更日志已失效");
         return Err((Phase::NeedsRebuild, format!("索引需要重建：{detail}")));
     }
-    if let Some(error) = watch_error
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-    {
-        return Err((Phase::Error, error));
+    if state["stale"] == true {
+        return Err((
+            Phase::Error,
+            state["error"]
+                .as_str()
+                .unwrap_or("文件同步已停止")
+                .to_owned(),
+        ));
     }
     if state["journal_stopped"] == true {
         return Err((Phase::Error, "后台同步已停止，点击重新连接".into()));
     }
     Ok(())
+}
+
+fn kernel_error(error: Box<dyn std::error::Error + Send + Sync>) -> RunFailure {
+    let phase = if error
+        .downcast_ref::<kite_file_index::NeedsRebuild>()
+        .is_some()
+    {
+        Phase::NeedsRebuild
+    } else if error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::Interrupted)
+    {
+        Phase::Stopped
+    } else {
+        Phase::Error
+    };
+    (phase, error.to_string())
 }
 
 fn check_cancel(cancel: &AtomicBool) -> RunResult<()> {
@@ -719,18 +896,8 @@ fn io_error(error: std::io::Error) -> (Phase, String) {
     (Phase::Error, error.to_string())
 }
 
-fn checkpoint_error(error: ServiceError) -> (Phase, String) {
-    if matches!(
-        error.kind,
-        ErrorKind::PathMismatch | ErrorKind::InvalidRequest | ErrorKind::Backend
-    ) {
-        (
-            Phase::NeedsRebuild,
-            format!("索引起点已失效，请重建：{error}"),
-        )
-    } else {
-        service_error(error)
-    }
+fn checkpoint_error(error: ServiceError) -> RunFailure {
+    service_error(error)
 }
 
 fn load_current(root: &Path) -> RunResult<Option<(Generation, PathBuf)>> {
@@ -742,21 +909,90 @@ fn load_current(root: &Path) -> RunResult<Option<(Generation, PathBuf)>> {
     };
     let manifest: CurrentGeneration = serde_json::from_reader(file).map_err(|error| {
         (
-            Phase::NeedsRebuild,
-            format!("索引清单损坏，请重建：{error}"),
+            if error.is_io() {
+                Phase::Error
+            } else {
+                Phase::NeedsRebuild
+            },
+            format!("索引清单读取失败：{error}"),
         )
     })?;
     if !generation_name(&manifest.generation) {
         return Err((Phase::NeedsRebuild, "索引清单路径无效，请重建".into()));
     }
-    Generation::load(&root.join("generations").join(manifest.generation))
-        .map(|generation| Some((generation, manifest.protected_checkpoint)))
+    let generation = Generation::load(&root.join("generations").join(manifest.generation))
         .map_err(|error| {
+            let invalid = error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidData
+                )
+            }) || error
+                .downcast_ref::<serde_json::Error>()
+                .is_some_and(|error| !error.is_io());
             (
-                Phase::NeedsRebuild,
-                format!("索引文件不完整，请重建：{error}"),
+                if invalid {
+                    Phase::NeedsRebuild
+                } else {
+                    Phase::Error
+                },
+                format!("索引文件读取失败：{error}"),
             )
-        })
+        })?;
+    // Generation::load has validated these fixed paths against its root.
+    // Check existence without converting permission/device errors into a scan.
+    for path in [
+        &generation.snapshot,
+        &generation.index,
+        &generation.identities,
+        &generation.checkpoint,
+    ] {
+        match fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => {
+                return Err((
+                    Phase::NeedsRebuild,
+                    format!("索引文件无效：{}", path.display()),
+                ))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err((
+                    Phase::NeedsRebuild,
+                    format!("索引文件缺失：{}", path.display()),
+                ))
+            }
+            Err(error) => return Err(io_error(error)),
+        }
+    }
+    let provenance = [
+        PathBuf::from(format!(
+            "{}.provenance.json",
+            generation.identities.display()
+        )),
+        generation.identities.with_extension("provenance.json"),
+    ];
+    let mut found = false;
+    let mut metadata_error = None;
+    for path in provenance {
+        match fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => {
+                found = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                metadata_error.get_or_insert(error);
+            }
+        }
+    }
+    if !found {
+        if let Some(error) = metadata_error {
+            return Err(io_error(error));
+        }
+        return Err((Phase::NeedsRebuild, "索引身份来源文件缺失或无效".into()));
+    }
+    Ok(Some((generation, manifest.protected_checkpoint)))
 }
 
 fn generation_name(name: &str) -> bool {

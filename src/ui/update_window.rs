@@ -84,6 +84,7 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
             if !state.hide_on_blur || state.settings_open || state.any_tool_open() {
                 return Task::none();
             }
+            // Automatic recovery stays in the background and permits normal hiding.
             let file_search_busy = state.file_search_confirm_open
                 || matches!(
                     state.file_search_controller.snapshot().phase,

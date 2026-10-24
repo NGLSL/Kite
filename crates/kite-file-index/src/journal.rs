@@ -372,7 +372,17 @@ fn poll(
         input[32..40].copy_from_slice(&volume.journal.to_le_bytes());
         input[40..42].copy_from_slice(&2u16.to_le_bytes());
         input[42..44].copy_from_slice(&2u16.to_le_bytes());
-        let n = ioctl(&volume.handle, 0x0009_00bb, &input, buffer)?;
+        let n = match ioctl(&volume.handle, 0x0009_00bb, &input, buffer) {
+            // Retention can advance after validate_journal and before READ.
+            Err(error) if error.raw_os_error() == Some(1181) => {
+                return Err(crate::NeedsRebuild(format!(
+                    "{} journal records expired while reading",
+                    volume.root
+                ))
+                .into());
+            }
+            result => result?,
+        };
         if n < 8 {
             return Err(invalid("short READ_USN_JOURNAL output").into());
         }

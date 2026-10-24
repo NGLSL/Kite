@@ -156,8 +156,9 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 crate::file_search::Phase::Starting
                     | crate::file_search::Phase::Indexing
                     | crate::file_search::Phase::CatchingUp
+                    | crate::file_search::Phase::Recovering
             ) {
-                return flash(state, "文件索引正在建立，请等待当前任务完成");
+                return flash(state, "文件索引正在更新，请等待当前任务完成");
             }
             state.file_search_controller.start(false);
             if state.files_mode {
@@ -177,8 +178,9 @@ pub(super) fn handle(state: &mut State, message: Message) -> Task<Message> {
                 crate::file_search::Phase::Starting
                     | crate::file_search::Phase::Indexing
                     | crate::file_search::Phase::CatchingUp
+                    | crate::file_search::Phase::Recovering
             ) {
-                return flash(state, "文件索引正在建立，请等待当前任务完成");
+                return flash(state, "文件索引正在更新，请等待当前任务完成");
             }
             state.file_search_controller.rebuild(false);
             state.invalidate_file_search();

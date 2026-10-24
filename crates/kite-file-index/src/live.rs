@@ -573,6 +573,30 @@ struct ObjectState {
     paths: Vec<Vec<u16>>,
 }
 
+#[derive(Clone)]
+struct LiveFailure {
+    reason: String,
+    needs_rebuild: bool,
+}
+
+impl LiveFailure {
+    fn error_code(&self) -> &'static str {
+        if self.needs_rebuild {
+            "NeedsRebuild"
+        } else {
+            "LiveFeedFailed"
+        }
+    }
+
+    fn into_error(self) -> Box<dyn std::error::Error + Send + Sync> {
+        if self.needs_rebuild {
+            crate::NeedsRebuild(self.reason).into()
+        } else {
+            self.reason.into()
+        }
+    }
+}
+
 struct Overlay {
     snapshot_path: PathBuf,
     snapshot: File,
@@ -590,7 +614,7 @@ struct Overlay {
     last_seq: u64,
     batches: u64,
     changes: u64,
-    stale: Option<String>,
+    stale: Option<LiveFailure>,
     journal_stopped: bool,
     pending_objects: u64,
     end_seq: Option<u64>,
@@ -663,8 +687,14 @@ impl Overlay {
         self.identities.release_startup_cache();
     }
     fn mark_stale(&mut self, reason: impl Into<String>) {
+        self.mark_failure(reason, false);
+    }
+    fn mark_failure(&mut self, reason: impl Into<String>, needs_rebuild: bool) {
         if self.stale.is_none() {
-            self.stale = Some(reason.into());
+            self.stale = Some(LiveFailure {
+                reason: reason.into(),
+                needs_rebuild,
+            });
         }
     }
     fn shadow_range(&mut self, records: &[IdentityRecord]) {
@@ -1285,7 +1315,7 @@ impl Overlay {
             .map(|value| value.count_ones() as u64)
             .sum::<u64>();
         let (objects, prefixes) = self.store.counts().unwrap_or((0, 0));
-        json!({"live":!self.journal_stopped,"stale":self.stale.is_some(),"error":self.stale,"last_seq":self.last_seq,"batches":self.batches,"changes":self.changes,"objects":objects,"prefix_mappings":prefixes,"shadowed_entries":shadowed,"overlay_bytes":self.shadowed.len()+8*1024*1024,"rebuild_required":self.stale.is_some(),"error_code":if self.stale.is_some(){Some("NeedsRebuild")}else{None},"journal_stopped":self.journal_stopped,"pending_objects":self.pending_objects,"end_seq":self.end_seq,"last_operation":self.last_operation,"resume_cursors":self.store.cursors().ok().flatten()})
+        json!({"live":!self.journal_stopped,"stale":self.stale.is_some(),"error":self.stale.as_ref().map(|failure| &failure.reason),"last_seq":self.last_seq,"batches":self.batches,"changes":self.changes,"objects":objects,"prefix_mappings":prefixes,"shadowed_entries":shadowed,"overlay_bytes":self.shadowed.len()+8*1024*1024,"rebuild_required":self.stale.as_ref().is_some_and(|failure| failure.needs_rebuild),"error_code":self.stale.as_ref().map(LiveFailure::error_code),"journal_stopped":self.journal_stopped,"pending_objects":self.pending_objects,"end_seq":self.end_seq,"last_operation":self.last_operation,"resume_cursors":self.store.cursors().ok().flatten()})
     }
 }
 
@@ -1355,9 +1385,9 @@ fn live_query_inner(
         .and_then(Value::as_str)
         .ok_or_else(|| invalid("query must be a string"))?;
     let limit = parse_limit(value)?;
-    if let Some(reason) = &overlay.stale {
+    if let Some(failure) = &overlay.stale {
         return Ok(
-            json!({"error":"live feed stale","error_code":"NeedsRebuild","stale":true,"reason":reason}),
+            json!({"error":"live feed stale","error_code":failure.error_code(),"stale":true,"reason":failure.reason}),
         );
     }
     if !exact_total {
@@ -1839,7 +1869,8 @@ fn tail_feed(
                             .get("error")
                             .and_then(Value::as_str)
                             .unwrap_or("live feed error");
-                        state.mark_stale(reason.to_owned());
+                        state
+                            .mark_failure(reason.to_owned(), value["error_code"] == "NeedsRebuild");
                     }
                     break;
                 } else if kind == Some("end") {
@@ -1945,8 +1976,11 @@ impl LiveSearch {
     /// Recovery cursors belong to a fully committed overlay for this exact base.
     pub fn resume_cursors(generation: &crate::Generation) -> Result<Option<Value>> {
         let database = generation.root.join("live-state.sqlite");
-        if !database.is_file() {
-            return Ok(None);
+        match database.metadata() {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => return Err(invalid("live overlay database is not a file").into()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
         }
         let file = File::open(&generation.snapshot)?;
         let bytes = file.metadata()?.len();
@@ -2101,10 +2135,11 @@ impl LiveSearch {
                     return Err(invalid("live overlay lock poisoned during bootstrap").into());
                 }
             };
-            if let Some(reason) = stale {
+            if let Some(mut failure) = stale {
                 stop.store(true, Ordering::Release);
                 let _ = worker.join();
-                return Err(format!("live feed bootstrap failed: {reason}").into());
+                failure.reason = format!("live feed bootstrap failed: {}", failure.reason);
+                return Err(failure.into_error());
             }
             if bootstrap_done.load(Ordering::Acquire) {
                 break;
@@ -2117,17 +2152,23 @@ impl LiveSearch {
             .map(|state| {
                 state.stale.clone().or_else(|| {
                     if state.journal_stopped && !allow_recorded_end {
-                        Some("metadata reader stopped before live Ready".into())
+                        Some(LiveFailure {
+                            reason: "metadata reader stopped before live Ready".into(),
+                            needs_rebuild: false,
+                        })
                     } else {
                         None
                     }
                 })
             })
-            .unwrap_or(Some("overlay lock poisoned".into()));
+            .unwrap_or(Some(LiveFailure {
+                reason: "overlay lock poisoned".into(),
+                needs_rebuild: false,
+            }));
         if let Some(error) = ready_error {
             stop.store(true, Ordering::Release);
             let _ = worker.join();
-            return Err(error.into());
+            return Err(error.into_error());
         }
         match shared.lock() {
             Ok(mut state) => state.release_startup_caches(),
@@ -2179,16 +2220,27 @@ impl LiveSearch {
                 self.query_overlay.journal_stopped = state.journal_stopped;
                 let mut cache = self.status_cache.borrow_mut();
                 cache["stale"] = json!(state.stale.is_some());
-                cache["error"] = json!(state.stale);
+                cache["error"] = json!(state.stale.as_ref().map(|failure| &failure.reason));
+                cache["error_code"] = json!(state.stale.as_ref().map(LiveFailure::error_code));
+                cache["rebuild_required"] = json!(state
+                    .stale
+                    .as_ref()
+                    .is_some_and(|failure| failure.needs_rebuild));
                 cache["journal_stopped"] = json!(state.journal_stopped);
             }
             Err(std::sync::TryLockError::WouldBlock) => {
                 let cache = self.status_cache.borrow();
-                self.query_overlay.stale = cache["error"].as_str().map(str::to_owned);
+                self.query_overlay.stale = cache["error"].as_str().map(|reason| LiveFailure {
+                    reason: reason.into(),
+                    needs_rebuild: cache["error_code"] == "NeedsRebuild",
+                });
                 self.query_overlay.journal_stopped = cache["journal_stopped"] == true;
             }
             Err(std::sync::TryLockError::Poisoned(_)) => {
-                self.query_overlay.stale = Some("live overlay lock poisoned".into());
+                self.query_overlay.stale = Some(LiveFailure {
+                    reason: "live overlay lock poisoned".into(),
+                    needs_rebuild: false,
+                });
             }
         }
         let overlay = &mut self.query_overlay;
@@ -2234,7 +2286,7 @@ impl LiveSearch {
             }
             Err(std::sync::TryLockError::WouldBlock) => self.status_cache.borrow().clone(),
             Err(std::sync::TryLockError::Poisoned(_)) => {
-                json!({"stale":true,"error":"live overlay lock poisoned"})
+                json!({"stale":true,"error":"live overlay lock poisoned","error_code":"LiveFeedFailed","rebuild_required":false})
             }
         }
     }

@@ -74,6 +74,16 @@ pub trait MetadataBackend: Send + Sync + 'static {
 /// wrapper when it needs additional progress decoration.
 struct KernelBackend;
 
+fn kernel_error(error: Box<dyn std::error::Error + Send + Sync>) -> ServiceError {
+    if let Some(error) = error.downcast_ref::<kite_file_index::NeedsRebuild>() {
+        return ServiceError::new(crate::ErrorKind::NeedsRebuild, error.0.clone());
+    }
+    match error.downcast::<std::io::Error>() {
+        Ok(error) => ServiceError::from(*error),
+        Err(error) => ServiceError::backend(error.to_string()),
+    }
+}
+
 impl MetadataBackend for KernelBackend {
     fn watch_resumable(
         &self,
@@ -85,7 +95,7 @@ impl MetadataBackend for KernelBackend {
         acknowledged: Arc<AtomicU64>,
     ) -> ServiceResult<()> {
         kite_file_index::watch_resumable(checkpoint, feed, cancel, progress, resume, acknowledged)
-            .map_err(|error| ServiceError::backend(error.to_string()))
+            .map_err(kernel_error)
     }
 
     fn capture(
@@ -95,8 +105,8 @@ impl MetadataBackend for KernelBackend {
         cancel: CancelToken,
         progress: &ProgressSink,
     ) -> ServiceResult<BackendCapture> {
-        let manifest = kite_file_index::capture(root, volumes, cancel, progress)
-            .map_err(|error| ServiceError::backend(error.to_string()))?;
+        let manifest =
+            kite_file_index::capture(root, volumes, cancel, progress).map_err(kernel_error)?;
         Ok(BackendCapture {
             capture_root: manifest.root.clone(),
             manifest_path: manifest.root.join("capture.json"),
@@ -111,8 +121,7 @@ impl MetadataBackend for KernelBackend {
         cancel: CancelToken,
         progress: &ProgressSink,
     ) -> ServiceResult<()> {
-        kite_file_index::watch(checkpoint, feed, cancel, progress)
-            .map_err(|error| ServiceError::backend(error.to_string()))
+        kite_file_index::watch(checkpoint, feed, cancel, progress).map_err(kernel_error)
     }
 }
 

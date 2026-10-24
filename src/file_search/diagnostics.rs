@@ -179,6 +179,7 @@ fn phase_name(phase: Phase) -> &'static str {
         Phase::Starting => "starting",
         Phase::Indexing => "indexing",
         Phase::CatchingUp => "catching_up",
+        Phase::Recovering => "recovering",
         Phase::Ready => "ready",
         Phase::NeedsAuthorization => "needs_authorization",
         Phase::NeedsRebuild => "needs_rebuild",

@@ -15,6 +15,7 @@ pub enum ErrorKind {
     Pipe,
     Service,
     Backend,
+    NeedsRebuild,
     Cancelled,
     PathMismatch,
     Internal,
@@ -84,6 +85,7 @@ impl ServiceError {
             "pipe" => ErrorKind::Pipe,
             "service" => ErrorKind::Service,
             "backend" => ErrorKind::Backend,
+            "needs_rebuild" => ErrorKind::NeedsRebuild,
             "cancelled" => ErrorKind::Cancelled,
             "path_mismatch" => ErrorKind::PathMismatch,
             "internal" => ErrorKind::Internal,
@@ -125,6 +127,7 @@ fn format_kind(kind: ErrorKind) -> &'static str {
         ErrorKind::Pipe => "pipe",
         ErrorKind::Service => "service",
         ErrorKind::Backend => "backend",
+        ErrorKind::NeedsRebuild => "needs_rebuild",
         ErrorKind::Cancelled => "cancelled",
         ErrorKind::PathMismatch => "path_mismatch",
         ErrorKind::Internal => "internal",
@@ -138,6 +141,7 @@ impl From<io::Error> for ServiceError {
         let code = error.raw_os_error().map(|value| value as u32);
         let kind = match (error.kind(), code) {
             (io::ErrorKind::PermissionDenied, _) => ErrorKind::AccessDenied,
+            (io::ErrorKind::Interrupted, _) => ErrorKind::Cancelled,
             (io::ErrorKind::BrokenPipe | io::ErrorKind::UnexpectedEof, _)
             | (_, Some(109 | 232 | 233 | 535)) => ErrorKind::Pipe,
             (_, Some(1223 | 995)) => ErrorKind::Cancelled,

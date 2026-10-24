@@ -297,6 +297,7 @@ pub(crate) fn error_response(error: &ServiceError) -> Response {
             crate::ErrorKind::Pipe => "pipe",
             crate::ErrorKind::Service => "service",
             crate::ErrorKind::Backend => "backend",
+            crate::ErrorKind::NeedsRebuild => "needs_rebuild",
             crate::ErrorKind::Cancelled => "cancelled",
             crate::ErrorKind::PathMismatch => "path_mismatch",
             crate::ErrorKind::Internal => "internal",

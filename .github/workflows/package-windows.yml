@@ -209,6 +209,7 @@ jobs:
             $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
             do {
               $state = (Invoke-FileCommand @{ command = 'status' }).state
+              $script:observedFilePhases.Add([string]$state.phase) | Out-Null
               if ($state.phase -eq 'ready') { return $state }
               if ($state.phase -in @('error', 'needs_rebuild', 'needs_authorization', 'stopped')) { throw "File-search failed: $($state | ConvertTo-Json -Compress -Depth 8)" }
               Write-Host "File-search: $($state.phase) $($state.detail)"
@@ -228,6 +229,25 @@ jobs:
             $found = @($response.hits | Where-Object { [string]::Equals($_.path, $Path, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
             if ($found -ne $Expected) { throw "Unexpected query result for $Needle ($Path), expected=$Expected" }
           }
+          function Get-RunnerJournal([string]$Drive) {
+            $PSNativeCommandUseErrorActionPreference = $false
+            $text = (& fsutil.exe usn queryjournal $Drive 2>&1 | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "Cannot query recovery-exercise journal on $Drive : $text" }
+            $fields = @{}
+            foreach ($entry in @(
+              @{ label = 'Usn Journal ID'; key = 'journalId' }
+              @{ label = 'First Usn'; key = 'firstUsn' }
+              @{ label = 'Next Usn'; key = 'nextUsn' }
+              @{ label = 'Maximum Size'; key = 'maximumSize' }
+              @{ label = 'Allocation Delta'; key = 'allocationDelta' }
+            )) {
+              $fieldMatches = [regex]::Matches($text, ('(?im)^[ \t]*' + [regex]::Escape($entry.label) + '[ \t]*:[ \t]*0x([0-9a-f]+)(?:[ \t]+\([ \t]*[0-9.,]+[ \t]+[a-z]+[ \t]*\))?[ \t]*\r?$'))
+              if ($fieldMatches.Count -ne 1) { throw "Cannot parse journal field $($entry.label): $text" }
+              $fields[$entry.key] = [Convert]::ToUInt64($fieldMatches[0].Groups[1].Value, 16)
+            }
+            return $fields
+          }
+          $script:observedFilePhases = [Collections.Generic.HashSet[string]]::new()
           try {
             Start-FileSession
             $initial = Wait-FileReady
@@ -314,6 +334,79 @@ jobs:
               originalBuildCursor = $originalCursor[0].start_usn
               resumedFileVolumeCursor = $loadedCursor[0].next_usn
               checks = @{ realNtfsCatchup = $true; over65536Objects = $true; durableResume = $true; sentinelCreateRenameDelete = $true; feedRotation = $true; feedReclamation = $true }
+            }
+            Stop-FileSession
+            # Expire real retained USN records only on the disposable fixture volume.
+            if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or
+                $fileVolume -eq $env:SystemDrive -or $fileVolume -ne [IO.Path]::GetPathRoot($env:RUNNER_TEMP).TrimEnd('\') -or
+                (Get-Volume -DriveLetter $fileVolume[0]).FileSystemType -ne 'NTFS') {
+              throw 'Retention-loss exercise requires a non-system NTFS runner-temp drive'
+            }
+            $savedApplied = @($resumed.live.resume_cursors | Where-Object volume -eq $fileVolume)
+            if ($savedApplied.Count -ne 1) { throw 'Recovery exercise applied cursor is missing' }
+            $journalBefore = Get-RunnerJournal $fileVolume
+            if ($journalBefore.journalId.ToString() -ne $savedApplied[0].journal_id -or $journalBefore.nextUsn -lt [long]$savedApplied[0].next_usn) { throw 'Recovery exercise journal identity/cursor mismatch' }
+            $originalMaximum = $journalBefore.maximumSize
+            $originalDelta = $journalBefore.allocationDelta
+            $recoveryDeadline = [DateTime]::UtcNow.AddMinutes(4)
+            $bulkPrefix = if ($renamedBulk) { 'bulkB' } else { 'bulkA' }
+            $renameRounds = 0
+            $nativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+            try {
+              $PSNativeCommandUseErrorActionPreference = $false
+              $resize = (& fsutil.exe usn createjournal m=1048576 a=1048576 $fileVolume 2>&1 | Out-String).Trim()
+              if ($LASTEXITCODE -ne 0) { throw "Cannot resize disposable recovery journal: $resize" }
+              do {
+                $journalExpired = Get-RunnerJournal $fileVolume
+                if ($journalExpired.journalId -ne $journalBefore.journalId) { throw 'Recovery exercise changed the journal identity' }
+                if ($journalExpired.maximumSize -ne 1048576 -or $journalExpired.allocationDelta -ne 1048576) { throw 'Recovery exercise journal size was not applied' }
+                if ($journalExpired.firstUsn -gt $journalBefore.nextUsn) { break }
+                if ($renameRounds -lt 8) {
+                  $nextPrefix = 'bulkR' + ($renameRounds % 2)
+                  for ($i = 0; $i -lt 70000; $i++) {
+                    [IO.File]::Move((Join-Path $fileRoot ('{0}_{1}_{2:D6}.txt' -f $bulkPrefix, $token, $i)), (Join-Path $fileRoot ('{0}_{1}_{2:D6}.txt' -f $nextPrefix, $token, $i)))
+                  }
+                  $bulkPrefix = $nextPrefix
+                  $renameRounds++
+                  Write-Host "Retention exercise: $renameRounds real rename rounds on $fileVolume"
+                }
+                Start-Sleep -Seconds 3
+              } while ([DateTime]::UtcNow -lt $recoveryDeadline)
+              if ($journalExpired.firstUsn -le $journalBefore.nextUsn) { throw 'Real journal retention did not advance past the stopped cursor upper bound' }
+            } finally {
+              try {
+                $PSNativeCommandUseErrorActionPreference = $false
+                $restore = (& fsutil.exe usn createjournal "m=$originalMaximum" "a=$originalDelta" $fileVolume 2>&1 | Out-String).Trim()
+                if ($LASTEXITCODE -ne 0) { throw "Cannot restore disposable runner journal configuration: $restore" }
+                $journalRestored = Get-RunnerJournal $fileVolume
+                if ($journalRestored.journalId -ne $journalBefore.journalId -or $journalRestored.maximumSize -ne $originalMaximum -or $journalRestored.allocationDelta -ne $originalDelta) { throw 'Runner journal restoration verification failed' }
+              } finally {
+                $PSNativeCommandUseErrorActionPreference = $nativeErrorPreference
+              }
+            }
+            $script:observedFilePhases.Clear()
+            Start-FileSession
+            $recovered = Wait-FileReady
+            if (-not $script:observedFilePhases.Contains('recovering') -or $recovered.automatic_rebuild -ne $true -or -not $recovered.recovery_reason -or -not $recovered.generation_root -or $recovered.generation_root -eq $resumed.generation_root) { throw 'Retention loss did not automatically rebuild and publish a new ready generation' }
+            Assert-FileHit $oldStem $oldPath $false
+            Assert-FileHit $deletedStem $deletedPath $false
+            Assert-FileHit $newStem $newPath
+            Assert-FileHit $addedStem $addedPath
+            $fileSearchEvidence.autoRecovery = @{
+              checks = @{ sameJournalRetentionLoss = $true; observedRecovering = $true; readyWithoutManualRebuild = $true; newGenerationPublished = $true; sentinelsCorrect = $true; journalConfigurationRestored = $true }
+              volume = $fileVolume; journalId = $journalBefore.journalId.ToString()
+              journalIdAfterRetentionLoss = $journalExpired.journalId.ToString()
+              journalIdAfterRestore = $journalRestored.journalId.ToString()
+              savedAppliedCursor = [string]$savedApplied[0].next_usn
+              stoppedCursorUpperBound = $journalBefore.nextUsn.ToString()
+              firstUsnAfterRetentionLoss = $journalExpired.firstUsn.ToString()
+              originalMaximumSize = $originalMaximum; originalAllocationDelta = $originalDelta
+              restoredMaximumSize = $journalRestored.maximumSize; restoredAllocationDelta = $journalRestored.allocationDelta
+              realRenameRounds = $renameRounds
+              automaticRebuild = $recovered.automatic_rebuild
+              recoveryReason = $recovered.recovery_reason
+              observedPhases = @($script:observedFilePhases)
+              generationBefore = $resumed.generation_root; generationAfter = $recovered.generation_root
             }
             Stop-FileSession
           } finally {

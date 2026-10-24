@@ -36,7 +36,7 @@ pub const SERVICE_NAME: &str = "KiteFileIndex";
 pub const SERVICE_DISPLAY_NAME: &str = "Kite File Index Metadata Service";
 /// Named-pipe protocol version.
 /// Version 3 adds durable cursor recovery and acknowledged feed segments.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 /// Fixed endpoint across protocol revisions, so an outdated service can answer
 /// the handshake with a version error instead of a pipe connection timeout.
 pub const PIPE_NAME: &str = r"\\.\pipe\Kite\FileIndex\v1";

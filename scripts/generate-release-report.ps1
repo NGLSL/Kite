@@ -104,6 +104,23 @@ foreach ($cursor in $fileSearch.cursorsBeforeRestart) {
         throw "Published recovery evidence regressed or changed journal identity."
     }
 }
+$autoRecovery = $fileSearch.autoRecovery
+foreach ($check in @("sameJournalRetentionLoss", "observedRecovering", "readyWithoutManualRebuild", "newGenerationPublished", "sentinelsCorrect", "journalConfigurationRestored")) {
+    if ($autoRecovery.checks.$check -isnot [bool] -or $autoRecovery.checks.$check -ne $true) {
+        throw "Required automatic file-search recovery did not pass: $check"
+    }
+}
+if (-not $autoRecovery.volume -or -not $autoRecovery.journalId -or
+    $autoRecovery.journalId -ne $autoRecovery.journalIdAfterRetentionLoss -or $autoRecovery.journalId -ne $autoRecovery.journalIdAfterRestore -or
+    [long]$autoRecovery.stoppedCursorUpperBound -lt [long]$autoRecovery.savedAppliedCursor -or
+    [long]$autoRecovery.firstUsnAfterRetentionLoss -le [long]$autoRecovery.stoppedCursorUpperBound -or
+    [long]$autoRecovery.originalMaximumSize -le 0 -or [long]$autoRecovery.originalAllocationDelta -le 0 -or
+    $autoRecovery.originalMaximumSize -ne $autoRecovery.restoredMaximumSize -or $autoRecovery.originalAllocationDelta -ne $autoRecovery.restoredAllocationDelta -or
+    $autoRecovery.automaticRebuild -isnot [bool] -or $autoRecovery.automaticRebuild -ne $true -or -not $autoRecovery.recoveryReason -or
+    $autoRecovery.observedPhases -notcontains "recovering" -or -not $autoRecovery.generationBefore -or
+    -not $autoRecovery.generationAfter -or $autoRecovery.generationBefore -eq $autoRecovery.generationAfter) {
+    throw "Automatic recovery must prove real same-journal retention loss, restored runner configuration and a new ready generation."
+}
 $checksumPath = "artifacts/kite-setup.exe.sha256"
 $checksum = (Get-Content -Raw -LiteralPath $checksumPath).Trim()
 if ($checksum -notmatch ('(?i)^' + [regex]::Escape($sha256) + '\s+\*?kite-setup\.exe$')) {
@@ -125,6 +142,7 @@ $automatic = @(
     "- 独立 Windows runner 安装验收：全新安装、同版本覆盖、卸载、负载哈希、注册表、用户数据保留、按需读取组件注册／更新／卸载"
     "- 真实 NTFS 补读：停机期间创建 $($fileSearch.createdSurvivingFiles) 个存活文件，查询变化层实际 $($fileSearch.observedOverlayObjects) 个对象；新增／改名／删除哨兵查询通过"
     "- 分段与恢复：实际生成 $($fileSearch.observedFeedSegments) 个 32 MiB feed 段，确认首段已回收；同一 generation 重启从已提交游标续读"
+    "- 自动恢复：一次性 runner 的 $($autoRecovery.volume) 卷在相同 journal 身份下实际丢失旧游标保留范围；恢复原 journal 配置后，普通启动观测到 recovering，自动建成新 generation 并通过哨兵查询，全程没有发送手动重建命令"
     "- 产物核对：发布 job 重新计算安装器大小和 SHA-256，与验收报告及校验和文件一致后才上传"
     "- 验收报告：[installer-validation.json](https://github.com/$Repository/releases/download/$Tag/installer-validation.json)"
     "- 验证边界：同版本覆盖不包含旧版本迁移；未验证人工 UAC 拒绝、桌面交互、强制崩溃或磁盘满恢复"

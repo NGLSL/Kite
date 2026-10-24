@@ -126,6 +126,7 @@ pub(super) fn settings_card<'a>(state: &'a State, tokens: ThemeTokens) -> Elemen
             crate::file_search::Phase::Starting
                 | crate::file_search::Phase::Indexing
                 | crate::file_search::Phase::CatchingUp
+                | crate::file_search::Phase::Recovering
         );
         let actions = if building {
             row![
@@ -152,15 +153,20 @@ pub(super) fn settings_card<'a>(state: &'a State, tokens: ThemeTokens) -> Elemen
                     tokens,
                 )]
                 .spacing(6.0),
-                crate::file_search::Phase::NeedsRebuild | crate::file_search::Phase::Ready => {
-                    row![ghost_button(
-                        "重建索引".into(),
-                        Message::FileSearchRebuild,
-                        false,
-                        tokens,
-                    )]
-                    .spacing(6.0)
-                }
+                crate::file_search::Phase::NeedsRebuild => row![ghost_button(
+                    "重试恢复".into(),
+                    Message::FileSearchRebuild,
+                    false,
+                    tokens,
+                )]
+                .spacing(6.0),
+                crate::file_search::Phase::Ready => row![ghost_button(
+                    "重建索引".into(),
+                    Message::FileSearchRebuild,
+                    false,
+                    tokens,
+                )]
+                .spacing(6.0),
                 crate::file_search::Phase::Stopped => row![ghost_button(
                     "重试连接".into(),
                     Message::FileSearchRetry,
@@ -170,7 +176,8 @@ pub(super) fn settings_card<'a>(state: &'a State, tokens: ThemeTokens) -> Elemen
                 .spacing(6.0),
                 crate::file_search::Phase::Starting
                 | crate::file_search::Phase::Indexing
-                | crate::file_search::Phase::CatchingUp => row![].spacing(6.0),
+                | crate::file_search::Phase::CatchingUp
+                | crate::file_search::Phase::Recovering => row![].spacing(6.0),
             };
             row![
                 phase_actions,
@@ -254,9 +261,10 @@ pub(super) fn status_label(snapshot: &crate::file_search::Snapshot, enabled: boo
         crate::file_search::Phase::Starting => "正在启动".into(),
         crate::file_search::Phase::Indexing => "正在建立索引".into(),
         crate::file_search::Phase::CatchingUp => "正在追平变化".into(),
+        crate::file_search::Phase::Recovering => "正在恢复".into(),
         crate::file_search::Phase::Ready => "已就绪".into(),
         crate::file_search::Phase::NeedsAuthorization => "需要授权".into(),
-        crate::file_search::Phase::NeedsRebuild => "需要重建".into(),
+        crate::file_search::Phase::NeedsRebuild => "恢复未完成".into(),
         crate::file_search::Phase::Error => "发生错误".into(),
     }
 }

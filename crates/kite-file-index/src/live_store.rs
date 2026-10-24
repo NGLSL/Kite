@@ -61,7 +61,9 @@ impl Store {
             .optional()?;
         if let Some(stored_binding) = stored_binding {
             if serde_json::from_str::<Value>(&stored_binding)? != *binding {
-                return Err(invalid("live overlay snapshot binding mismatch").into());
+                return Err(
+                    crate::NeedsRebuild("live overlay snapshot binding mismatch".into()).into(),
+                );
             }
             let stored_bytes: String = conn.query_row(
                 "SELECT value FROM metadata WHERE key = 'shadow_bytes'",
