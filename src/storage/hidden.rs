@@ -21,6 +21,40 @@ pub struct HiddenItem {
 }
 
 impl HistoryDb {
+    /// Clear a missing application's preferences and registration atomically.
+    /// Keep the existing hidden identity so stale shortcuts/snapshots cannot
+    /// bring it back; settings can restore it after the app is reinstalled.
+    pub fn clear_app_record(&mut self, item: &AppItem, now: i64) -> rusqlite::Result<()> {
+        let tx = self.raw_conn_mut().transaction()?;
+        tx.execute(
+            "INSERT INTO hidden_items (item_id, display_name, target, args, hidden_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(item_id) DO UPDATE SET
+               display_name = excluded.display_name,
+               target = excluded.target,
+               args = excluded.args,
+               hidden_at = excluded.hidden_at",
+            params![item.id, item.display_name, item.target, item.args, now],
+        )?;
+        for table in [
+            "usage_history",
+            "query_history",
+            "pinned",
+            "demoted",
+            "manual_apps",
+        ] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE item_id = ?1"),
+                params![item.id],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM user_aliases WHERE target_id = ?1",
+            params![item.id],
+        )?;
+        tx.commit()
+    }
+
     /// Hide one stable application launch identity while retaining management
     /// metadata for the settings view.
     pub fn hide_item(&mut self, item: &AppItem, now: i64) -> rusqlite::Result<()> {

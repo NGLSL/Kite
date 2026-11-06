@@ -11,6 +11,10 @@ use std::time::{Duration, Instant};
 #[path = "mft_replay_fix.rs"]
 mod replay_fix;
 
+pub(super) fn resident_record_names(raw: &[u8], id: u64, is_dir: bool) -> Result<Vec<LinkName>> {
+    replay_fix::resident_names(raw, id, is_dir)
+}
+
 fn save_json(path: &Path, value: &Value) -> Result<()> {
     let mut file = fs::File::create(path)?;
     {

@@ -386,6 +386,8 @@ enum MenuAction {
     SetAlias,
     /// 隐藏当前应用启动身份。
     HideEntry,
+    /// 清理目标已不存在的应用记录，并屏蔽残留扫描入口。
+    ClearRecord,
     /// 清除当前 Query 的配对学习。
     ForgetQuery,
     /// 将可登记路径送入设置页表单。

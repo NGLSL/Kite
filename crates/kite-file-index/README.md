@@ -37,6 +37,8 @@ let result = search.query(&query)?;
 
 每轮同步冻结全卷读取终点，轮流读取 64 KiB 页。pending 身份保存在临时 SQLite 中，缓存上限 4 MiB，跨页仍按身份合并，完整一轮统一刷新。输出帧控制在 128 项／约 1 MiB；消费方以完整逻辑轮次事务提交，保留目录变换与当前路径的同轮语义。对象总量增长使用磁盘空间，65,536 个存活对象和 64 MiB 不再是变化状态总容量限制。暂时打不开、权限失败或 delete-pending 仍不等于身份已经消失。
 
+`OpenFileById` 对仍在使用的 TxF 内部文件可能返回 Win32 87。确认身份仍存活后，仅对该错误的非保留文件复用严格 resident FILE_NAME 解析：要求完整同 ordinal／sequence／type 的 base record、无 ATTRIBUTE_LIST、名称计数完整；按经过卷与身份校验的父目录生成全部路径，并再次读取确认名称集合未变化。无法证明完整性时继续报错，保留重试语义。
+
 身份回收使用 `identity_only: true` 记录，所有 paths 必须为空；消费方只 shadow 该身份的基库条目并移除同 key 状态，不递归删除目录后代、不改 prefix。真正删除的子项分别由其 USN 身份记录处理，存活或移出的后代保留到最终当前路径刷新。补读和较长的刷新期间持续输出心跳，最终发布前重新校验全卷 journal identity 与 retention。
 
 持久变化对象、shadow、prefix 与全卷恢复 cursors 在 `live-state.sqlite` 的同一事务提交。重启恢复最近完整状态，只重读尚未提交的部分。原基库不可变，查询直接合并基库与磁盘变化表；按身份 upsert／删除、有限缓存、WAL checkpoint 和空闲页复用控制运行开销，暂不全量重写基库。

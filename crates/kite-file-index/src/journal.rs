@@ -255,7 +255,7 @@ struct Changed {
 // GET_NTFS_FILE_RECORD returns the requested in-use ordinal, or the nearest
 // preceding one. A different ordinal/sequence proves the original FRN is gone;
 // an OpenFileById failure alone (including delete-pending) does not.
-fn disappeared(volume: &Volume, id: u64) -> Result<bool> {
+fn read_record(volume: &Volume, id: u64) -> Result<Vec<u8>> {
     // NTFS_FILE_RECORD_OUTPUT_BUFFER includes ABI tail padding. Match the
     // existing collector's +16 allocation; only the 12-byte header is payload.
     let mut record = vec![0; volume.record_size + 16];
@@ -271,6 +271,13 @@ fn disappeared(volume: &Volume, id: u64) -> Result<bool> {
     if ordinal > requested || u32_at(&record, 56) as u64 != ordinal {
         return Err(invalid("invalid journal refresh MFT record ordinal").into());
     }
+    record.truncate(n);
+    Ok(record)
+}
+fn disappeared(volume: &Volume, id: u64) -> Result<bool> {
+    let record = read_record(volume, id)?;
+    let ordinal = u64_at(&record, 0) & 0x0000_ffff_ffff_ffff;
+    let requested = id & 0x0000_ffff_ffff_ffff;
     let sequence = u16::from_le_bytes([record[28], record[29]]) as u64;
     let in_use = u16::from_le_bytes([record[34], record[35]]) & 1 != 0;
     Ok(ordinal != requested || sequence != id >> 48 || !in_use)
@@ -301,6 +308,42 @@ fn exact_id(volume: &Volume, frn: u64) -> Result<(OwnedHandle, [u32; 13])> {
     }
     Ok((handle, information))
 }
+fn link_paths(volume: &Volume, links: &[LinkName]) -> Result<Vec<Vec<u16>>> {
+    let mut paths = Vec::with_capacity(links.len());
+    for link in links {
+        let (parent, pi) = exact_id(volume, link.parent)?;
+        if pi[0] & 16 == 0 {
+            return Err(invalid("hardlink parent is not a directory").into());
+        }
+        let mut path = final_path(&parent, &volume.root)?;
+        if path.last() != Some(&(b'\\' as u16)) {
+            path.push(b'\\' as u16);
+        }
+        path.extend_from_slice(&link.name);
+        if paths.contains(&path) {
+            return Err(invalid("duplicate refreshed hardlink path").into());
+        }
+        paths.push(path);
+    }
+    Ok(paths)
+}
+fn resident_file_paths(volume: &Volume, id: u64) -> Result<Vec<Vec<u16>>> {
+    // TxF internal files can have a live, named base record while OpenFileById
+    // returns ERROR_INVALID_PARAMETER. Reuse the collector's complete-name
+    // gate: exact ordinal/sequence/type, no ATTRIBUTE_LIST, exhaustive names.
+    let links = full::resident_record_names(&read_record(volume, id)?, id, false)?;
+    let paths = link_paths(volume, &links)?;
+    let after = full::resident_record_names(&read_record(volume, id)?, id, false)?;
+    if after.len() != links.len()
+        || after
+            .iter()
+            .zip(&links)
+            .any(|(a, b)| a.parent != b.parent || a.name != b.name)
+    {
+        return Err(invalid("resident name set changed while refreshing").into());
+    }
+    Ok(paths)
+}
 fn paths(volume: &Volume, id: u64, change: &Changed) -> Result<Vec<Vec<u16>>> {
     let (handle, information) = match exact_id(volume, id) {
         Ok(v) => v,
@@ -310,6 +353,9 @@ fn paths(volume: &Volume, id: u64, change: &Changed) -> Result<Vec<Vec<u16>>> {
                 .and_then(|e| e.raw_os_error());
             if matches!(code, Some(2 | 3 | 5 | 87 | 303 | 1168)) && disappeared(volume, id)? {
                 return Ok(Vec::new());
+            }
+            if code == Some(87) && !change.is_dir && !reserved_metadata_file(id, false) {
+                return resident_file_paths(volume, id);
             }
             return Err(error);
         }
@@ -329,22 +375,7 @@ fn paths(volume: &Volume, id: u64, change: &Changed) -> Result<Vec<Vec<u16>>> {
         return Ok(vec![path]);
     }
     let (_, links) = native_links(&handle, information[10])?;
-    let mut paths = Vec::with_capacity(links.len());
-    for link in links {
-        let (parent, pi) = exact_id(volume, link.parent)?;
-        if pi[0] & 16 == 0 {
-            return Err(invalid("hardlink parent is not a directory").into());
-        }
-        let mut path = final_path(&parent, &volume.root)?;
-        if path.last() != Some(&(b'\\' as u16)) {
-            path.push(b'\\' as u16);
-        }
-        path.extend(link.name);
-        if paths.contains(&path) {
-            return Err(invalid("duplicate refreshed hardlink path").into());
-        }
-        paths.push(path);
-    }
+    let paths = link_paths(volume, &links)?;
     // Reject a link-set race instead of treating a partial set as current.
     let after = info(&handle)?;
     if after[10] != information[10] || info_frn(&after) != id || after[7] != volume.serial {

@@ -36,6 +36,9 @@ pub(super) fn menu_entries(state: &State, item: &AppItem) -> Vec<(String, MenuAc
     if is_app_entry(item) {
         entries.push(("设置 Alias".to_string(), MenuAction::SetAlias));
         entries.push(("隐藏此入口".to_string(), MenuAction::HideEntry));
+        if has_missing_app_target(item) {
+            entries.push(("清除记录".to_string(), MenuAction::ClearRecord));
+        }
     }
     // Once the panel is open, use the query captured with its target.  The
     // input may change while a mouse or keyboard action is pending, but the
@@ -62,6 +65,11 @@ pub(super) fn is_app_entry(item: &AppItem) -> bool {
         && crate::model::is_hideable_application_source(&item.source)
 }
 
+fn has_missing_app_target(item: &AppItem) -> bool {
+    let path = std::path::Path::new(&item.target);
+    is_app_entry(item) && path.is_absolute() && matches!(path.try_exists(), Ok(false))
+}
+
 /// Pin/Demote keep the original panel permissions. Alias/Hide use the
 /// narrower application-source check above, while file, web and plugin
 /// results may still carry their existing preference actions.
@@ -85,7 +93,10 @@ fn resolve_from_index(state: &State, captured: &AppItem) -> Option<AppItem> {
 }
 
 fn needs_index_resolution(item: &AppItem, action: MenuAction) -> bool {
-    if matches!(action, MenuAction::SetAlias | MenuAction::HideEntry) {
+    if matches!(
+        action,
+        MenuAction::SetAlias | MenuAction::HideEntry | MenuAction::ClearRecord
+    ) {
         return true;
     }
     matches!(action, MenuAction::TogglePin | MenuAction::Demote | MenuAction::Undemote)
@@ -249,15 +260,31 @@ pub(super) fn menu_action(state: &mut State, item: AppItem, action: MenuAction) 
             clamp_menu_height(state, 145.0);
             return iced::widget::operation::focus(search_view::action_alias_input_id());
         }
-        MenuAction::HideEntry => {
+        MenuAction::HideEntry | MenuAction::ClearRecord => {
             if !is_app_entry(&item) {
                 return flash(state, "当前结果不支持隐藏");
             }
+            let clear_record = action == MenuAction::ClearRecord;
+            if clear_record && !has_missing_app_target(&item) {
+                return flash(state, "应用目标当前可用或无法确认已删除，请重新检查");
+            }
             let Some(db) = state.history.as_mut() else {
-                return flash(state, "历史库不可用，无法隐藏入口");
+                return flash(state, "历史库不可用，无法保存记录");
             };
-            match db.hide_item(&item, storage::now_ts()) {
+            let result = if clear_record {
+                db.clear_app_record(&item, storage::now_ts())
+            } else {
+                db.hide_item(&item, storage::now_ts())
+            };
+            match result {
                 Ok(()) => {
+                    if clear_record {
+                        state.pinned.remove(&item.id);
+                        load_aliases(state);
+                        load_manual_apps(state);
+                        sync_manual_apps_to_scan_options(state);
+                        state.base_hit_cache.invalidate();
+                    }
                     load_hidden(state);
                     let hidden_ids = state.hidden_ids.clone();
                     state.results.retain(|result| {
@@ -273,9 +300,16 @@ pub(super) fn menu_action(state: &mut State, item: AppItem, action: MenuAction) 
                     }
                     state.invalidate_prefs_cache();
                     state.refresh_results();
-                    return flash(state, "已隐藏此入口");
+                    return flash(
+                        state,
+                        if clear_record {
+                            "已清除应用记录"
+                        } else {
+                            "已隐藏此入口"
+                        },
+                    );
                 }
-                Err(error) => return flash(state, &format!("隐藏失败：{error}")),
+                Err(error) => return flash(state, &format!("保存记录失败：{error}")),
             }
         }
         MenuAction::ForgetQuery => {
